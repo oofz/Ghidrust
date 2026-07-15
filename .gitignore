@@ -1,0 +1,24 @@
+# Build
+/target
+**/target
+*.pdb
+
+# IDE / local tooling
+.idea/
+.vscode/
+.grok/
+terminals/
+mcps/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local RE / bench artifacts
+*.gdecomp
+*_metrics.log
+re_metrics.log
+
+# Local development notes (parity tracking, roadmaps, private benches)
+# Not published — research/metrics stay in docs/
+dev/

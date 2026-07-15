@@ -1,0 +1,17 @@
+[package]
+name = "ghidrust-decomp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hand-rolled RE decompile: CPU structure + GPU-resident multi-pass decompile"
+
+[features]
+default = ["gpu"]
+gpu = ["wgpu", "pollster", "bytemuck"]
+
+[dependencies]
+ghidrust-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+wgpu = { version = "24", optional = true, default-features = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }

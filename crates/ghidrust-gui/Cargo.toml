@@ -1,0 +1,16 @@
+[package]
+name = "ghidrust-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ghidrust egui CodeBrowser-lite UI"
+
+[[bin]]
+name = "ghidrust-gui"
+path = "src/main.rs"
+
+[dependencies]
+ghidrust-core = { workspace = true, features = ["gpu"] }
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"
+rfd = "0.15"

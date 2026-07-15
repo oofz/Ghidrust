@@ -1,0 +1,9 @@
+image_base=0x140000000
+entry=0x140001000
+text_va=0x140001000
+rdata_va=0x140002000
+td_va=0x140002000
+col_va=0x140002050
+vtable_va=0x140002070
+class=Widget
+code_hex=554889e531c05dc3

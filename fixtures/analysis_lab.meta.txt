@@ -1,0 +1,15 @@
+image_base=0x140000000
+entry=0x140001000
+func_stack=0x140001030
+func_nr=0x140001050
+func_a=0x140001070
+func_b=0x140001090
+aif_orphan=0x140001018
+png_va=0x140002050
+addr_table=0x140002070
+rsrc_va=0x140002090
+pdb_va=0x1400020a8
+api_exit=0x140002000
+api_printf=0x140002010
+api_cookie=0x140002018
+mangled=0x140002030

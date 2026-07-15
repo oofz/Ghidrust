@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ghidrust-core",
+    "crates/ghidrust-decomp",
+    "crates/ghidrust-cli",
+    "crates/ghidrust-gui",
+]
+default-members = ["crates/ghidrust-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/example/ghidrust"
+
+[workspace.dependencies]
+ghidrust-core = { path = "crates/ghidrust-core" }
+ghidrust-decomp = { path = "crates/ghidrust-decomp" }

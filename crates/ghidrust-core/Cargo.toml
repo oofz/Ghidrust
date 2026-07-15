@@ -1,0 +1,22 @@
+[package]
+name = "ghidrust-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hand-rolled RE analysis core: program model, PE/ELF, x86-64, RTTI"
+
+[features]
+default = []
+# Experimental wgpu compute for bulk printable-mark kernel (optional adapter).
+gpu = ["wgpu", "pollster", "bytemuck"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"
+# Fast analysis persistence (UI open) — binary vs multi-100MB pretty JSON
+bincode = "1"
+# Optional GPU bulk path — enabled with `--features gpu`
+wgpu = { version = "24", optional = true, default-features = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
