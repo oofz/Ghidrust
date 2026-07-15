@@ -109,7 +109,86 @@ Fixtures live under [`fixtures/`](fixtures/) (`tiny_x64.pe`, `analysis_lab.pe`, 
 
 ---
 
-## CLI reference
+## Using the three surfaces
+
+Ghidrust exposes the **same analysis core** three ways. Pick one (or mix them):
+
+| Surface | Best for | Entry point |
+|---------|----------|-------------|
+| **CLI** | Scripts, CI, one-shot RE, benches | `ghidrust …` |
+| **GUI** | Interactive CodeBrowser-style work | `ghidrust-gui` |
+| **MCP** | AI agents / IDEs that speak Model Context Protocol | `ghidrust mcp` (stdio) |
+
+Build both binaries first (`cargo build --workspace --release`), then use the sections below.
+
+---
+
+## CLI — full usage
+
+The CLI is the `ghidrust` binary from `ghidrust-cli`. Prefer **absolute paths** to binaries and project dirs when scripting.
+
+```bash
+# After release build
+./target/release/ghidrust help
+
+# Windows
+.\target\release\ghidrust.exe help
+```
+
+### Everyday commands
+
+```bash
+# Map a binary
+ghidrust load /path/to/app.exe --json
+
+# Listing
+ghidrust disasm /path/to/app.exe --count 32
+ghidrust disasm /path/to/app.exe --addr 0x140001000 --count 64
+
+# List Auto Analysis names (Ghidra-compatible labels)
+ghidrust analyzers
+
+# Run analyzers (comma list or repeatable --analyzer)
+ghidrust analyze /path/to/app.exe --analyzers "Function Start Search,ASCII Strings" --json
+ghidrust analyze /path/to/app.exe --analyzer "Stack" --analyzer "Function ID" --gpu --json
+
+# CPU decompile (pseudo-C)
+ghidrust decompile /path/to/app.exe
+ghidrust decompile /path/to/app.exe --addr 0x140001000
+
+# Experimental GPU decompile → greppable dump
+ghidrust gpu-decompile /path/to/app.exe --out entry.gdecomp --metrics metrics.log --json
+```
+
+**`--gpu` on `analyze`** turns on GPU bulk strings (when available) and per-analyzer GPU seed enrichment. It is **not** the same as `gpu-decompile` (full VRAM multipass decompile).
+
+### Durable projects
+
+```bash
+ghidrust project create ./MyProject --name Case1
+ghidrust project import ./MyProject /path/to/app.exe
+ghidrust project list ./MyProject
+ghidrust project analyze ./MyProject \
+  --analyzer "Function Start Search" \
+  --analyzer "ASCII Strings" \
+  --gpu
+ghidrust project export ./MyProject
+```
+
+Layout on disk:
+
+```
+MyProject/
+  ghidrust.project.json
+  imports/                 # copied binaries
+  results/<file_id>/
+    analysis.bin           # primary (fast bincode)
+    summary.json
+    analysis.json
+  exports/
+```
+
+### Command reference
 
 | Command | What it does |
 |---------|----------------|
@@ -126,38 +205,115 @@ Fixtures live under [`fixtures/`](fixtures/) (`tiny_x64.pe`, `analysis_lab.pe`, 
 | `ghidrust analyzer-bench-matrix` | Print GPU strategy class per analyzer |
 | `ghidrust rtti-gpu-bench <path> [--out FILE]` | CPU RTTI vs GPU `rtti_scan` |
 | `ghidrust project create\|import\|list\|analyze\|export …` | Durable projects |
-| `ghidrust mcp` | Stdio MCP tools for agents |
+| `ghidrust mcp` | Stdio MCP server for agents |
 
-### Project workflow
+Recommended early analyzer order: **Function Start Search** → address tables → conventions/stack → strings/RTTI.
+
+---
+
+## GUI — full usage
 
 ```bash
-./target/release/ghidrust project create ./MyProject --name Case1
-./target/release/ghidrust project import ./MyProject ./samples/app.exe
-./target/release/ghidrust project list ./MyProject
-./target/release/ghidrust project analyze ./MyProject --analyzer "Function Start Search" --analyzer "ASCII Strings" --gpu
-./target/release/ghidrust project export ./MyProject
+cargo run -p ghidrust-gui --release
+# or
+./target/release/ghidrust-gui
+# Windows: .\target\release\ghidrust-gui.exe
 ```
 
-On-disk layout:
+Typical session:
 
+1. **Project picker** — open/create a project folder, pick a recent one, or continue without a project.  
+2. **Browse… / Import** a PE or ELF into the project tree.  
+3. **Double-click** a file to load listing / saved analysis into Overview.  
+4. **Analyze…** — check analyzers (Defaults / All / None), optionally enable **GPU (strings bulk + per-analyzer seed kernels)**, then **Run Analysis**.  
+5. Results persist under `results/<id>/` (`analysis.bin` for fast reopen, plus `summary.json`).
+
+The GUI is for humans. Agents should use the **CLI** or **MCP**, not drive the UI.
+
+---
+
+## MCP — setup in AI tools
+
+`ghidrust mcp` is a **stdio** MCP server (JSON-RPC). Your AI client starts the binary and talks over stdin/stdout — there is no separate HTTP port.
+
+### 1. Build the CLI once
+
+```bash
+cargo build -p ghidrust-cli --release
 ```
-MyProject/
-  ghidrust.project.json
-  imports/                 # copied binaries
-  results/<file_id>/
-    analysis.bin           # primary (fast bincode)
-    summary.json
-    analysis.json
-  exports/
+
+Note the absolute path to the binary, e.g. `F:\Repos\Ghidrust\target\release\ghidrust.exe` on Windows or `/home/you/Ghidrust/target/release/ghidrust` on Linux/macOS.
+
+### 2. Register it in your client
+
+**Cursor** — project or user MCP config (e.g. `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ghidrust": {
+      "command": "F:/Repos/Ghidrust/target/release/ghidrust.exe",
+      "args": ["mcp"]
+    }
+  }
+}
 ```
 
-### GUI workflow
+**Claude Desktop** — in `claude_desktop_config.json`:
 
-1. Open/create a project (folder with `ghidrust.project.json`), or continue without one.  
-2. **Browse…** / **Import** a PE or ELF.  
-3. Double-click a file in the Project Tree.  
-4. **Analyze…** → choose analyzers (optional GPU bulk for strings).  
-5. Results save under `results/<id>/` for fast reopen.
+```json
+{
+  "mcpServers": {
+    "ghidrust": {
+      "command": "F:/Repos/Ghidrust/target/release/ghidrust.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Other MCP clients** — same pattern: command = absolute path to `ghidrust` / `ghidrust.exe`, args = `["mcp"]`. Restart the client after editing config.
+
+On Linux/macOS you can use a shell wrapper if needed:
+
+```json
+{
+  "mcpServers": {
+    "ghidrust": {
+      "command": "/home/you/Ghidrust/target/release/ghidrust",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### 3. Tools the server exposes
+
+| Tool | Args | Purpose |
+|------|------|---------|
+| `load` | `path` | Load PE/ELF, return map / sections |
+| `disassemble` | `path`, optional `addr`, `count` | x86-64 listing |
+| `rtti` | `path` | Recover RTTI class names / vtables |
+| `list_analyzers` | — | Auto Analysis option names |
+| `analyze` | `path`, optional `analyzers[]`, optional `gpu` | Run analyzers (+ GPU enrich if `gpu: true`) |
+| `list_gpu_strategies` | — | Per-analyzer GPU strategy matrix |
+| `gpu_decompile` | `path`, optional `out` | GPU-resident multipass decompile |
+| `rtti_gpu_bench` | `path` | CPU vs GPU RTTI with PCIe/device split |
+
+Example agent-facing call shape (conceptual): `analyze` with `{ "path": "…/app.exe", "analyzers": ["ASCII Strings"], "gpu": true }`.
+
+### 4. Optional: agent skill
+
+For tools that load skill files (Cursor, Grok, etc.), also install [skill/SKILL.md](skill/SKILL.md) so the model knows *when* to call CLI vs MCP. See [skill/README.md](skill/README.md).
+
+### 5. Smoke-test without an IDE
+
+```bash
+# Manual stdio check: start the server, then send JSON-RPC lines from your client.
+./target/release/ghidrust mcp
+```
+
+You should not need to type JSON by hand day-to-day — the IDE/agent does that once the server is registered.
 
 ---
 
@@ -184,20 +340,6 @@ MyProject/
 | `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` |
 | `ghidrust-gui` | CodeBrowser-style UI |
 
-Recommended early analyzer order: **Function Start Search** → address tables → conventions/stack → strings/RTTI (`ghidrust analyzers` for the full list).
-
----
-
-## MCP and agent skill
-
-```bash
-./target/release/ghidrust mcp
-```
-
-JSON-RPC over stdio: `load`, `disassemble`, `rtti`, `list_analyzers`, `analyze`.
-
-Optional agent skill (Cursor, Grok, and other skill-aware tools): [skill/SKILL.md](skill/SKILL.md) — install notes in [skill/README.md](skill/README.md).
-
 ---
 
 ## Docs
@@ -209,6 +351,7 @@ Optional agent skill (Cursor, Grok, and other skill-aware tools): [skill/SKILL.m
 | [docs/GPU_ANALYZER_MATRIX.md](docs/GPU_ANALYZER_MATRIX.md) | Per-analyzer GPU strategy + bench CLI |
 | [docs/PARALLEL_RE_RESEARCH.md](docs/PARALLEL_RE_RESEARCH.md) | CPU pool vs GPU bulk RE |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Dependency policy |
+| [skill/README.md](skill/README.md) | Agent skill install |
 
 ---
 

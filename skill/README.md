@@ -26,7 +26,7 @@ cargo run -p ghidrust-gui --release
 
 Windows: `.\target\release\ghidrust.exe` / `.\target\release\ghidrust-gui.exe`.
 
-MCP for agents:
+MCP for agents (register in Cursor / Claude Desktop / other MCP clients — see root README):
 
 ```bash
 ./target/release/ghidrust mcp
