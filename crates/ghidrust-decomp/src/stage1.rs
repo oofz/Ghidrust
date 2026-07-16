@@ -832,19 +832,23 @@ mod tests {
         use crate::structure_hints_from;
         use ghidrust_core::{fixture_path, load_path};
 
-        // Load lab fixture and run analyzers so Program.analysis.switches
-        // is populated; then decompile the function containing the
-        // simulated switch entry and confirm structure_hints_from picks it
-        // up (regardless of whether the CFG actually contains BranchInd —
-        // this asserts the plumbing).
+        // Load lab fixture and run the switch analyzer explicitly so
+        // Program.analysis.switches is populated; then confirm
+        // structure_hints_from lifts it into StructureHints. This
+        // asserts the Program→structurer plumbing regardless of whether
+        // any particular decompile region actually contains a BranchInd.
         let mut prog = load_path(fixture_path("analysis_lab.pe")).unwrap();
-        let _ = ghidrust_core::run_analyzers(&mut prog, &[]);
+        let _ = ghidrust_core::run_analyzers(&mut prog, &["Decompiler Switch Analysis"]);
         let hints = structure_hints_from(&prog);
         assert!(
             !hints.switches.is_empty(),
             "expected switch analyzer to populate hints — got {} switches",
             hints.switches.len()
         );
+        // Each hint carries the analyzer's jump_va + case list verbatim.
+        for h in &hints.switches {
+            assert!(!h.cases.is_empty(), "hint {:x} has no cases", h.jump_va);
+        }
     }
 
     #[test]
