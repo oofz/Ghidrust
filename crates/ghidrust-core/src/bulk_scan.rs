@@ -255,7 +255,31 @@ pub fn entropy_windows_parallel(hay: &[u8], window: usize) -> (Vec<f64>, BulkBac
 /// Work-item width for the experimental compute schedule (mirrors GPU tile size).
 pub const GPU_WORKGROUP_BYTES: usize = 256;
 
+/// WebGPU / wgpu default for `max_compute_workgroups_per_dimension` (MDN / W3C).
+/// Each `dispatch_workgroups(x,y,z)` component must be ≤ this (or the device limit).
+pub const MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT: u32 = 65_535;
+
 static GPU_INIT_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Plan 1D workgroup dispatches so each chunk’s X count ≤ `max_per_dim`.
+///
+/// Invariant: `chunks.iter().sum() == total_workgroups` (when `total > 0`), and
+/// every chunk is in `1..=max_per_dim`. Used by the printable-mark GPU path and
+/// unit-tested without a live adapter.
+pub fn plan_dispatch_workgroup_chunks(total_workgroups: u32, max_per_dim: u32) -> Vec<u32> {
+    let max_per_dim = max_per_dim.max(1);
+    if total_workgroups == 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut remaining = total_workgroups;
+    while remaining > 0 {
+        let n = remaining.min(max_per_dim);
+        out.push(n);
+        remaining -= n;
+    }
+    out
+}
 
 /// Result of experimental GPU bulk path (or fallback).
 #[derive(Debug, Clone, Serialize)]
@@ -268,8 +292,14 @@ pub struct GpuScanReport {
 /// Experimental GPU analysis mechanism for printable-run bulk scan.
 ///
 /// 1. Feature `gpu`: attempt wgpu compute (WGSL kernel) when an adapter exists.
-/// 2. Otherwise / on failure: **CPU work-item stand-in** — same per-byte classification
-///    scheduled in `GPU_WORKGROUP_BYTES` tiles on rayon (honest bulk parallel, not SMT).
+///    Large images are **multi-dispatch chunked** so each workgroup count ≤
+///    `min(65535, device.limits.max_compute_workgroups_per_dimension)`.
+/// 2. Otherwise / on failure / panic: **CPU work-item stand-in** — same per-byte
+///    classification scheduled in `GPU_WORKGROUP_BYTES` tiles on rayon.
+///
+/// The mark kernel writes `out[i]` independently per byte; host compact rebuilds
+/// runs across chunk boundaries (no halo). wgpu validation panics are caught so
+/// the GUI process never aborts.
 pub fn scan_printable_runs_gpu_or_fallback(hay: &[u8], min_len: usize) -> GpuScanReport {
     GPU_INIT_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
     let workgroups = if hay.is_empty() {
@@ -280,19 +310,33 @@ pub fn scan_printable_runs_gpu_or_fallback(hay: &[u8], min_len: usize) -> GpuSca
 
     #[cfg(feature = "gpu")]
     {
-        match try_gpu_printable_runs(hay, min_len) {
-            Ok((hits, device)) => {
+        // wgpu validation errors default to panicking; never let that kill the UI.
+        let gpu_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            try_gpu_printable_runs(hay, min_len)
+        }));
+        match gpu_result {
+            Ok(Ok((hits, device))) => {
                 return GpuScanReport {
                     hits,
                     backend: BulkBackend::Gpu { device },
                     workgroups,
                 };
             }
-            Err(reason) => {
+            Ok(Err(reason)) => {
                 let (hits, _) = scan_printable_runs_parallel_workitems(hay, min_len);
                 return GpuScanReport {
                     hits,
                     backend: BulkBackend::CpuFallback { reason },
+                    workgroups,
+                };
+            }
+            Err(_) => {
+                let (hits, _) = scan_printable_runs_parallel_workitems(hay, min_len);
+                return GpuScanReport {
+                    hits,
+                    backend: BulkBackend::CpuFallback {
+                        reason: "wgpu panic/validation; CPU work-item fallback".into(),
+                    },
                     workgroups,
                 };
             }
@@ -363,7 +407,7 @@ fn scan_printable_runs_parallel_workitems(hay: &[u8], min_len: usize) -> (Vec<Bu
 
 #[cfg(feature = "gpu")]
 fn try_gpu_printable_runs(hay: &[u8], min_len: usize) -> Result<(Vec<BulkHit>, String), String> {
-    // ponytail: real wgpu path when feature on; failures bubble as fallback reason.
+    // Real wgpu path; failures bubble as fallback reason (never panic into GUI).
     use pollster::block_on;
     use wgpu::util::DeviceExt;
 
@@ -378,30 +422,42 @@ fn try_gpu_printable_runs(hay: &[u8], min_len: usize) -> Result<(Vec<BulkHit>, S
     let info = adapter.get_info();
     let device_name = format!("{} ({:?})", info.name, info.backend);
 
+    // Prefer adapter limits (includes max_compute_workgroups_per_dimension).
+    let mut limits = adapter.limits();
+    limits.max_storage_buffers_per_shader_stage =
+        limits.max_storage_buffers_per_shader_stage.max(4);
+
     let (device, queue) = block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("ghidrust-bulk"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            required_limits: limits.clone(),
             memory_hints: Default::default(),
         },
         None,
     ))
     .map_err(|e| format!("request_device: {e}"))?;
 
-    // Mark kernel: out[i] = 1 if printable.
+    // Soften uncaptured validation errors into logged fallbacks (wgpu default panics).
+    device.on_uncaptured_error(Box::new(|err| {
+        eprintln!("ghidrust bulk GPU uncaptured: {err}");
+    }));
+
+    // Mark kernel: out[i] = 1 if printable. `base_inv` enables multi-dispatch chunking
+    // when total workgroups > max_compute_workgroups_per_dimension (WebGPU 65535).
+    // Per-byte mark is independent — no halo; host compact merges runs across chunks.
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("printable_mark"),
         source: wgpu::ShaderSource::Wgsl(
             r#"
-struct Params { n: u32, _pad: u32, _pad2: u32, _pad3: u32, }
+struct Params { n: u32, base_inv: u32, _pad2: u32, _pad3: u32, }
 @group(0) @binding(0) var<storage, read> input: array<u32>;
 @group(0) @binding(1) var<storage, read_write> output: array<u32>;
 @group(0) @binding(2) var<uniform> params: Params;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    let i = gid.x + params.base_inv;
     if (i >= params.n) { return; }
     let word = input[i / 4u];
     let shift = (i % 4u) * 8u;
@@ -436,11 +492,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         contents: bytemuck::cast_slice(&out_init),
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
     });
-    let params = [n, 0, 0, 0];
+    // params: [n, base_inv, pad, pad] — base_inv rewritten per chunk
+    let mut params = [n, 0u32, 0, 0];
     let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("params"),
         contents: bytemuck::cast_slice(&params),
-        usage: wgpu::BufferUsages::UNIFORM,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
@@ -516,17 +573,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         cache: None,
     });
 
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: None,
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bg, &[]);
-        let groups = (n + 255) / 256;
-        pass.dispatch_workgroups(groups, 1, 1);
+    const WG_SIZE: u32 = 256;
+    let max_wg = device
+        .limits()
+        .max_compute_workgroups_per_dimension
+        .min(MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT)
+        .max(1);
+    let total_groups = n.div_ceil(WG_SIZE);
+    let chunks = plan_dispatch_workgroup_chunks(total_groups, max_wg);
+    debug_assert_eq!(chunks.iter().sum::<u32>(), total_groups);
+
+    let mut base_inv = 0u32;
+    for &wg in &chunks {
+        params[1] = base_inv;
+        queue.write_buffer(&params_buf, 0, bytemuck::cast_slice(&params));
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bg, &[]);
+            // Primary fix: never dispatch more than max_wg in any dimension.
+            pass.dispatch_workgroups(wg, 1, 1);
+        }
+        queue.submit(Some(encoder.finish()));
+        base_inv = base_inv.saturating_add(wg.saturating_mul(WG_SIZE));
     }
+
+    let mut encoder =
+        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
     encoder.copy_buffer_to_buffer(&output_buf, 0, &readback, 0, (hay.len() * 4) as u64);
     queue.submit(Some(encoder.finish()));
 
@@ -548,6 +626,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     drop(data);
     readback.unmap();
 
+    // Host compact: full mask, so runs spanning chunk boundaries are preserved.
     let mut hits = Vec::new();
     let mut i = 0;
     while i < mask.len() {
@@ -567,7 +646,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             i += 1;
         }
     }
-    let _ = min_len; // used above
     Ok((hits, device_name))
 }
 
@@ -728,6 +806,36 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_chunks_respect_webgpu_65535() {
+        // Documented invariant: crash case was dispatch([106314,1,1]) > 65535.
+        let groups = 106_314u32;
+        let chunks =
+            plan_dispatch_workgroup_chunks(groups, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT);
+        assert!(!chunks.is_empty());
+        assert!(
+            chunks
+                .iter()
+                .all(|&c| c > 0 && c <= MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT),
+            "each chunk must be ≤ 65535: {chunks:?}"
+        );
+        assert_eq!(chunks.iter().sum::<u32>(), groups);
+        // Exactly two full + remainder for this size.
+        assert_eq!(chunks[0], 65_535);
+        assert_eq!(chunks.iter().sum::<u32>(), 106_314);
+    }
+
+    #[test]
+    fn dispatch_chunks_empty_and_single() {
+        assert!(plan_dispatch_workgroup_chunks(0, 65535).is_empty());
+        assert_eq!(plan_dispatch_workgroup_chunks(1, 65535), vec![1]);
+        assert_eq!(plan_dispatch_workgroup_chunks(65535, 65535), vec![65535]);
+        assert_eq!(
+            plan_dispatch_workgroup_chunks(65536, 65535),
+            vec![65535, 1]
+        );
+    }
+
+    #[test]
     fn large_buffer_parallel_equals_seq() {
         // Large enough to exercise multi-chunk + workgroups.
         let mut hay = vec![0u8; 256 * 1024];
@@ -742,6 +850,38 @@ mod tests {
         assert_eq!(seq, par);
         assert_eq!(seq, gpu.hits);
         assert!(!seq.is_empty());
+    }
+
+    #[test]
+    fn gpu_or_fallback_exceeds_single_dispatch_limit() {
+        // Workgroups = ceil(n / 256). Need > 65535 groups → n > 65535 * 256.
+        // Use a slightly smaller buffer that still forces ≥2 chunks under a lowered
+        // synthetic max, plus a real-size buffer when GPU is available.
+        let max = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT;
+        let n_bytes = (max as usize) * GPU_WORKGROUP_BYTES + 4096;
+        let total_groups = ((n_bytes + GPU_WORKGROUP_BYTES - 1) / GPU_WORKGROUP_BYTES) as u32;
+        assert!(total_groups > max, "fixture must exceed single-dispatch limit");
+        let chunks = plan_dispatch_workgroup_chunks(total_groups, max);
+        assert!(chunks.len() >= 2);
+
+        // Keep test memory modest: 1 MiB over the exact boundary would be ~17 MiB;
+        // fill sparsely with a run that crosses a workgroup/chunk boundary.
+        let mut hay = vec![0u8; n_bytes];
+        // Run spanning the first chunk boundary (base_inv = max * 256).
+        let boundary = (max as usize) * GPU_WORKGROUP_BYTES;
+        let run_start = boundary - 8;
+        for b in hay.iter_mut().skip(run_start).take(32) {
+            *b = b'A';
+        }
+        hay[100..116].copy_from_slice(b"Hello_Ghidrust!!");
+
+        let seq = scan_printable_runs_seq(&hay, 4);
+        let rep = scan_printable_runs_gpu_or_fallback(&hay, 4);
+        assert_eq!(
+            seq, rep.hits,
+            "chunked GPU/fallback must match sequential (incl. boundary-spanning runs)"
+        );
+        assert!(seq.iter().any(|h| h.offset == run_start && h.length >= 32));
     }
 
     #[test]

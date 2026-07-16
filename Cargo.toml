@@ -4,6 +4,9 @@ members = [
     "crates/ghidrust-ir",
     "crates/ghidrust-decode",
     "crates/ghidrust-lift",
+    "crates/ghidrust-ssa",
+    "crates/ghidrust-types",
+    "crates/ghidrust-structure",
     "crates/ghidrust-core",
     "crates/ghidrust-decomp",
     "crates/ghidrust-cli",
@@ -21,5 +24,8 @@ repository = "https://github.com/example/ghidrust"
 ghidrust-ir = { path = "crates/ghidrust-ir" }
 ghidrust-decode = { path = "crates/ghidrust-decode" }
 ghidrust-lift = { path = "crates/ghidrust-lift" }
+ghidrust-ssa = { path = "crates/ghidrust-ssa" }
+ghidrust-types = { path = "crates/ghidrust-types" }
+ghidrust-structure = { path = "crates/ghidrust-structure" }
 ghidrust-core = { path = "crates/ghidrust-core" }
 ghidrust-decomp = { path = "crates/ghidrust-decomp" }

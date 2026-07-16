@@ -100,13 +100,24 @@ pub fn run_kernel(
 
     #[cfg(feature = "gpu")]
     {
-        match run_kernel_gpu(hay, kind, needle, image_base, image_end, wall0) {
-            Ok(r) => return r,
-            Err(reason) => {
+        // Catch wgpu validation panics so Auto Analysis never aborts the GUI.
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_kernel_gpu(hay, kind, needle, image_base, image_end, wall0)
+        }));
+        match caught {
+            Ok(Ok(r)) => return r,
+            Ok(Err(reason)) => {
                 let mut r = run_kernel_cpu_fallback(hay, kind, needle, image_base, image_end, wall0);
                 r.backend = "cpu_kernel_fallback".into();
                 r.device = reason;
                 r.note = "GPU init/kernel failed; same algorithm on CPU".into();
+                return r;
+            }
+            Err(_) => {
+                let mut r = run_kernel_cpu_fallback(hay, kind, needle, image_base, image_end, wall0);
+                r.backend = "cpu_kernel_fallback".into();
+                r.device = "wgpu panic/validation".into();
+                r.note = "GPU panicked; same algorithm on CPU".into();
                 return r;
             }
         }
@@ -381,6 +392,10 @@ fn run_kernel_gpu(
     ))
     .map_err(|e| format!("device: {e}"))?;
 
+    device.on_uncaptured_error(Box::new(|err| {
+        eprintln!("ghidrust analyzer GPU uncaptured: {err}");
+    }));
+
     let mut hay_pad = hay.to_vec();
     while hay_pad.len() % 4 != 0 {
         hay_pad.push(0);
@@ -498,19 +513,23 @@ fn run_kernel_gpu(
         ],
     });
 
-    // wgpu max workgroups per dimension is 65535; chunk large PEs.
-    const MAX_WG: u32 = 65535;
+    // wgpu / WebGPU: each dispatch dimension ≤ max_compute_workgroups_per_dimension
+    // (default 65535). Chunk large PEs via base_inv (see kernels.wgsl).
     const WG_SIZE: u32 = 256;
+    let max_wg = device
+        .limits()
+        .max_compute_workgroups_per_dimension
+        .min(65_535)
+        .max(1);
     let inv = kind.invocation_count(n);
-    let inv_per_chunk = MAX_WG.saturating_mul(WG_SIZE);
+    let total_groups = inv.div_ceil(WG_SIZE);
+    let wg_chunks = crate::bulk_scan::plan_dispatch_workgroup_chunks(total_groups, max_wg);
 
     // ── on-device SIMT (multi-dispatch chunks) ───────────────────────────
     let t_dev = Instant::now();
     let mut base_inv = 0u32;
     let mut chunks = 0u32;
-    while base_inv < inv {
-        let remaining = inv - base_inv;
-        let wg = remaining.div_ceil(WG_SIZE).min(MAX_WG).max(1);
+    for &wg in &wg_chunks {
         params[12] = base_inv;
         queue.write_buffer(&buf_params, 0, bytemuck::cast_slice(&params));
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -528,13 +547,9 @@ fn run_kernel_gpu(
         queue.submit(Some(enc.finish()));
         chunks += 1;
         base_inv = base_inv.saturating_add(wg.saturating_mul(WG_SIZE));
-        if base_inv == 0 {
-            break; // safety
-        }
     }
     device.poll(wgpu::Maintain::Wait);
     let device_ms = t_dev.elapsed().as_secs_f64() * 1000.0;
-    let _ = inv_per_chunk;
 
     // ── PCIe download (staging copy + map) ───────────────────────────────
     let t_dn = Instant::now();

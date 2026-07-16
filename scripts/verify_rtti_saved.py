@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
-"""Prove saved RTTI hits map to real bytes in the PE (not invented names)."""
+"""Prove saved RTTI hits map to real bytes in the PE (not invented names).
+
+Requires paths to a saved analysis JSON and the corresponding PE. No machine-
+or game-specific defaults are embedded.
+
+Examples:
+  python scripts/verify_rtti_saved.py \\
+      --analysis path/to/analysis.json \\
+      --pe path/to/binary.exe
+
+  # Or via environment variables:
+  set GHIDRUST_ANALYSIS_JSON=path/to/analysis.json
+  set GHIDRUST_PE=path/to/binary.exe
+  python scripts/verify_rtti_saved.py
+"""
+from __future__ import annotations
+
+import argparse
 import json
+import os
 import struct
 import sys
 from collections import Counter
@@ -31,9 +49,65 @@ def pe_sections(blob: bytes):
     return image_base, secs
 
 
-def main():
-    analysis = sys.argv[1] if len(sys.argv) > 1 else r"F:\ghidrust\fh6\results\forzahorizon6_exe\analysis.json"
-    exe = sys.argv[2] if len(sys.argv) > 2 else r"F:\ghidrust\fh6\imports\forzahorizon6_exe_forzahorizon6.exe"
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Verify saved RTTI class names map to real bytes in a PE.",
+        epilog=(
+            "Paths may also be supplied via GHIDRUST_ANALYSIS_JSON and "
+            "GHIDRUST_PE environment variables when flags are omitted."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--analysis",
+        metavar="PATH",
+        default=os.environ.get("GHIDRUST_ANALYSIS_JSON"),
+        help="Path to analysis.json (or set GHIDRUST_ANALYSIS_JSON)",
+    )
+    p.add_argument(
+        "--pe",
+        metavar="PATH",
+        default=os.environ.get("GHIDRUST_PE"),
+        help="Path to the PE binary (or set GHIDRUST_PE)",
+    )
+    # Positional aliases for convenience (still required via one of the forms).
+    p.add_argument(
+        "analysis_pos",
+        nargs="?",
+        metavar="ANALYSIS_JSON",
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "pe_pos",
+        nargs="?",
+        metavar="PE",
+        help=argparse.SUPPRESS,
+    )
+    args = p.parse_args(argv)
+
+    analysis = args.analysis or args.analysis_pos
+    pe = args.pe or args.pe_pos
+    missing = []
+    if not analysis:
+        missing.append("--analysis / GHIDRUST_ANALYSIS_JSON")
+    if not pe:
+        missing.append("--pe / GHIDRUST_PE")
+    if missing:
+        p.error(
+            "missing required path(s): "
+            + ", ".join(missing)
+            + "\nExample: python scripts/verify_rtti_saved.py "
+            "--analysis path/to/analysis.json --pe path/to/binary.exe"
+        )
+    args.analysis = analysis
+    args.pe = pe
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    analysis = args.analysis
+    exe = args.pe
 
     print("loading", analysis)
     d = json.load(open(analysis, encoding="utf-8"))

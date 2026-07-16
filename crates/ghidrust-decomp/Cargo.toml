@@ -11,7 +11,14 @@ gpu = ["wgpu", "pollster", "bytemuck"]
 
 [dependencies]
 ghidrust-core = { workspace = true }
+ghidrust-decode = { workspace = true }
+ghidrust-ir = { workspace = true }
+ghidrust-lift = { workspace = true }
+ghidrust-ssa = { workspace = true }
+ghidrust-structure = { workspace = true }
+ghidrust-types = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 wgpu = { version = "24", optional = true, default-features = true }
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }

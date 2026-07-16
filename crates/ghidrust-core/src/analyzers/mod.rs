@@ -138,15 +138,17 @@ pub fn run_analyzers(prog: &mut Program, names: &[&str]) -> Result<AnalysisRunRe
 }
 
 /// Like [`run_analyzers`], with optional GPU acceleration:
-/// - sets bulk mode to GPU for ASCII Strings bulk path
-/// - after CPU analyzers, runs per-analyzer GPU seed kernels + host merge
+/// - GPU bulk / enrich only for analyzers that [`analyzer_supports_gpu`]
+///   (strategy matrix / docs/GPU_ANALYZER_MATRIX.md)
+/// - ASCII Strings uses GPU bulk mode; others keep parallel CPU for their host path
+/// - after each GPU-capable analyzer, runs that analyzer’s seed kernel + host merge
 pub fn run_analyzers_opts(
     prog: &mut Program,
     names: &[&str],
     use_gpu: bool,
 ) -> Result<AnalysisRunReport> {
     use crate::bulk_scan::{preferred_bulk_mode, set_preferred_bulk_mode, BulkScanMode};
-    use crate::gpu_analyzers::gpu_enrich_analyzers;
+    use crate::gpu_analyzers::{analyzer_supports_gpu, gpu_enrich_analyzers};
 
     let selected: Vec<&str> = if names.is_empty() {
         analyzer_catalog()
@@ -159,10 +161,6 @@ pub fn run_analyzers_opts(
     };
 
     let prev_mode = preferred_bulk_mode();
-    if use_gpu {
-        set_preferred_bulk_mode(BulkScanMode::GpuOrFallback);
-    }
-
     let mut report = AnalysisRunReport::default();
     for name in &selected {
         if !ANALYZER_NAMES.contains(name) {
@@ -174,17 +172,27 @@ pub fn run_analyzers_opts(
             });
             continue;
         }
-        report.results.push(run_one(prog, name)?);
-    }
 
-    if use_gpu {
-        let enriched = gpu_enrich_analyzers(prog, &selected);
-        for (name, n, backend) in enriched {
-            if let Some(r) = report.results.iter_mut().find(|r| r.name == name) {
-                r.message = format!(
-                    "{} | gpu_enrich hits_merged={} backend={}",
-                    r.message, n, backend
-                );
+        // Master GPU checkbox only enables GPU for analyzers that have a strategy.
+        let gpu_this = use_gpu && analyzer_supports_gpu(name);
+        if gpu_this && *name == "ASCII Strings" {
+            set_preferred_bulk_mode(BulkScanMode::GpuOrFallback);
+        } else {
+            // Non-GPU analyzers (or GPU-off) never inherit a stale GpuOrFallback mode.
+            set_preferred_bulk_mode(BulkScanMode::ParallelCpu);
+        }
+
+        report.results.push(run_one(prog, name)?);
+
+        if gpu_this {
+            let enriched = gpu_enrich_analyzers(prog, &[name]);
+            for (ename, n, backend) in enriched {
+                if let Some(r) = report.results.iter_mut().find(|r| r.name == ename) {
+                    r.message = format!(
+                        "{} | gpu_enrich hits_merged={} backend={}",
+                        r.message, n, backend
+                    );
+                }
             }
         }
     }
@@ -283,5 +291,19 @@ mod tests {
             "expected gpu_enrich annotation in messages: {:?}",
             rep.results.iter().map(|r| &r.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn gpu_master_flag_skips_unknown_analyzer_gpu() {
+        use crate::gpu_analyzers::analyzer_supports_gpu;
+        assert!(analyzer_supports_gpu("ASCII Strings"));
+        assert!(analyzer_supports_gpu("WindowsPE x86 PE RTTI Analyzer"));
+        assert!(!analyzer_supports_gpu("Not A Real Analyzer"));
+        // With use_gpu=true, unknown names still error without panicking.
+        let mut prog = load_path(fixture_path("tiny_x64.pe")).expect("pe");
+        let rep = run_analyzers_opts(&mut prog, &["Not A Real Analyzer"], true).expect("opts");
+        assert_eq!(rep.results.len(), 1);
+        assert_eq!(rep.results[0].status, "error");
+        assert!(!rep.results[0].message.contains("gpu_enrich"));
     }
 }

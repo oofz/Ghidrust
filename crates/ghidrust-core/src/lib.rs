@@ -2,6 +2,7 @@
 
 pub mod analyzers;
 pub mod bulk_scan;
+pub mod edits;
 pub mod gpu_analyzers;
 pub mod disasm;
 pub mod elf;
@@ -17,17 +18,22 @@ pub use analyzers::{
     AnalyzerInfo, AnalyzerOutput, AnalyzerStatus, FoundString, ANALYZER_NAMES,
 };
 pub use bulk_scan::{
-    preferred_bulk_mode, scan_ascii_strings_bulk, scan_pattern_parallel, scan_pattern_seq,
-    scan_printable_runs, scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel,
-    scan_printable_runs_seq, set_preferred_bulk_mode, time_bulk_printable, BulkBackend, BulkHit,
-    BulkScanMode, BulkTimingReport, GpuScanReport,
+    plan_dispatch_workgroup_chunks, preferred_bulk_mode, scan_ascii_strings_bulk,
+    scan_pattern_parallel, scan_pattern_seq, scan_printable_runs,
+    scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel, scan_printable_runs_seq,
+    set_preferred_bulk_mode, time_bulk_printable, BulkBackend, BulkHit, BulkScanMode,
+    BulkTimingReport, GpuScanReport, MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT,
 };
 pub use gpu_analyzers::{
-    bench_all_analyzers, bench_analyzer, bench_gpu_decompile_row, flatten_image, format_matrix_table,
-    gpu_enrich_analyzers, merge_seeds_into_program, pad_large, seeds_equal, strategy_matrix,
-    AnalyzerBenchRow, GpuStrategyClass,
+    analyzer_supports_gpu, bench_all_analyzers, bench_analyzer, bench_gpu_decompile_row,
+    flatten_image, format_matrix_table, gpu_enrich_analyzers, gpu_strategy_for,
+    merge_seeds_into_program, pad_large, seeds_equal, strategy_matrix, AnalyzerBenchRow,
+    GpuStrategyClass,
 };
 pub use disasm::{decode_one, disassemble_at, disassemble_range, Instruction};
+pub use edits::{
+    CommentKind, FunctionSignatureEdit, ProgramEditTotals, ProgramEdits, RetypeEdit, BUILTIN_TYPES,
+};
 pub use error::{Error, Result};
 pub use program::{
     AddressTableInfo, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo,

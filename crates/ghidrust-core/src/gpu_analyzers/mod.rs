@@ -14,8 +14,8 @@ use std::time::Instant;
 
 pub use engine::{cpu_emulate_kernel, GpuPhaseTiming, GpuRunBackend, KernelKind, MAX_HITS};
 pub use strategies::{
-    flat_to_va, gpu_strategy_for, merge_seeds_into_program, seeds_equal, strategy_matrix,
-    GpuStrategyClass,
+    analyzer_supports_gpu, flat_to_va, gpu_strategy_for, merge_seeds_into_program, seeds_equal,
+    strategy_matrix, GpuStrategyClass,
 };
 
 /// One row of the CPU/GPU analyzer benchmark matrix.

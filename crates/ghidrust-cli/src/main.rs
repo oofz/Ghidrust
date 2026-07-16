@@ -36,6 +36,8 @@ fn main() -> ExitCode {
         "analyze" => cmd_analyze(&args[1..], json_mode),
         "bulk-bench" => cmd_bulk_bench(&args[1..], json_mode),
         "decompile" => cmd_decompile(&args[1..], json_mode),
+        "decompile-bench" => cmd_decompile_bench(&args[1..], json_mode),
+        "ghidra-headtohead" => cmd_ghidra_headtohead(&args[1..], json_mode),
         "gpu-decompile" => cmd_gpu_decompile(&args[1..], json_mode),
         "re-bench" => cmd_re_bench(&args[1..], json_mode),
         "analyzer-bench" => cmd_analyzer_bench(&args[1..], json_mode),
@@ -64,7 +66,9 @@ fn print_help() {
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
-           ghidrust decompile <path> [--addr HEX] [--count N] [--json]\n\
+           ghidrust decompile <path> [--addr HEX] [--count N] [--stage05|--stage1] [--json]\n\
+           ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--json]\n\
+           ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--json]\n\
            ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]\n\
            ghidrust re-bench <path> [--out FILE] [--json]  # CPU then GPU metrics (decomp+bulk)\n\
            ghidrust analyzer-bench <path> [--large] [--out FILE] [--json]\n\
@@ -936,12 +940,16 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
     let path = match args.first() {
         Some(p) => PathBuf::from(p),
         None => {
-            eprintln!("usage: ghidrust decompile <path> [--addr HEX] [--count N] [--json]");
+            eprintln!(
+                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage05] [--json]"
+            );
             return ExitCode::from(2);
         }
     };
     let mut addr: Option<u64> = None;
     let mut count: usize = 64;
+    let mut stage05 = false;
+    let mut stage1 = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -953,32 +961,119 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 count = args[i + 1].parse().unwrap_or(64);
                 i += 2;
             }
+            "--stage05" | "--stage-0.5" | "--ir" => {
+                stage05 = true;
+                i += 1;
+            }
+            "--stage1" | "--stage-1" | "--ssa" => {
+                stage1 = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
     match load_path(&path) {
         Ok(prog) => {
             let va = addr.unwrap_or_else(|| prog.entry.unwrap_or(prog.image_base));
-            match ghidrust_decomp::decompile_at(&prog, va, count) {
-                Ok(d) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&d).unwrap());
-                    } else {
-                        print!("{}", d.pseudo_c);
-                        eprintln!(
-                            "[{}] blocks={} edges={} insns={} lines={}",
-                            d.name,
-                            d.blocks.len(),
-                            d.edges.len(),
-                            d.insn_count,
-                            d.line_count()
-                        );
+            if stage1 {
+                // Default to Windows x64 for PE targets, SysV otherwise.
+                let conv = if prog.format.to_ascii_lowercase().contains("pe") {
+                    ghidrust_types::CallConv::Windows
+                } else {
+                    ghidrust_types::CallConv::SystemV
+                };
+                match ghidrust_decomp::decompile_stage1_at(&prog, va, count, conv) {
+                    Ok((d, s1)) => {
+                        if json {
+                            let obj = json!({
+                                "decompile": d,
+                                "stage1": {
+                                    "loops": s1.structure.loops.len(),
+                                    "phis": s1.ssa.phi_count(),
+                                    "locals": s1.types.locals.len(),
+                                    "params": s1.types.params.len(),
+                                    "lift_ratio": s1.coverage.ratio(),
+                                    "total_ops": s1.coverage.total_ops,
+                                }
+                            });
+                            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+                        } else {
+                            print!("{}", d.pseudo_c);
+                            eprintln!(
+                                "[{}] stage=1 blocks={} phis={} loops={} locals={} params={} lift={:.1}%",
+                                d.name,
+                                d.blocks.len(),
+                                s1.ssa.phi_count(),
+                                s1.structure.loops.len(),
+                                s1.types.locals.len(),
+                                s1.types.params.len(),
+                                s1.coverage.ratio() * 100.0
+                            );
+                        }
+                        return ExitCode::SUCCESS;
                     }
-                    ExitCode::SUCCESS
+                    Err(e) => {
+                        eprintln!("decompile-stage1 error: {e}");
+                        return ExitCode::FAILURE;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("decompile error: {e}");
-                    ExitCode::FAILURE
+            }
+            if stage05 {
+                match ghidrust_decomp::decompile_ir_at(&prog, va, count) {
+                    Ok((d, cov)) => {
+                        if json {
+                            let obj = json!({
+                                "decompile": d,
+                                "lift_coverage": {
+                                    "total_ops": cov.total_ops,
+                                    "unimplemented_ops": cov.unimplemented_ops,
+                                    "source_instructions": cov.source_instructions,
+                                    "ratio": cov.ratio(),
+                                }
+                            });
+                            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+                        } else {
+                            print!("{}", d.pseudo_c);
+                            eprintln!(
+                                "[{}] stage=0.5 blocks={} edges={} insns={} ir_ops={} lift={:.1}% lines={}",
+                                d.name,
+                                d.blocks.len(),
+                                d.edges.len(),
+                                d.insn_count,
+                                cov.total_ops,
+                                cov.ratio() * 100.0,
+                                d.line_count()
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("decompile-ir error: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            } else {
+                match ghidrust_decomp::decompile_at(&prog, va, count) {
+                    Ok(d) => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&d).unwrap());
+                        } else {
+                            print!("{}", d.pseudo_c);
+                            eprintln!(
+                                "[{}] stage=0 blocks={} edges={} insns={} lines={}",
+                                d.name,
+                                d.blocks.len(),
+                                d.edges.len(),
+                                d.insn_count,
+                                d.line_count()
+                            );
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("decompile error: {e}");
+                        ExitCode::FAILURE
+                    }
                 }
             }
         }
@@ -987,6 +1082,154 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_decompile_bench(args: &[String], json: bool) -> ExitCode {
+    let path = match args.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!(
+                "usage: ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--json]"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let mut max_functions: usize = 32;
+    let mut count: usize = 128;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--functions" if i + 1 < args.len() => {
+                max_functions = args[i + 1].parse().unwrap_or(max_functions);
+                i += 2;
+            }
+            "--count" if i + 1 < args.len() => {
+                count = args[i + 1].parse().unwrap_or(count);
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let mut prog = match load_path(&path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("load error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Run default analyzers so `decompile-bench` picks up whatever functions
+    // the analyzer stack recovers; missing functions falls back to entry.
+    let _ = ghidrust_core::run_analyzers(&mut prog, &[]);
+    let report = ghidrust_decomp::bench_program(&prog, max_functions, count);
+    let output = if json { report.to_json() } else { report.to_text() };
+    if let Some(path) = out_path {
+        if let Err(e) = std::fs::write(&path, &output) {
+            eprintln!("write error: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    print!("{}", output);
+    if !output.ends_with('\n') {
+        println!();
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_ghidra_headtohead(args: &[String], json: bool) -> ExitCode {
+    let path = match args.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!(
+                "usage: ghidrust ghidra-headtohead <path> [--functions N] [--count N] \\\n                   [--ghidra DIR] [--captured JSON] [--out FILE] [--json]"
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let mut max_functions: usize = 8;
+    let mut count: usize = 128;
+    let mut out_path: Option<PathBuf> = None;
+    let mut ghidra_dir: Option<PathBuf> = None;
+    let mut captured_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--functions" if i + 1 < args.len() => {
+                max_functions = args[i + 1].parse().unwrap_or(max_functions);
+                i += 2;
+            }
+            "--count" if i + 1 < args.len() => {
+                count = args[i + 1].parse().unwrap_or(count);
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--ghidra" if i + 1 < args.len() => {
+                ghidra_dir = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--captured" if i + 1 < args.len() => {
+                captured_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let mut prog = match load_path(&path) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("load error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let _ = ghidrust_core::run_analyzers(&mut prog, &[]);
+
+    let captured = match captured_path {
+        Some(cp) => match std::fs::read_to_string(&cp) {
+            Ok(text) => match serde_json::from_str::<Vec<ghidrust_decomp::CapturedGhidraDecompile>>(&text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("--captured parse error: {e}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("read --captured: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+
+    let cfg = ghidrust_decomp::GhidraOracleConfig {
+        ghidra_install_dir: ghidra_dir,
+        max_functions,
+        max_insns_per_fn: count,
+        captured_ghidra_decompiles: captured,
+        // Forward the binary path so `--ghidra DIR` can auto-spawn
+        // analyzeHeadless against the same bytes Ghidrust just benched.
+        binary_path: Some(path.clone()),
+        ..Default::default()
+    };
+    let report = ghidrust_decomp::ghidra_headtohead(&prog, &cfg);
+    let output = if json { report.to_json() } else { report.to_text() };
+    if let Some(p) = out_path {
+        if let Err(e) = std::fs::write(&p, &output) {
+            eprintln!("write error: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    print!("{}", output);
+    if !output.ends_with('\n') {
+        println!();
+    }
+    ExitCode::SUCCESS
 }
 
 /// CPU then GPU (or fallback) proof harness: decompile on CPU + bulk RE on both backends.

@@ -307,6 +307,76 @@ pub fn stage0_pseudo_c(prog: &Program, va: u64, max_insns: usize) -> Result<(u64
     Ok((d.entry, d.pseudo_c))
 }
 
+/// Which decompile stage the GUI should render for the current focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecompStage {
+    /// Stage-0 CFG → goto pseudo-C (default / regression oracle).
+    Stage0,
+    /// Stage-0.5 IR-informed emit (`xor a,a → a=0`, augmented-assign, etc.).
+    Stage05,
+    /// Stage-1 SSA + structure + typed locals/params (opt-in).
+    Stage1,
+}
+
+impl Default for DecompStage {
+    fn default() -> Self {
+        DecompStage::Stage0
+    }
+}
+
+impl DecompStage {
+    pub fn label(&self) -> &'static str {
+        match self {
+            DecompStage::Stage0 => "Stage-0",
+            DecompStage::Stage05 => "Stage-0.5",
+            DecompStage::Stage1 => "Stage-1",
+        }
+    }
+}
+
+/// Stage-0.5 CPU decompile → IR-informed pseudo-C text with lift coverage.
+pub fn stage05_pseudo_c(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+) -> Result<(u64, String, f32), String> {
+    let entry = decompile_entry_for_va(prog, va);
+    let (d, cov) =
+        ghidrust_decomp::decompile_ir_at(prog, entry, max_insns).map_err(|e| e.to_string())?;
+    Ok((d.entry, d.pseudo_c, cov.ratio()))
+}
+
+/// Stage-1 CPU decompile → SSA-structured pseudo-C text with lift coverage.
+///
+/// Falls back to Stage-0.5 if structuring produced no loops **and** the
+/// region depth is 0 (a flat block sequence), so users don't see less info
+/// than the IR-informed emit would produce.
+pub fn stage1_pseudo_c(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+) -> Result<(u64, String, f32), String> {
+    let entry = decompile_entry_for_va(prog, va);
+    let (_d, rep) =
+        ghidrust_decomp::decompile_stage1_at(prog, entry, max_insns, ghidrust_types::CallConv::Windows)
+            .map_err(|e| e.to_string())?;
+    Ok((entry, rep.pseudo_c, rep.coverage.ratio()))
+}
+
+/// Dispatcher used by the GUI to render whichever stage the user selected.
+pub fn pseudo_c_for_stage(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+    stage: DecompStage,
+) -> Result<(u64, String, Option<f32>), String> {
+    match stage {
+        DecompStage::Stage0 => stage0_pseudo_c(prog, va, max_insns).map(|(e, t)| (e, t, None)),
+        DecompStage::Stage05 => stage05_pseudo_c(prog, va, max_insns).map(|(e, t, r)| (e, t, Some(r))),
+        DecompStage::Stage1 => stage1_pseudo_c(prog, va, max_insns).map(|(e, t, r)| (e, t, Some(r))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

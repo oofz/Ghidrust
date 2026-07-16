@@ -60,10 +60,31 @@ Need full matrix bench?
 
 Need decompiled C?
   → Staged capability (be honest about which stage you have):
-     Stage-0 (current): `decompile` / `gpu-decompile` → CFG→goto / mnemonic-style pseudo-C + listing
-     SSA-C (roadmap): structured if/while/switch pseudo-C after IR→SSA
-     typed-C (roadmap): locals/params/types; Ghidra-surpass bar before Hex-Rays-class ceiling
+     Stage-0    (default):  `decompile PATH` / `gpu-decompile PATH` → CFG→goto / mnemonic-style pseudo-C
+     Stage-0.5  (opt-in):   `decompile PATH --stage05` → IR-informed emit (xor a,a → a=0, augmented assign,
+                                push/pop, direct call, flag-driven jcc). Falls back to Stage-0 scaffolding for
+                                anything the lifter doesn't cover yet — never fabricated C.
+     Stage-1    (opt-in):   SSA + structure + types → structured if/while/do-while/return with typed locals
+                                (`local_<off>`), SysV/Windows params (`param_1`, `param_2`, …), and (new)
+                                `switch { case … }` regions sourced from the shipped Decompiler Switch
+                                Analysis analyzer plus compound `if (A && B)` / `if (A || B)` short-circuit
+                                predicates. GUI has a Decompiler pane stage picker; MCP/library callers use
+                                `ghidrust_decomp::decompile_stage1_at`. Falls back to Stage-0.5-shaped
+                                scaffolding when lift ratio <50% or the region is irreducible — no fabrication.
+     typed-C    (roadmap):  Hex-Rays-class quality (union/bitfield, EH, idiom-lift) — after Ghidra bar met.
   → Do not invent Hex-Rays-quality C; emit only what the current stage produces.
+
+Need Stage-0 vs Stage-0.5 wall-clock + lift-ratio numbers?
+  → `decompile-bench PATH [--functions N] [--count N] [--out FILE] [--json]`
+
+Need Ghidra ↔ Ghidrust head-to-head?
+  → `ghidra-headtohead PATH [--ghidra DIR] [--captured JSON] [--out FILE] [--json]`
+  → `--ghidra DIR` auto-spawns `analyzeHeadless` (locates `support/analyzeHeadless(.bat)`,
+     writes the embedded `DecompileAndReport.java`, parses per-function `wall_us`).
+  → `--captured JSON` replays a manual capture for offline / airgapped hosts.
+  → When neither is supplied, the report is methodology-only: Ghidra column left blank
+     + full runbook (dev/GHIDRA_HEADTOHEAD.md). Spawn failures surface as factual
+     `ghidra spawn failed: <reason>` notes — no fabricated timings.
 ```
 
 ---
@@ -140,6 +161,9 @@ Add `--json` for structured stdout.
 | **Analyze** | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu]` |
 | Bulk bench | `ghidrust bulk-bench <path>` |
 | Decompile (CPU Stage-0 pseudo-C) | `ghidrust decompile <path>` |
+| Decompile (Stage-0.5 IR-informed) | `ghidrust decompile <path> --stage05` |
+| Decompile bench (Stage-0 vs Stage-0.5) | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` |
+| Ghidra head-to-head oracle | `ghidrust ghidra-headtohead <path> [--ghidra DIR] [--captured JSON] [--out F]` |
 | **GPU decompile** | `ghidrust gpu-decompile <path> [--out F] [--metrics F]` |
 | RE bench | `ghidrust re-bench <path>` |
 | Analyzer CPU/GPU matrix bench | `ghidrust analyzer-bench <path> [--large] [--out F]` |
@@ -203,13 +227,75 @@ Timing model: **pcie_upload / device_ms / pcie_download** split. On large binari
 
 ---
 
-## Auto Analysis — all 20 names
+## Auto Analysis — exhaustive catalog (20)
 
-Exact strings (use `ghidrust analyzers --json`):
+Exact names, honest outputs. Use the `Name` column verbatim in
+`--analyzer "…"` / `--analyzers "a,b"`. Every row is a **PASS** in the shipped
+eval report ([`dev/EVAL_ANALYSIS_DECOMPILE_REPORT.md`](../dev/EVAL_ANALYSIS_DECOMPILE_REPORT.md),
+JSON: `dev/eval_analysis_decompile.json`); regenerate with
+`cargo test -p ghidrust-cli --test eval_analysis_decompile -- --nocapture`.
 
-ASCII Strings · Aggressive Instruction Finder · Call Convention ID · Call-Fixup Installer · Create Address Tables · Decompiler Parameter ID · Decompiler Switch Analysis · Demangler Microsoft · Embedded Media · Function ID · Function Start Search · Non-Returning Functions - Discovered · PDB MSDIA · PDB Universal · Shared Return Calls · Stack · Variadic Function Signature Override · WindowsPE x86 PE RTTI Analyzer · Windows x86 Propagate External Parameters · WindowsResourceReference
+Message column is the human status line (`[status] NAME — message`);
+Output column names the field on `AnalyzerOutput` you get in `--json`
+(`analysis.results[*]`).
 
-**Defaults** (empty selection): ASCII Strings, RTTI, Function Start Search, Create Address Tables, Embedded Media, Demangler Microsoft.
+| # | Name | What it does | Output field(s) | Message |
+|---|---|---|---|---|
+| 1 | `ASCII Strings` | Bulk ≥4-char printable scan (Sequential / ParallelCpu / GpuOrFallback backend). | `strings: [{va, value, length}]` | `found N ASCII string(s) [BulkScanMode…]` |
+| 2 | `Aggressive Instruction Finder` | Fills real code gaps only; adds new `FunctionInfo` + a `DiscoveredRange`. No fabrication if the fixture has no gap. | `recovered_ranges: [{start, end}]` (+ `functions[]`) | `found N recovered code range(s)` |
+| 3 | `Call Convention ID` | Tags each function with Win64/cdecl/stdcall/thiscall. | `conventions: [[va, name], …]` (+ `functions[*].calling_convention`) | `identified N calling convention(s)` |
+| 4 | `Call-Fixup Installer` | Security-cookie / thunk stub detection. | `call_fixups: [{fixup_name, call_va}]` | `installed N call fixup(s)` |
+| 5 | `Create Address Tables` | Contiguous VA tables in `.rdata` / data. | `address_tables: [{base, count, entries: [va, …]}]` | `found N address table(s)` |
+| 6 | `Decompiler Parameter ID` | `mov [rbp+…], rcx/rdx` spill detection → `arg0:rcx` / `arg1:rdx`. No inventions on bare bodies. | `functions: [{entry, parameters: [str,…]}]` | `recovered parameters for N function(s)` |
+| 7 | `Decompiler Switch Analysis` | Address tables → switch cases. | `switches: [{jump_va, cases: [[val, target], …]}]` | `recovered N switch table(s)` |
+| 8 | `Demangler Microsoft` | MSVC `?…@@` demangler; `demangled` alongside raw. | `symbols: [{name, va, demangled?}]` | `demangled N symbol(s)` |
+| 9 | `Embedded Media` | PNG / JPG / GIF / WAV / … magic scan. | `media: [{kind, va}]` | `found N media signature(s)` |
+| 10 | `Function ID` | Prologue-window hash → shipped `fid_*` catalog match. | `fid_matches: [{entry, matched_name}]` | `matched N FID signature(s)` |
+| 11 | `Function Start Search` | Entry + symbols + exact `55 48 89 e5` + orphan `sub rsp, imm8`; grows to `ret`/`int3`; drops mid-body seeds. | `functions: [{entry, end, name}]` | `identified N function start(s)` |
+| 12 | `Non-Returning Functions - Discovered` | `int3`-terminated bodies + known no-return imports. | `noreturn_entries: [va, …]` (+ `functions[*].noreturn`) | `marked N noreturn function(s)` |
+| 13 | `PDB MSDIA` | MSF7 reader with MSDIA-shaped filtering. | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (msdia→universal)` |
+| 14 | `PDB Universal` | MSF7 reader, unfiltered stream symbols (`MSF7` marker included). | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (universal)` |
+| 15 | `Shared Return Calls` | Callers reusing one epilogue (tail-call). | `shared_returns: [va, …]` | `marked N shared return site(s)` |
+| 16 | `Stack` | Frame size + `param_…` slots from `sub rsp, imm` / `push rbp; mov rbp, rsp`; won't fabricate frames on functions with no real prologue. | `stack_frames: [[va, ["frame_size=0x…", "param_…", …]], …]` | `recovered N stack frame(s)` |
+| 17 | `Variadic Function Signature Override` | Ensures `printf`/`sprintf`/`scanf` family symbols exist and marks them cdecl / `varargs=true` with a `format` param. | `varargs_entries: [va, …]` (+ `functions[*].varargs`) | `applied varargs to N function(s)` |
+| 18 | `WindowsPE x86 PE RTTI Analyzer` | MSVC C++ RTTI: COL → class hierarchy → type-info → vtable, demangled class name. | `rtti: {classes: [{name, type_info_va, vtable_va, col_va, kind}], notes: [str,…]}` | `recovered N RTTI class record(s)` |
+| 19 | `Windows x86 Propagate External Parameters` | Known Win32 API prototypes attached to import call sites. | `external_params: [[va, prototype], …]` | `applied N external parameter prototype(s)` |
+| 20 | `WindowsResourceReference` | `.rsrc` records (`VERSION`, `RT_ICON`, …). | `resources: [{name, va}]` | `parsed N resource record(s)` |
+
+**Defaults** (empty selection): `ASCII Strings`, `WindowsPE x86 PE RTTI Analyzer`, `Function Start Search`, `Create Address Tables`, `Embedded Media`, `Demangler Microsoft`.
+
+With `--gpu`: same CPU output plus a `| gpu_enrich hits_merged=… backend=…` suffix on the human message. Not a replacement for `gpu-decompile`.
+
+---
+
+## Decompile methods — exhaustive catalog
+
+All rows exercised by `eval_analysis_decompile.rs`; check the eval report for
+the exact evidence (blocks / insns / ir_ops / lift ratio / GPU backend).
+
+| Method | CLI | What you get | Output shape |
+|---|---|---|---|
+| **Stage-0** (default) | `ghidrust decompile PATH [--addr HEX] [--count N]` | CFG → pseudo-C: `void FUN_<va>() { block_0: … goto/return; }`. Mnemonic-style scaffolding — no fabricated locals or types. | stdout `pseudo_c`; stderr `[name] stage=0 blocks=… edges=… insns=… lines=…`; `--json` ⇒ `Decompile { name, blocks[], edges[], insn_count, pseudo_c }`. |
+| **Stage-0.5 IR** | `ghidrust decompile PATH --stage05 [--addr HEX] [--count N]` | IR-informed emit from x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, augmented assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 for uncovered ops. Pseudo-C header line is `// Ghidrust Stage-0.5 IR emit — function …`. | stdout `pseudo_c`; stderr adds `ir_ops=… lift=…%`; `--json` ⇒ `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
+| **decompile-bench** | `ghidrust decompile-bench PATH [--functions N] [--count N] [--out F]` | Runs default analyzers, then benches Stage-0 vs Stage-0.5 across all discovered functions: totals `insns`, `ir_ops`, per-stage `µs`, avg `lift_ratio`. | Text (or JSON via `--json`); writes to `--out FILE` too. Eval sample: 6 fns, 33 insns, 48 IR ops, avg lift 0.96. |
+| **ghidra-headtohead** | `ghidrust ghidra-headtohead PATH [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out F]` | Optional oracle: run Ghidra headless (`--ghidra DIR`) or ingest captured JSON (`--captured …`) and diff Stage-0 / Stage-0.5 vs Ghidra decomp lines. | Text or JSON; without Ghidra, report still generates but oracle rows note unavailability. Not part of the eval sweep. |
+| **gpu-decompile** | `ghidrust gpu-decompile PATH [--out F] [--metrics F]` | Full GPU-resident VRAM multipass decompile of entry: decode → leaders → blocks → emit; single final download; asserts `mid_pipeline_host_reads == 0` and matches CPU multipass oracle. | `.gdecomp` binary dump; stdout `pseudo_c`; `--json`/`--metrics` ⇒ `{gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit on equivalence break. |
+| **re-bench** | `ghidrust re-bench PATH [--out F]` | CPU decompile of entry + bulk RE on a padded haystack, once on CPU parallel and once on GPU/fallback. Asserts equal bulk hit counts. | Text (or JSON): `decompile_cpu {backend, ms, entry, name, blocks, edges, insns, lines, chars, pseudo_c_head}`, `bulk_cpu`, `bulk_gpu` (each: `{mode, backend, ms, hits, haystack_bytes}`), `note`. |
+
+Related GPU / matrix benches (shipped, callable, **not** part of the eval sweep):
+
+| Method | CLI | Purpose |
+|---|---|---|
+| `analyzer-bench` | `ghidrust analyzer-bench PATH [--large] [--out F] [--json]` | All 20 analyzers + a GPU-decompile row: CPU wall-time vs `pcie_upload / device_ms / pcie_download` split, per-analyzer `equal` correctness flag. |
+| `analyzer-bench-matrix` | `ghidrust analyzer-bench-matrix` | Static analyzer → GPU-strategy matrix (e.g. `ASCII Strings → printable_run`, `WindowsPE x86 PE RTTI Analyzer → rtti_scan`). |
+| `bulk-bench` | `ghidrust bulk-bench PATH [--json]` | Seq / parallel-CPU / GPU-or-fallback bulk-string timings. |
+| `rtti-gpu-bench` | `ghidrust rtti-gpu-bench PATH [--out F] [--json]` | CPU `recover_rtti` vs GPU `rtti_scan` seed with PCIe / device split. |
+
+Guardrails to respect:
+
+- Don't claim Hex-Rays or Ghidra C parity. Emit only what the current stage produces (Stage-0 scaffolding or Stage-0.5 IR-informed lines).
+- If `gpu-decompile` exits non-zero (`equivalence_multipass = false` or `mid_pipeline_host_reads != 0`), treat the GPU output as suspect — CPU multipass is the oracle.
+- Small binaries often show GPU wall-clock slower than CPU: `pcie_upload` and adapter init dominate. Always read the `device_ms` split, not the wall-clock alone, when arguing about GPU perf.
 
 ---
 
@@ -227,9 +313,9 @@ ASCII Strings · Aggressive Instruction Finder · Call Convention ID · Call-Fix
 
 ## Agent rules
 
-**Do:** exact analyzer names; `--analyzer` or `--analyzers`; `--gpu` when GPU enrich wanted; `--json` for scripts; `analyzer-bench-matrix` for strategy list.
+**Do:** exact analyzer names; `--analyzer` or `--analyzers`; `--gpu` when GPU enrich wanted; `--json` for scripts; `analyzer-bench-matrix` for strategy list; prefer `decompile --stage05` when you want the IR-informed emit; `decompile-bench` to capture wall-clock + lift-ratio numbers.
 
-**Don't:** invent typed/Hex-Rays C beyond Stage-0 emit; claim Ghidra MCP is Ghidrust; claim Ghidra-surpass metrics without captured benches; skip empty-result honesty; conflate PCIe with on-device time.
+**Don't:** invent typed/Hex-Rays C beyond the emit stage in use; claim Ghidra MCP is Ghidrust; claim Ghidra-surpass metrics without captured benches; skip empty-result honesty; conflate PCIe with on-device time.
 
 ---
 

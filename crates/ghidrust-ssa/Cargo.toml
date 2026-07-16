@@ -1,0 +1,14 @@
+[package]
+name = "ghidrust-ssa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CFG + dominators + SSA scaffolding over ghidrust-ir (Ghidra Decomp inspired, hand-rolled)"
+
+[dependencies]
+ghidrust-ir = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+ghidrust-decode = { workspace = true }
+ghidrust-lift = { workspace = true }

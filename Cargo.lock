@@ -1318,6 +1318,7 @@ version = "0.1.0"
 dependencies = [
  "ghidrust-core",
  "ghidrust-decomp",
+ "ghidrust-types",
  "serde",
  "serde_json",
 ]
@@ -1349,8 +1350,15 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "ghidrust-core",
+ "ghidrust-decode",
+ "ghidrust-ir",
+ "ghidrust-lift",
+ "ghidrust-ssa",
+ "ghidrust-structure",
+ "ghidrust-types",
  "pollster",
  "serde",
+ "serde_json",
  "wgpu",
 ]
 
@@ -1362,6 +1370,7 @@ dependencies = [
  "egui",
  "ghidrust-core",
  "ghidrust-decomp",
+ "ghidrust-types",
  "rfd",
 ]
 
@@ -1378,6 +1387,38 @@ version = "0.1.0"
 dependencies = [
  "ghidrust-decode",
  "ghidrust-ir",
+]
+
+[[package]]
+name = "ghidrust-ssa"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-decode",
+ "ghidrust-ir",
+ "ghidrust-lift",
+ "serde",
+]
+
+[[package]]
+name = "ghidrust-structure"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-decode",
+ "ghidrust-ir",
+ "ghidrust-lift",
+ "ghidrust-ssa",
+ "serde",
+]
+
+[[package]]
+name = "ghidrust-types"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-decode",
+ "ghidrust-ir",
+ "ghidrust-lift",
+ "ghidrust-ssa",
+ "serde",
 ]
 
 [[package]]

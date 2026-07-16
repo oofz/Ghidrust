@@ -1,0 +1,15 @@
+[package]
+name = "ghidrust-structure"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Region structuring (if/else, loops, switch) over ghidrust-ssa CFG — hand-rolled, Ghidra Decomp inspired"
+
+[dependencies]
+ghidrust-ir = { workspace = true }
+ghidrust-ssa = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+ghidrust-decode = { workspace = true }
+ghidrust-lift = { workspace = true }

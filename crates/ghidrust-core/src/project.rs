@@ -1,6 +1,7 @@
 //! On-disk Ghidrust projects: create, open, import binaries, save analysis results.
 
 use crate::disasm::{disassemble_range, Instruction};
+use crate::edits::ProgramEdits;
 use crate::error::{Error, Result};
 use crate::program::{AnalysisState, Program};
 use crate::rtti::RttiReport;
@@ -45,6 +46,12 @@ pub struct SavedAnalysis {
     pub rtti: RttiReport,
     pub listing: Vec<Instruction>,
     pub saved_analyzers: Vec<String>,
+    /// Phase C (M3) — user edits (rename / retype / comments / signatures /
+    /// user types / applied types). Round-trip through save/load so a user's
+    /// work survives project reopen. `#[serde(default)]` keeps older snapshots
+    /// deserializable (they land with `ProgramEdits::default()`).
+    #[serde(default)]
+    pub edits: ProgramEdits,
 }
 
 /// Tiny sidecar for instant UI tree/overview without loading full RTTI (often 100MB+ JSON).
@@ -247,6 +254,24 @@ impl Project {
         if let Some(ref s) = saved {
             prog.analysis = s.analysis.clone();
             prog.rtti = s.rtti.clone();
+            // Phase C (M3) — replay every user edit into the fresh program so
+            // renames / retypes / comments / signatures / user types /
+            // applied-types survive project reopen. Mirror renames into
+            // `analysis.functions[i].name` so every downstream pane picks
+            // them up without a re-analyze.
+            prog.edits = s.edits.clone();
+            for (va, name) in &prog.edits.renames.clone() {
+                if let Some(f) = prog.function_at_mut(*va) {
+                    f.name = name.clone();
+                } else if let Some(sym) = prog
+                    .analysis
+                    .symbols
+                    .iter_mut()
+                    .find(|s| s.va == *va)
+                {
+                    sym.name = name.clone();
+                }
+            }
         }
         Ok((prog, saved))
     }
@@ -330,6 +355,7 @@ impl Project {
             rtti: prog.rtti.clone(),
             listing,
             saved_analyzers: analyzer_names.iter().map(|s| (*s).to_string()).collect(),
+            edits: prog.edits.clone(),
         };
         self.save_analysis(&entry.id, &saved)?;
         Ok((prog, saved))
@@ -406,6 +432,7 @@ impl Project {
             rtti: prog.rtti.clone(),
             listing: listing.to_vec(),
             saved_analyzers: analyzers_run.to_vec(),
+            edits: prog.edits.clone(),
         };
         self.save_analysis(id, &saved)?;
         Ok(saved)
@@ -636,6 +663,87 @@ mod tests {
         assert_eq!(loaded.rtti.classes.len(), saved.rtti.classes.len());
         // Prefer bin even if json exists
         assert!(proj.has_saved_analysis(&a.id));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Phase C (M3) — ProgramEdits must round-trip through save/load so a
+    // user's renames / comments / retypes / signatures / user types /
+    // applied-types survive a project reopen.
+    #[test]
+    fn program_edits_round_trip_through_save_and_load() {
+        use crate::edits::{CommentKind, FunctionSignatureEdit};
+
+        let dir = std::env::temp_dir().join(format!(
+            "ghidrust_edits_rt_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let mut proj = Project::create(&dir, "Edits").unwrap();
+        let entry = proj.import_file(fixture_path("tiny_x64.pe")).unwrap();
+        let (mut prog, _) = proj
+            .analyze_file(&entry, &["Function Start Search"])
+            .unwrap();
+        let va = prog.entry.expect("entry va");
+
+        // Apply a Ghidra-style workflow: rename, retype, comment kinds,
+        // signature commit, user type + apply @ cursor.
+        prog.edits.set_rename(va, "my_main");
+        if let Some(f) = prog.function_at_mut(va) {
+            f.name = "my_main".into();
+        }
+        prog.edits.set_retype(va, "int32_t *");
+        prog.edits.set_comment(va, CommentKind::Eol, "eol!");
+        prog.edits.set_comment(va, CommentKind::Plate, "plate!");
+        prog.edits.set_function_signature(
+            va,
+            FunctionSignatureEdit {
+                signature: "int32_t my_main(char *argv)".into(),
+                calling_convention: Some("windowsx64".into()),
+                parameters: vec!["char *argv".into()],
+                return_type: Some("int32_t".into()),
+                locals: vec!["local_8".into()],
+            },
+        );
+        prog.edits
+            .set_user_type("Widget", "struct Widget { int id; }");
+        prog.edits.set_applied_type(va, "Widget");
+
+        let listing = disassemble_range(&prog, va, 8).unwrap_or_default();
+        proj.save_program_results(&entry.id, &prog, &listing, &["Function Start Search".into()])
+            .unwrap();
+
+        // Reopen: full replay must land back on Program::edits and mirror
+        // the rename into analysis.functions.
+        let proj2 = Project::open(&dir).unwrap();
+        let e2 = proj2
+            .meta
+            .files
+            .iter()
+            .find(|f| f.id == entry.id)
+            .unwrap();
+        let (prog2, saved2) = proj2.load_program_with_results(e2).unwrap();
+        let saved2 = saved2.expect("saved analysis");
+        assert_eq!(saved2.edits.rename_at(va), Some("my_main"));
+        assert_eq!(prog2.edits.rename_at(va), Some("my_main"));
+        assert_eq!(prog2.edits.retype_at(va), Some("int32_t *"));
+        assert_eq!(prog2.edits.comment_at(va, CommentKind::Eol), Some("eol!"));
+        assert_eq!(prog2.edits.comment_at(va, CommentKind::Plate), Some("plate!"));
+        let sig = prog2.edits.function_signature(va).unwrap();
+        assert_eq!(sig.signature, "int32_t my_main(char *argv)");
+        assert_eq!(sig.return_type.as_deref(), Some("int32_t"));
+        assert_eq!(sig.parameters.len(), 1);
+        assert_eq!(sig.locals.len(), 1);
+        assert_eq!(
+            prog2.edits.user_types.get("Widget").map(String::as_str),
+            Some("struct Widget { int id; }")
+        );
+        assert_eq!(prog2.edits.applied_type_at(va), Some("Widget"));
+        // Rename should also be mirrored into analysis (so tables see it).
+        assert_eq!(
+            prog2.function_at(va).map(|f| f.name.as_str()),
+            Some("my_main")
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -1,3 +1,4 @@
+use crate::edits::ProgramEdits;
 use crate::rtti::RttiReport;
 use serde::{Deserialize, Serialize};
 
@@ -129,6 +130,10 @@ pub struct Program {
     pub file_bytes: Vec<u8>,
     pub rtti: RttiReport,
     pub analysis: AnalysisState,
+    /// User-facing edits (renames, comments, retypes, function signatures, user types).
+    /// Stored side-car so analyzer output remains "honest / never fabricated".
+    #[serde(default)]
+    pub edits: ProgramEdits,
 }
 
 impl Program {
@@ -143,6 +148,7 @@ impl Program {
             file_bytes: Vec::new(),
             rtti: RttiReport::default(),
             analysis: AnalysisState::default(),
+            edits: ProgramEdits::default(),
         }
     }
 

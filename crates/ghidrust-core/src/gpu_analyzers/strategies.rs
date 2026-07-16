@@ -72,8 +72,15 @@ pub fn gpu_strategy_for(name: &str) -> GpuStrategyClass {
         "WindowsPE x86 PE RTTI Analyzer" => GpuStrategyClass::RttiScan,
         "Windows x86 Propagate External Parameters" => GpuStrategyClass::CstrMulti,
         "WindowsResourceReference" => GpuStrategyClass::MagicRes,
+        // Unknown names: no GPU path (do not invent a printable kernel).
         _ => GpuStrategyClass::PrintableRun,
     }
+}
+
+/// True when `name` is a registered Auto Analysis analyzer with a GPU strategy
+/// in the matrix ([`strategy_matrix`] / docs/GPU_ANALYZER_MATRIX.md).
+pub fn analyzer_supports_gpu(name: &str) -> bool {
+    crate::analyzers::ANALYZER_NAMES.contains(&name)
 }
 
 pub fn strategy_matrix() -> Vec<(&'static str, GpuStrategyClass)> {

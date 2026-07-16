@@ -19,7 +19,7 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 | **Agent-ready** | Headless CLI + stdio MCP so coding agents can load, disassemble, analyze, and decompile without a GUI |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
 
-**Current maturity (Stage-0):** decompile emit is still CFG → goto / mnemonic-style **pseudo-C**. SSA, structuring, and typed C are the roadmap; Hex-Rays-class expression/type quality is a later phase after the Ghidra bar is met. **Non-goals (today):** multi-ISA SLEIGH runtime, debugger integration, or “GPU is always faster.”
+**Current maturity:** Stage-0 CFG → goto / mnemonic-style pseudo-C is the default and regression oracle. **Stage-0.5** is opt-in (`decompile --stage05`) and emits IR-informed statements (`xor a,a → a=0`, augmented-assign, `push`/`pop`, direct `call`, flag-driven `jcc`) from the hand-rolled x86-64 lifter into `ghidrust-ir`, falling back to Stage-0 scaffolding for anything the lifter has not yet covered — **no fabricated C**. **Stage-1** (`decompile <path> --stage1` / GUI Decompiler stage picker) runs the full hand-rolled pipeline: `ghidrust-ssa` builds CFG + dominators + Cytron phi placement + a Cytron rename pass with copy-propagation, `ghidrust-structure` recovers `if`/`while`/`do-while`/`loop`/`return` regions (natural loops + iterative post-dominators), and `ghidrust-types` supplies a small type lattice (`Bottom`→`Bool`/`IntN`/`Ptr`→`Any`) with stack-local + x86-64 SysV/Windows integer-register parameter recovery. Stage-1 falls back to Stage-0.5-shaped scaffolding for irreducible regions or lift ratios <50% — again, no fabricated C. Head-to-head timings against Ghidra headless are captured (never fabricated) via `ghidrust ghidra-headtohead` and [`docs/GHIDRA_HEADTOHEAD.md`](docs/GHIDRA_HEADTOHEAD.md). Hex-Rays-class quality remains a later phase after the Ghidra bar is met. **Non-goals (today):** multi-ISA SLEIGH runtime, switch-statement structuring, debugger integration, or "GPU is always faster."
 
 ---
 
@@ -110,6 +110,92 @@ Fixtures live under [`fixtures/`](fixtures/) (`tiny_x64.pe`, `analysis_lab.pe`, 
 
 ---
 
+## Capabilities
+
+Every row below is exercised end-to-end (CLI + oracle) by
+[`crates/ghidrust-cli/tests/eval_analysis_decompile.rs`](crates/ghidrust-cli/tests/eval_analysis_decompile.rs);
+the report lands in [`dev/EVAL_ANALYSIS_DECOMPILE_REPORT.md`](dev/EVAL_ANALYSIS_DECOMPILE_REPORT.md)
+and machine-readable form at `dev/eval_analysis_decompile.json`. Rerun with:
+
+```bash
+cargo test -p ghidrust-cli --test eval_analysis_decompile -- --nocapture
+```
+
+Analyzer names are the exact strings from `ghidrust analyzers` and from the
+Auto Analysis screenshot Ghidra ships with. Outputs are honest: no fabricated
+symbols, no Hex-Rays / Ghidra C mimicry — you get structured JSON fields plus
+one human-readable status line per analyzer.
+
+### Auto Analysis (20)
+
+Common invocation shapes:
+
+```bash
+ghidrust analyze <path> --analyzer "<NAME>" --json
+ghidrust analyze <path> --analyzers "<NAME_A>,<NAME_B>" --gpu --json
+```
+
+The columns below reference fields on `AnalyzerOutput` (per-analyzer entry
+inside `analysis.results[*]` in `--json` output).
+
+| # | Name (exact) | What it does | `--json` output fields | Human message |
+|---|---|---|---|---|
+| 1 | `ASCII Strings` | Bulk scan of executable + data blocks for ≥4-char printable ASCII runs using the preferred bulk backend (Sequential / ParallelCpu / GpuOrFallback). | `strings: [{va, value, length}]` | `found N ASCII string(s) [BulkScanMode…]` |
+| 2 | `Aggressive Instruction Finder` | Fills real code gaps (bytes not covered by any known function): validates a decodable prologue-shaped run, adds new `FunctionInfo` and a `DiscoveredRange`. Never fabricates when there is no gap. | `recovered_ranges: [{start, end}]` (+ new entries in `functions`) | `found N recovered code range(s)` |
+| 3 | `Call Convention ID` | Tags every discovered function with a calling-convention heuristic (Win64 x64 default, cdecl / stdcall / thiscall fallbacks). | `conventions: [[va, name], …]` (+ `functions[*].calling_convention`) | `identified N calling convention(s)` |
+| 4 | `Call-Fixup Installer` | Detects Windows security cookie / import-thunk stubs and records a fixup entry with the stub VA. | `call_fixups: [{fixup_name, call_va}]` | `installed N call fixup(s)` |
+| 5 | `Create Address Tables` | Recovers jump/vtable-style contiguous VA tables inside `.rdata`/data and lists their entries. | `address_tables: [{base, count, entries: [va,…]}]` | `found N address table(s)` |
+| 6 | `Decompiler Parameter ID` | Scans each function for arg-register spills (`mov [rbp+…], rcx/rdx/…`) and attaches typed `arg0:rcx` / `arg1:rdx` slots — no invented parameters on bare bodies. | `functions: [{entry, parameters: ["arg0:rcx", …]}]` | `recovered parameters for N function(s)` |
+| 7 | `Decompiler Switch Analysis` | Turns jump-table address tables into switch structures with `(case_value, target_va)` pairs. | `switches: [{jump_va, cases: [[val, target], …]}]` | `recovered N switch table(s)` |
+| 8 | `Demangler Microsoft` | Parses PE symbols in the MSVC (`?...@@`) mangling scheme, records demangled name alongside the raw symbol. | `symbols: [{name, va, demangled?}]` | `demangled N symbol(s)` |
+| 9 | `Embedded Media` | Scans data for well-known magic prefixes (PNG, JPG, GIF, WAV, …) and records their VA + kind. | `media: [{kind, va}]` | `found N media signature(s)` |
+| 10 | `Function ID` | Hashes each function's prologue window and matches it against the shipped FID catalog (`fid_*` names). | `fid_matches: [{entry, matched_name}]` | `matched N FID signature(s)` |
+| 11 | `Function Start Search` | Seeds functions from entry, symbol table, exact `55 48 89 e5` prologues, and orphan `sub rsp, imm8` starts. Grows each until `ret`/`int3`. Drops mid-body seeds. | `functions: [{entry, end, name}]` | `identified N function start(s)` |
+| 12 | `Non-Returning Functions - Discovered` | Marks functions ending in `int3` without a `ret`, plus known no-return imports (`ExitProcess`, `abort`, …). | `noreturn_entries: [va, …]` (+ `functions[*].noreturn`) | `marked N noreturn function(s)` |
+| 13 | `PDB MSDIA` | Portable PDB (MSF7) reader tuned to the MSDIA symbol shapes (`S_PUB32`, `S_GPROC32` names). | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (msdia→universal)` |
+| 14 | `PDB Universal` | Same MSF7 reader without MSDIA-specific filtering — surfaces every stream symbol it can find (`MSF7` marker included as a sentinel symbol). | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (universal)` |
+| 15 | `Shared Return Calls` | Finds sites where multiple callers reuse the same epilogue block (tail-call / shared-return pattern). | `shared_returns: [va, …]` | `marked N shared return site(s)` |
+| 16 | `Stack` | Per-function frame recovery: reads `sub rsp, imm` / `push rbp; mov rbp, rsp` to compute `frame_size=0x…`, then attaches `param_…` slots. Won't pollute functions that have no real frame. | `stack_frames: [[va, ["frame_size=0x20", "param_rcx@0x8", …]], …]` | `recovered N stack frame(s)` |
+| 17 | `Variadic Function Signature Override` | Ensures API symbols matching `printf` / `sprintf` / `scanf` families exist, tags them `varargs=true` cdecl and gives them a `format` param. | `varargs_entries: [va, …]` (+ `functions[*].varargs`) | `applied varargs to N function(s)` |
+| 18 | `WindowsPE x86 PE RTTI Analyzer` | MSVC C++ RTTI recovery: locates COL / class-hierarchy / type-info descriptors, links them to vtables, extracts demangled class names. | `rtti: {classes: [{name, type_info_va, vtable_va, col_va, kind}], notes: [str,…]}` | `recovered N RTTI class record(s)` |
+| 19 | `Windows x86 Propagate External Parameters` | Applies known prototypes to imported Windows APIs (`ExitProcess(UINT)`, `GetProcAddress`, …) so calls resolve typed args. | `external_params: [[va, prototype], …]` | `applied N external parameter prototype(s)` |
+| 20 | `WindowsResourceReference` | Parses `.rsrc` and records resource records (`VERSION`, `RT_ICON`, …) with their VA. | `resources: [{name, va}]` | `parsed N resource record(s)` |
+
+Defaults (empty `--analyzer` list): **ASCII Strings**, **WindowsPE x86 PE RTTI Analyzer**, **Function Start Search**, **Create Address Tables**, **Embedded Media**, **Demangler Microsoft**.
+
+Notes:
+
+- `--gpu` on `analyze` runs each selected CPU analyzer, then per-analyzer GPU seed kernels; the CPU output above is unchanged, but the human message is appended with `gpu_enrich hits_merged=… backend=…`.
+- Every entry above is a **PASS** in [`dev/EVAL_ANALYSIS_DECOMPILE_REPORT.md`](dev/EVAL_ANALYSIS_DECOMPILE_REPORT.md); the `analysis_lab.pe` / `tiny_x64.pe` fixtures pin known VAs (e.g. `printf@0x140002010`, `PNG@0x140002050`, `VERSION@0x140002090`, `Widget` RTTI class).
+
+### Decompile methods
+
+| Method | CLI | What it emits | Outputs / where to see them |
+|---|---|---|---|
+| **Stage-0** (default) | `ghidrust decompile <path> [--addr HEX] [--count N]` | CFG-driven pseudo-C: `void FUN_<va>() { block_0: … goto/return; }` — mnemonic-style scaffolding, no fabricated locals or types. | stdout: `pseudo_c`. stderr status: `[name] stage=0 blocks=… edges=… insns=… lines=…`. `--json`: full `Decompile { name, blocks[], edges[], insn_count, pseudo_c }`. |
+| **Stage-0.5 IR** | `ghidrust decompile <path> --stage05 [--addr HEX] [--count N]` | IR-informed emit from the hand-rolled x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, `add/sub/or/and/xor/shl/shr` augmented-assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 scaffolding for uncovered ops. Pseudo-C header line is `// Ghidrust Stage-0.5 IR emit — function …`. | stdout: `pseudo_c`. stderr adds `ir_ops=… lift=…%`. `--json`: `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
+| **decompile-bench** | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE]` | Runs default analyzers, then for every discovered function runs Stage-0 and Stage-0.5 back-to-back: totals `insns`, `ir_ops`, per-stage `µs`, and average lift-ratio. | Text table on stdout (or JSON via `--json`); optional `--out FILE` writes the same. Eval report captured 6 functions / 33 insns / 48 IR ops / avg lift 0.96 on `analysis_lab.pe`. |
+| **ghidra-headtohead** | `ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE]` | Optional Ghidra oracle: either runs Ghidra headless (`--ghidra DIR`) or loads pre-captured JSON (`--captured JSON`) and diffs Stage-0 / Stage-0.5 vs Ghidra decomp output. | Text or JSON report; no Ghidra install ⇒ report notes that both sides ran but oracle was unavailable. Useful for local Ghidra-surpass tracking, not shipped in the eval report. |
+| **gpu-decompile** | `ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE]` | Full **GPU-resident** VRAM multipass decompile of the entry function: decode → leaders → blocks → emit kernels; single final download; asserts `mid_pipeline_host_reads == 0` and multipass-CPU equivalence. | `.gdecomp` binary dump at `--out`. stdout: pseudo-C. `--json` / `--metrics FILE` produces `{gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit if equivalence fails or a mid-pipeline host read is observed. |
+| **re-bench** | `ghidrust re-bench <path> [--out FILE]` | CPU decompile of the entry + bulk RE on a padded haystack, once on CPU (parallel) and once on GPU / fallback; asserts equal bulk hit counts. | Text report to stdout (or JSON with `--json` / `--out`). Fields: `decompile_cpu {backend, ms, entry, name, blocks, edges, insns, lines, chars, pseudo_c_head}`, `bulk_cpu`, `bulk_gpu` (each: `mode, backend, ms, hits, haystack_bytes`), plus `note` explaining that decompile stays on CPU. |
+
+Two more benches are shipped and callable from the CLI even though they are not part of the analyzer/decompile eval sweep — they measure how the analyzer and RTTI GPU strategies compare against their CPU oracles:
+
+| Method | CLI | Purpose |
+|---|---|---|
+| `analyzer-bench` | `ghidrust analyzer-bench <path> [--large] [--out FILE] [--json]` | All 20 analyzers + a GPU-decompile row: CPU wall-time vs GPU `pcie_upload` / `device_ms` / `pcie_download` split, with a per-analyzer `equal` correctness flag. |
+| `analyzer-bench-matrix` | `ghidrust analyzer-bench-matrix` | Print the static analyzer → GPU-strategy matrix (e.g. `ASCII Strings → printable_run`, `WindowsPE x86 PE RTTI Analyzer → rtti_scan`). |
+| `bulk-bench` | `ghidrust bulk-bench <path> [--json]` | Sequential vs parallel-CPU vs GPU/fallback bulk-string timings on the program's own bytes + a padded haystack. |
+| `rtti-gpu-bench` | `ghidrust rtti-gpu-bench <path> [--out FILE] [--json]` | CPU `recover_rtti` vs GPU `rtti_scan` seed with `pcie_upload / device_ms / pcie_download` split and a plain-English performance-model note. |
+
+Honesty guardrails (mirrored in the eval report):
+
+- Decompile output is Stage-0 (CFG + gotos + mnemonic-style lines) or Stage-0.5 (IR-informed statements). It is **not** Hex-Rays-quality C; the roadmap is SSA-C → typed C.
+- `gpu-decompile` exits non-zero if it observes a mid-pipeline host read or if its output disagrees with the CPU multipass oracle — GPU wall-clock is not privileged over correctness.
+- On small fixtures the GPU path is often correct but slower than CPU because of adapter init + PCIe upload; the `pcie_*` / `device_ms` split in every bench makes that explicit.
+
+---
+
 ## Using the three surfaces
 
 Ghidrust exposes the **same analysis core** three ways. Pick one (or mix them):
@@ -153,9 +239,13 @@ ghidrust analyzers
 ghidrust analyze /path/to/app.exe --analyzers "Function Start Search,ASCII Strings" --json
 ghidrust analyze /path/to/app.exe --analyzer "Stack" --analyzer "Function ID" --gpu --json
 
-# CPU decompile (pseudo-C)
+# CPU decompile — Stage-0 (default) or Stage-0.5 IR-informed
 ghidrust decompile /path/to/app.exe
 ghidrust decompile /path/to/app.exe --addr 0x140001000
+ghidrust decompile /path/to/app.exe --stage05 --json    # IR-informed emit + lift-coverage JSON
+
+# Wall-clock + lift-coverage bench across all discovered functions
+ghidrust decompile-bench /path/to/app.exe --functions 32 --count 128 --out bench.txt
 
 # Experimental GPU decompile → greppable dump
 ghidrust gpu-decompile /path/to/app.exe --out entry.gdecomp --metrics metrics.log --json
@@ -198,7 +288,8 @@ MyProject/
 | `ghidrust rtti <path>` | RTTI recovery only |
 | `ghidrust analyzers` | List Auto Analysis names |
 | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu]` | Run analyzers; `--gpu` = bulk strings + seed enrich |
-| `ghidrust decompile <path> [--addr HEX]` | **CPU** decompile (pseudo-C) |
+| `ghidrust decompile <path> [--addr HEX] [--stage05]` | **CPU** decompile (Stage-0 default; `--stage05` for IR-informed emit) |
+| `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` | Per-function wall-clock + lift-coverage: Stage-0 vs Stage-0.5 |
 | `ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE]` | **GPU-resident** multipass → `.gdecomp` |
 | `ghidrust bulk-bench <path>` | Seq / parallel CPU / GPU bulk string timings |
 | `ghidrust re-bench <path> [--out FILE]` | CPU decompile + bulk CPU then GPU metrics |
@@ -329,16 +420,32 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
                     │  ghidrust-core  │  loaders, disasm, analyzers, bulk GPU
                     └────────┬────────┘
                              ▼
+        ┌──────────────┬─────┴──────┬──────────────┐
+        │              │            │              │
+  ┌──────────┐  ┌─────────────┐ ┌────────────┐ ┌──────────────┐
+  │ decode   │  │    lift     │ │     ir     │ │     ssa      │  hand-rolled
+  │ x86-64   │→│ x86-64→IR   │→│ pcode-like │→│ cfg/dom/DF/  │  decompile
+  │ length + │  │ + flag model│ │ ops+varnode│ │ phi placement│  pipeline
+  │ mnemonics│  │             │ │            │ │              │
+  └──────────┘  └─────────────┘ └────────────┘ └──────────────┘
+                             │
+                             ▼
                     ┌─────────────────┐
-                    │ ghidrust-decomp │  CPU decompile + GPU VRAM multipass
+                    │ ghidrust-decomp │  Stage-0 CFG→pseudo-C (oracle)
+                    │                 │  Stage-0.5 IR-informed emit
+                    │                 │  GPU VRAM multipass (experimental)
                     └─────────────────┘
 ```
 
 | Crate | Role |
 |-------|------|
 | `ghidrust-core` | PE/ELF, x86-64, analyzers, projects, bulk scan |
-| `ghidrust-decomp` | Hand-rolled decompile: Stage-0 CFG→pseudo-C today (+ experimental GPU); SSA/typed C planned in-tree |
-| `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` |
+| `ghidrust-decode` | Hand-rolled x86-64 length-disasm + mnemonic/operand strings |
+| `ghidrust-ir` | Architecture-neutral pcode-like IR (varnodes, ops, tagged blocks, address spaces) |
+| `ghidrust-lift` | x86-64 → IR semantics with flag model + `LiftCoverage` reporting |
+| `ghidrust-ssa` | CFG-on-IR, Cooper–Harvey–Kennedy dominators, Cytron dominance frontiers, phi placement |
+| `ghidrust-decomp` | Stage-0 CFG → pseudo-C (regression oracle), Stage-0.5 IR-informed emit (`ir_emit`), decompile-bench harness, experimental GPU VRAM multipass |
+| `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` / `decompile-bench` |
 | `ghidrust-gui` | CodeBrowser-style UI |
 
 ---

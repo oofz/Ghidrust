@@ -1,0 +1,871 @@
+//! **Stage-1 SSA-C emit** — combine [`ghidrust_ssa`] renamed IR,
+//! [`ghidrust_structure::structure_function`] regions, and
+//! [`ghidrust_types::recover`] locals/params into a structured pseudo-C
+//! rendering.
+//!
+//! Stage-1 is deliberately **opt-in**: when structuring succeeds and covers
+//! enough of the CFG, callers get a real `if`/`while`/`return` skeleton with
+//! versioned SSA operands and typed parameter list. When structuring falls
+//! back to `goto` for irreducible regions, or when lift coverage is too low,
+//! Stage-1 still emits every block Stage-0 emitted — no fabrication.
+
+use crate::BasicBlock;
+use ghidrust_decode::Instruction;
+use ghidrust_ir::{AddrSpace, IrSequence, OpCode};
+use ghidrust_lift::{coverage as lift_coverage, flag_off, lift_instructions, LiftCoverage};
+use ghidrust_ssa::{
+    build_cfg_with_leaders, build_ssa, copy_propagate, SsaBlock, SsaFunction, SsaOp, SsaOperand,
+};
+use ghidrust_structure::{
+    structure_function_with_hints, NaturalLoop, Region, ShortCircuitClause, ShortCircuitKind,
+    StructureHints, StructureReport, SwitchCase,
+};
+use ghidrust_types::{recover, CallConv, ParamList, RustType, StackLocal, TypeRecovery};
+
+/// Everything Stage-1 produces alongside the C text: SSA, structure, types
+/// so callers (bench, GUI, MCP) can display the intermediate views without
+/// re-running the whole pipeline.
+#[derive(Debug, Clone)]
+pub struct Stage1Result {
+    pub pseudo_c: String,
+    pub ssa: SsaFunction,
+    pub structure: StructureReport,
+    pub types: TypeRecovery,
+    pub coverage: LiftCoverage,
+}
+
+/// Compute a full Stage-1 rendering for a block-partitioned function.
+///
+/// `blocks` and `insns` are the Stage-0 outputs; `entry` is the function
+/// address for pretty-printing; `conv` selects the calling convention used
+/// for parameter recovery.
+pub fn emit_stage1(
+    name: &str,
+    entry: u64,
+    blocks: &[BasicBlock],
+    insns: &[Instruction],
+    conv: CallConv,
+) -> Stage1Result {
+    emit_stage1_with_hints(name, entry, blocks, insns, conv, &StructureHints::default())
+}
+
+/// Hint-aware Stage-1 emit. Same as [`emit_stage1`] but takes
+/// [`StructureHints`] so callers can promote known switch tables (from
+/// `Program.analysis.switches`) into structured `switch { case … }`
+/// regions instead of falling back to `goto block_<n>`.
+pub fn emit_stage1_with_hints(
+    name: &str,
+    entry: u64,
+    blocks: &[BasicBlock],
+    insns: &[Instruction],
+    conv: CallConv,
+    hints: &StructureHints,
+) -> Stage1Result {
+    let seq: IrSequence = lift_instructions(insns);
+    let region_end = insns
+        .last()
+        .map(|i| i.address + i.length as u64)
+        .unwrap_or(entry.saturating_add(1));
+    // Seed switch-case target addresses as CFG leaders + successors of any
+    // BranchInd block so structuring can recover the switch.
+    let extra_leaders: Vec<u64> = hints
+        .switches
+        .iter()
+        .flat_map(|s| s.cases.iter().map(|(_, va)| *va))
+        .collect();
+    let cfg = build_cfg_with_leaders(&seq, entry, region_end, &extra_leaders);
+    let mut ssa = build_ssa(&cfg);
+    // Cheap dataflow pass; Stage-1 emit reads propagated operands directly.
+    let _rewrites = copy_propagate(&mut ssa);
+    let structure = structure_function_with_hints(&cfg, &ssa, hints);
+    let types = recover(&ssa, conv);
+    let coverage = lift_coverage(&seq, insns.len());
+
+    let text = render_function(name, entry, blocks, &ssa, &structure, &types, coverage);
+
+    Stage1Result {
+        pseudo_c: text,
+        ssa,
+        structure,
+        types,
+        coverage,
+    }
+}
+
+fn render_function(
+    name: &str,
+    entry: u64,
+    blocks: &[BasicBlock],
+    ssa: &SsaFunction,
+    structure: &StructureReport,
+    types: &TypeRecovery,
+    cov: LiftCoverage,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// Ghidrust Stage-1 SSA-C emit — function {name} at {entry:#x}\n"
+    ));
+    out.push_str(&format!(
+        "// blocks={} loops={} regions={} ir_ops={} lift_ratio={:.1}%\n",
+        blocks.len(),
+        structure.loops.len(),
+        structure.region.block_count(),
+        cov.total_ops,
+        cov.ratio() * 100.0
+    ));
+
+    // Function signature.
+    out.push_str(&format!("void {name}("));
+    if types.params.is_empty() {
+        out.push_str("void");
+    } else {
+        for (i, p) in types.params.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{} {}", p.ty.c_style(), p.name));
+        }
+    }
+    out.push_str(") {\n");
+
+    // Local declarations.
+    for l in types.locals.iter() {
+        out.push_str(&format!(
+            "    {} {}; /* stack@{:#x} width={} */\n",
+            l.ty.c_style(),
+            l.name,
+            l.offset,
+            l.width
+        ));
+    }
+    if !types.locals.is_empty() {
+        out.push('\n');
+    }
+
+    // Render structured body.
+    let mut ctx = RenderCtx {
+        ssa,
+        structure,
+        types,
+    };
+    render_region(&structure.region, 1, &mut ctx, &mut out);
+
+    out.push_str("}\n");
+    out
+}
+
+struct RenderCtx<'a> {
+    ssa: &'a SsaFunction,
+    structure: &'a StructureReport,
+    types: &'a TypeRecovery,
+}
+
+fn indent(n: usize) -> String {
+    "    ".repeat(n)
+}
+
+fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) {
+    match r {
+        Region::Block(b) => render_block_body(*b, ind, ctx, out, /*skip_terminator=*/ false),
+        Region::Return(b) => {
+            render_block_body(*b, ind, ctx, out, /*skip_terminator=*/ false);
+        }
+        Region::Goto(b) => {
+            out.push_str(&format!("{}goto block_{};\n", indent(ind), b));
+        }
+        Region::Seq(rs) => {
+            for r in rs {
+                render_region(r, ind, ctx, out);
+            }
+        }
+        Region::IfThen {
+            header,
+            then_branch,
+        } => {
+            render_block_body(*header, ind, ctx, out, /*skip_terminator=*/ true);
+            let cond = branch_condition(ctx.ssa, *header);
+            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
+            render_region(then_branch, ind + 1, ctx, out);
+            out.push_str(&format!("{}}}\n", indent(ind)));
+        }
+        Region::IfThenElse {
+            header,
+            then_branch,
+            else_branch,
+        } => {
+            render_block_body(*header, ind, ctx, out, /*skip_terminator=*/ true);
+            let cond = branch_condition(ctx.ssa, *header);
+            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
+            render_region(then_branch, ind + 1, ctx, out);
+            out.push_str(&format!("{}}} else {{\n", indent(ind)));
+            render_region(else_branch, ind + 1, ctx, out);
+            out.push_str(&format!("{}}}\n", indent(ind)));
+        }
+        Region::While { header, body } => {
+            let cond = branch_condition(ctx.ssa, *header);
+            out.push_str(&format!("{}while ({cond}) {{\n", indent(ind)));
+            render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ true);
+            render_region(body, ind + 1, ctx, out);
+            out.push_str(&format!("{}}}\n", indent(ind)));
+        }
+        Region::DoWhile {
+            header,
+            body,
+            latch,
+        } => {
+            out.push_str(&format!("{}do {{\n", indent(ind)));
+            render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ false);
+            render_region(body, ind + 1, ctx, out);
+            let cond = branch_condition(ctx.ssa, *latch);
+            out.push_str(&format!("{}}} while ({cond});\n", indent(ind)));
+        }
+        Region::Loop { header, body } => {
+            out.push_str(&format!("{}for (;;) {{\n", indent(ind)));
+            render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ false);
+            render_region(body, ind + 1, ctx, out);
+            out.push_str(&format!("{}}}\n", indent(ind)));
+        }
+        Region::Switch {
+            header,
+            cases,
+            default,
+        } => {
+            render_switch(*header, cases, default.as_deref(), ind, ctx, out);
+        }
+        Region::ShortCircuit {
+            parts,
+            then_branch,
+            else_branch,
+        } => {
+            let cond = compound_condition(parts, ctx);
+            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
+            render_region(then_branch, ind + 1, ctx, out);
+            if let Some(e) = else_branch {
+                out.push_str(&format!("{}}} else {{\n", indent(ind)));
+                render_region(e, ind + 1, ctx, out);
+            }
+            out.push_str(&format!("{}}}\n", indent(ind)));
+        }
+    }
+    let _ = &ctx.structure;
+    let _ = &ctx.types;
+}
+
+fn render_switch(
+    header: u32,
+    cases: &[SwitchCase],
+    default: Option<&Region>,
+    ind: usize,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+) {
+    render_block_body(header, ind, ctx, out, /*skip_terminator=*/ true);
+    let selector = switch_selector(ctx.ssa, header);
+    out.push_str(&format!("{}switch ({selector}) {{\n", indent(ind)));
+    for c in cases {
+        out.push_str(&format!(
+            "{}case {}: /* → block_{} */\n",
+            indent(ind + 1),
+            c.selector,
+            c.target
+        ));
+        render_region(&c.body, ind + 2, ctx, out);
+        out.push_str(&format!("{}break;\n", indent(ind + 2)));
+    }
+    if let Some(d) = default {
+        out.push_str(&format!("{}default:\n", indent(ind + 1)));
+        render_region(d, ind + 2, ctx, out);
+        out.push_str(&format!("{}break;\n", indent(ind + 2)));
+    }
+    out.push_str(&format!("{}}}\n", indent(ind)));
+}
+
+fn switch_selector(ssa: &SsaFunction, block: u32) -> String {
+    let Some(b) = ssa.block(block) else {
+        return format!("switch_of_{block}");
+    };
+    let Some(last) = b.ops.last() else {
+        return format!("switch_of_{block}");
+    };
+    if !matches!(last.opcode, OpCode::BranchInd | OpCode::CallInd) {
+        return format!("switch_of_{block}");
+    }
+    last.inputs
+        .first()
+        .map(|v| format_operand_bare(v, &TypeRecovery::default()))
+        .unwrap_or_else(|| format!("switch_of_{block}"))
+}
+
+fn compound_condition(parts: &[ShortCircuitClause], ctx: &mut RenderCtx) -> String {
+    let mut out = String::new();
+    for (i, p) in parts.iter().enumerate() {
+        if i > 0 {
+            let op = match parts[i - 1].kind {
+                ShortCircuitKind::And => " && ",
+                ShortCircuitKind::Or => " || ",
+                ShortCircuitKind::Terminal => " /*?*/ ",
+            };
+            out.push_str(op);
+        }
+        if p.negated {
+            out.push('!');
+        }
+        out.push_str(&branch_condition(ctx.ssa, p.header));
+    }
+    if out.is_empty() {
+        "1 /* empty short-circuit */".to_string()
+    } else {
+        out
+    }
+}
+
+fn render_block_body(
+    b: u32,
+    ind: usize,
+    ctx: &mut RenderCtx,
+    out: &mut String,
+    skip_terminator: bool,
+) {
+    let Some(block) = ctx.ssa.block(b) else {
+        return;
+    };
+    if !block.phis.is_empty() {
+        for phi in &block.phis {
+            out.push_str(&indent(ind));
+            out.push_str(&format!(
+                "/* {} = φ({} predecessors) */\n",
+                format_value_named(phi.out, ctx.types),
+                phi.incoming.len()
+            ));
+        }
+    }
+    let last_idx = block.ops.len().saturating_sub(1);
+    for (i, op) in block.ops.iter().enumerate() {
+        let is_last = i == last_idx;
+        if skip_terminator
+            && is_last
+            && matches!(op.opcode, OpCode::CBranch | OpCode::Branch)
+        {
+            continue;
+        }
+        let Some(line) = emit_op(op, ctx) else {
+            continue;
+        };
+        out.push_str(&indent(ind));
+        out.push_str(&line);
+        out.push('\n');
+    }
+}
+
+fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
+    match op.opcode {
+        OpCode::Return => Some("return;".to_string()),
+        OpCode::Nop => None,
+        OpCode::Branch => Some(format!(
+            "goto {};",
+            emit_branch_target(op.inputs.first()?)
+        )),
+        OpCode::CBranch => {
+            // If used at Region::Block level (not consumed by an if/while
+            // wrapper) print the raw cbranch so control flow stays visible.
+            let cond = op
+                .inputs
+                .first()
+                .map(|v| format_operand(v, ctx.types))
+                .unwrap_or_else(|| "?".to_string());
+            let target = op
+                .inputs
+                .get(1)
+                .map(|v| emit_branch_target(v))
+                .unwrap_or_else(|| "?".to_string());
+            Some(format!("if ({cond}) goto {target};"))
+        }
+        OpCode::Call => {
+            let tgt = op.inputs.first()?;
+            match tgt {
+                SsaOperand::Const(v) if v.space == AddrSpace::Constant => {
+                    Some(format!("sub_{:x}();", v.offset))
+                }
+                _ => Some(format!("(*({}))();", format_operand(tgt, ctx.types))),
+            }
+        }
+        OpCode::CallInd => {
+            let tgt = op.inputs.first()?;
+            Some(format!("(*({}))();", format_operand(tgt, ctx.types)))
+        }
+        OpCode::Push => Some(format!("push({});", format_operand(op.inputs.first()?, ctx.types))),
+        OpCode::Pop => {
+            let dst = op.output?;
+            Some(format!("{} = pop();", format_value_named(dst, ctx.types)))
+        }
+        OpCode::Copy => {
+            let dst = op.output?;
+            let src = op.inputs.first()?;
+            if let SsaOperand::Value(v) = src {
+                if v.space == dst.space && v.offset == dst.offset && v.size == dst.size {
+                    return Some(format!(
+                        "/* {} = {} (self copy) */",
+                        format_value_named(dst, ctx.types),
+                        format_operand(src, ctx.types)
+                    ));
+                }
+            }
+            Some(format!(
+                "{} = {};",
+                format_value_named(dst, ctx.types),
+                format_operand(src, ctx.types)
+            ))
+        }
+        OpCode::IntXor => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            let b = op.inputs.get(1)?;
+            if let (SsaOperand::Value(av), SsaOperand::Value(bv)) = (a, b) {
+                if av.space == bv.space && av.offset == bv.offset {
+                    return Some(format!("{} = 0;", format_value_named(dst, ctx.types)));
+                }
+            }
+            Some(format!(
+                "{} = {} ^ {};",
+                format_value_named(dst, ctx.types),
+                format_operand(a, ctx.types),
+                format_operand(b, ctx.types)
+            ))
+        }
+        OpCode::IntAdd => binop("+", op, ctx),
+        OpCode::IntSub => binop("-", op, ctx),
+        OpCode::IntAnd => binop("&", op, ctx),
+        OpCode::IntOr => binop("|", op, ctx),
+        OpCode::IntMult => binop("*", op, ctx),
+        OpCode::IntLeft => binop("<<", op, ctx),
+        OpCode::IntRight => binop(">>", op, ctx),
+        OpCode::IntSRight => binop(">>>", op, ctx),
+        OpCode::IntNegate => unop("-", op, ctx),
+        OpCode::IntNot => unop("~", op, ctx),
+        OpCode::IntEqual => binop("==", op, ctx),
+        OpCode::IntNotEqual => binop("!=", op, ctx),
+        OpCode::IntLess => binop("<", op, ctx),
+        OpCode::IntLessEqual => binop("<=", op, ctx),
+        OpCode::IntSLess => binop("<", op, ctx),
+        OpCode::IntSLessEqual => binop("<=", op, ctx),
+        OpCode::BoolAnd => binop("&&", op, ctx),
+        OpCode::BoolOr => binop("||", op, ctx),
+        OpCode::BoolNegate => unop("!", op, ctx),
+        OpCode::Load => {
+            let dst = op.output?;
+            let addr = op.inputs.first()?;
+            Some(format!(
+                "{} = *({});",
+                format_value_named(dst, ctx.types),
+                format_operand(addr, ctx.types)
+            ))
+        }
+        OpCode::Store => {
+            let addr = op.inputs.first()?;
+            let val = op.inputs.get(1)?;
+            Some(format!(
+                "*({}) = {};",
+                format_operand(addr, ctx.types),
+                format_operand(val, ctx.types)
+            ))
+        }
+        OpCode::Unimplemented => Some(format!(
+            "/* unimplemented: {} */",
+            op.note.as_deref().unwrap_or("?")
+        )),
+        _ => None,
+    }
+}
+
+fn binop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
+    let dst = op.output?;
+    let a = op.inputs.first()?;
+    let b = op.inputs.get(1)?;
+    let out_txt = format_value_named(dst, ctx.types);
+    if let SsaOperand::Value(av) = a {
+        if av.space == dst.space && av.offset == dst.offset && av.size == dst.size {
+            return Some(format!(
+                "{out_txt} {sym}= {};",
+                format_operand(b, ctx.types)
+            ));
+        }
+    }
+    Some(format!(
+        "{out_txt} = {} {sym} {};",
+        format_operand(a, ctx.types),
+        format_operand(b, ctx.types)
+    ))
+}
+
+fn unop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
+    let dst = op.output?;
+    let a = op.inputs.first()?;
+    Some(format!(
+        "{} = {sym}{};",
+        format_value_named(dst, ctx.types),
+        format_operand(a, ctx.types)
+    ))
+}
+
+fn emit_branch_target(v: &SsaOperand) -> String {
+    match v {
+        SsaOperand::Const(v) if v.space == AddrSpace::Constant => format!("L_{:x}", v.offset),
+        _ => "L_?".to_string(),
+    }
+}
+
+/// Reach into the header block, find the last CBranch, and pretty-print its
+/// condition operand. Falls back to `cond_of_<block>` when the block doesn't
+/// end in a CBranch (e.g. Loop with no test).
+fn branch_condition(ssa: &SsaFunction, block: u32) -> String {
+    let Some(b) = ssa.block(block) else {
+        return format!("cond_of_{block}");
+    };
+    let Some(op) = b.ops.last() else {
+        return format!("cond_of_{block}");
+    };
+    if op.opcode != OpCode::CBranch {
+        return format!("cond_of_{block}");
+    }
+    match op.inputs.first() {
+        Some(v) => format_operand_bare(v, &TypeRecovery::default()),
+        None => "?".to_string(),
+    }
+}
+
+fn format_value_named(v: ghidrust_ssa::SsaValue, tys: &TypeRecovery) -> String {
+    match v.space {
+        AddrSpace::Stack => {
+            if let Some(local) = tys.locals.0.get(&(v.offset, v.size)) {
+                format!("{}#{}", local.name, v.version)
+            } else {
+                format!("stack_{:x}#{}", v.offset, v.version)
+            }
+        }
+        AddrSpace::Register => {
+            let name = reg_name(v.offset, v.size)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| flag_name(v.offset).unwrap_or(format!("reg_{:x}", v.offset)));
+            format!("{name}#{}", v.version)
+        }
+        AddrSpace::Unique => format!("t{}#{}", v.offset, v.version),
+        AddrSpace::Ram => format!("ram_{:x}#{}", v.offset, v.version),
+        AddrSpace::Constant => format!("{:#x}", v.offset),
+        AddrSpace::Other(id) => format!("space{}_{:x}#{}", id.0, v.offset, v.version),
+    }
+}
+
+fn format_operand(op: &SsaOperand, tys: &TypeRecovery) -> String {
+    match op {
+        SsaOperand::Const(v) => match v.space {
+            AddrSpace::Constant => format!("{:#x}", v.offset),
+            _ => format!("const:{:?}:{:x}", v.space, v.offset),
+        },
+        SsaOperand::Value(v) => format_value_named(*v, tys),
+    }
+}
+
+fn format_operand_bare(op: &SsaOperand, tys: &TypeRecovery) -> String {
+    // Same as format_operand but drops the version suffix for readability in
+    // condition contexts.
+    match op {
+        SsaOperand::Const(v) if v.space == AddrSpace::Constant => format!("{:#x}", v.offset),
+        SsaOperand::Value(v) => {
+            let raw = format_value_named(*v, tys);
+            raw.split_once('#').map(|(name, _)| name.to_string()).unwrap_or(raw)
+        }
+        _ => format_operand(op, tys),
+    }
+}
+
+fn reg_name(id: u64, size: u32) -> Option<&'static str> {
+    let names64 = [
+        "rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
+        "r13", "r14", "r15",
+    ];
+    let names32 = [
+        "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi", "r8d", "r9d", "r10d", "r11d",
+        "r12d", "r13d", "r14d", "r15d",
+    ];
+    let names16 = [
+        "ax", "cx", "dx", "bx", "sp", "bp", "si", "di", "r8w", "r9w", "r10w", "r11w", "r12w",
+        "r13w", "r14w", "r15w",
+    ];
+    let names8 = [
+        "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b",
+        "r13b", "r14b", "r15b",
+    ];
+    if id > 15 {
+        return None;
+    }
+    let idx = id as usize;
+    match size {
+        8 => Some(names64[idx]),
+        4 => Some(names32[idx]),
+        2 => Some(names16[idx]),
+        1 => Some(names8[idx]),
+        _ => None,
+    }
+}
+
+fn flag_name(offset: u64) -> Option<String> {
+    let name = match offset {
+        x if x == flag_off::ZF => "zf",
+        x if x == flag_off::CF => "cf",
+        x if x == flag_off::SF => "sf",
+        x if x == flag_off::OF => "of",
+        x if x == flag_off::PF => "pf",
+        x if x == flag_off::AF => "af",
+        x if x == flag_off::DF => "df",
+        _ => return None,
+    };
+    Some(name.to_string())
+}
+
+/// Tiny helper for tests: is a given SSA block terminated by return?
+pub fn is_terminal_block(block: &SsaBlock) -> bool {
+    matches!(block.ops.last().map(|o| o.opcode), Some(OpCode::Return))
+}
+
+/// Structural summary useful for tests and bench output.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stage1Summary {
+    pub blocks: usize,
+    pub loops: usize,
+    pub phis: usize,
+    pub locals: usize,
+    pub params: usize,
+    pub lift_ratio: f32,
+}
+
+impl Stage1Result {
+    pub fn summary(&self) -> Stage1Summary {
+        Stage1Summary {
+            blocks: self.ssa.blocks.len(),
+            loops: self.structure.loops.len(),
+            phis: self.ssa.phi_count(),
+            locals: self.types.locals.len(),
+            params: self.types.params.len(),
+            lift_ratio: self.coverage.ratio(),
+        }
+    }
+}
+
+/// Convenience: is Stage-1 output "structured enough" to prefer over Stage-0.5?
+pub fn is_structured(rep: &Stage1Result) -> bool {
+    // Structuring is only meaningful when at least one region node beyond
+    // a Seq of Blocks was recovered, or a natural loop was detected.
+    if rep.structure.loops.is_empty() && rep.structure.region.depth() == 0 {
+        return false;
+    }
+    // Require ≥50% lift coverage to trust the operand text; otherwise fall
+    // back to Stage-0.5 scaffolding.
+    rep.coverage.ratio() >= 0.5
+}
+
+/// For use from higher-level callers: how many loops (any kind) were
+/// recognised.
+pub fn loop_count(rep: &Stage1Result) -> usize {
+    rep.structure.loops.len()
+}
+
+/// For use from higher-level callers: total phi nodes inserted.
+pub fn phi_count(rep: &Stage1Result) -> usize {
+    rep.ssa.phi_count()
+}
+
+// Keep NaturalLoop reachable from the module surface for downstream consumers
+// that only import `stage1`.
+pub type NaturalLoopInfo = NaturalLoop;
+/// Re-export of the underlying stack-local type so callers depending only on
+/// `stage1` can inspect the recovery result.
+pub type Stage1Local = StackLocal;
+/// Re-export of the underlying parameter list type.
+pub type Stage1Params = ParamList;
+/// Re-export of the underlying type lattice enum.
+pub type Stage1Type = RustType;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decompile_instructions;
+    use ghidrust_decode::decode_bytes;
+
+    fn stage1_bytes(bytes: &[u8], base: u64, name: &str) -> Stage1Result {
+        let insns = decode_bytes(bytes, base, 64).unwrap();
+        let d = decompile_instructions(name, base, &insns);
+        emit_stage1(&d.name, d.entry, &d.blocks, &insns, CallConv::SystemV)
+    }
+
+    #[test]
+    fn stage1_prologue_emits_return_and_function_header() {
+        // push rbp; mov rbp,rsp; xor eax,eax; pop rbp; ret
+        let bytes = [0x55, 0x48, 0x89, 0xe5, 0x31, 0xc0, 0x5d, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x1000, "prologue");
+        let text = &rep.pseudo_c;
+        assert!(text.contains("void prologue"), "header missing:\n{text}");
+        assert!(text.contains("return;"), "return missing:\n{text}");
+        assert!(text.contains("Stage-1"), "must self-identify as Stage-1:\n{text}");
+        // eax = 0 idiom lowered
+        assert!(text.contains("= 0;"), "xor idiom collapse expected:\n{text}");
+    }
+
+    #[test]
+    fn stage1_diamond_produces_if_else_or_if() {
+        // cmp ecx, eax; je +2; xor eax, eax; ret; xor ecx, ecx; ret
+        let bytes = [0x39, 0xc1, 0x74, 0x02, 0x31, 0xc0, 0xc3, 0x31, 0xc9, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x2000, "diamond");
+        let text = &rep.pseudo_c;
+        assert!(
+            text.contains("if (") && text.contains("return;"),
+            "diamond should structure to if/return:\n{text}"
+        );
+    }
+
+    #[test]
+    fn stage1_loop_produces_while_or_for() {
+        // Synthetic: reuse the structure-crate back-edge shape by
+        // hand-building the instruction sequence, then wrap in a Stage-0
+        // decomp. We call emit_stage1 through the front door.
+        use ghidrust_decode::Instruction;
+        let mnem = |m: &str, o: &str, l: u8| Instruction {
+            address: 0,
+            bytes: vec![0; l as usize],
+            mnemonic: m.into(),
+            operands: o.into(),
+            length: l,
+        };
+        // jmp 0x2; test eax,eax; je 0x8; jmp 0x2; ret
+        let mut insns = vec![
+            mnem("jmp", "0x2", 2),
+            mnem("test", "eax, eax", 2),
+            mnem("je", "0x8", 2),
+            mnem("jmp", "0x2", 2),
+            mnem("ret", "", 1),
+        ];
+        insns[0].address = 0x0;
+        insns[1].address = 0x2;
+        insns[2].address = 0x4;
+        insns[3].address = 0x6;
+        insns[4].address = 0x8;
+        let d = decompile_instructions("loopy", 0x0, &insns);
+        let rep = emit_stage1(&d.name, d.entry, &d.blocks, &insns, CallConv::SystemV);
+        assert!(
+            rep.pseudo_c.contains("while") || rep.pseudo_c.contains("for (;;)"),
+            "expected loop in output:\n{}",
+            rep.pseudo_c
+        );
+    }
+
+    #[test]
+    fn stage1_summary_populates_counts() {
+        let bytes = [0x39, 0xc1, 0x74, 0x02, 0x31, 0xc0, 0xc3, 0x31, 0xc9, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x2000, "diamond2");
+        let s = rep.summary();
+        assert!(s.blocks >= 2);
+        assert!(s.lift_ratio > 0.5);
+    }
+
+    #[test]
+    fn stage1_params_recovered_when_present() {
+        // Function using rdi (SysV param 1): mov rax, rdi ; ret
+        let bytes = [0x48, 0x89, 0xf8, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x3000, "id");
+        let text = &rep.pseudo_c;
+        assert!(
+            text.contains("param_1") || text.contains("rdi"),
+            "expected SysV param name in signature:\n{text}"
+        );
+    }
+
+    #[test]
+    fn stage1_emits_switch_region_when_hint_supplied() {
+        use ghidrust_decode::Instruction;
+        use ghidrust_structure::{StructureHints, SwitchHint};
+
+        // Synthetic function with an indirect branch on rax whose recovered
+        // cases land at four different `ret` blocks. The lifter only turns
+        // this into a BranchInd + Returns; the hint tells the structurer
+        // which case targets correspond to which selector.
+        let mnem = |addr, m: &str, o: &str, l: u8| Instruction {
+            address: addr,
+            bytes: vec![0; l as usize],
+            mnemonic: m.into(),
+            operands: o.into(),
+            length: l,
+        };
+        // 0x0: jmp rax
+        // 0x2: ret     (case 0)
+        // 0x3: ret     (case 1)
+        // 0x4: ret     (case 2)
+        // 0x5: ret     (case 3)
+        let insns = vec![
+            mnem(0x0, "jmp", "rax", 2),
+            mnem(0x2, "ret", "", 1),
+            mnem(0x3, "ret", "", 1),
+            mnem(0x4, "ret", "", 1),
+            mnem(0x5, "ret", "", 1),
+        ];
+        let d = crate::decompile_instructions("sw_fn", 0x0, &insns);
+        let hints = StructureHints::with_switches(vec![SwitchHint {
+            jump_va: 0x0,
+            cases: vec![(0, 0x2), (1, 0x3), (2, 0x4), (3, 0x5)],
+        }]);
+        let rep = emit_stage1_with_hints(
+            &d.name,
+            d.entry,
+            &d.blocks,
+            &insns,
+            CallConv::SystemV,
+            &hints,
+        );
+        let text = &rep.pseudo_c;
+        assert!(text.contains("switch ("), "expected switch region:\n{text}");
+        for c in ["case 0", "case 1", "case 2", "case 3"] {
+            assert!(text.contains(c), "missing {c} in\n{text}");
+        }
+        assert!(text.contains("break;"), "missing break in\n{text}");
+    }
+
+    #[test]
+    fn stage1_program_wired_hints_use_program_analysis_switches() {
+        use crate::structure_hints_from;
+        use ghidrust_core::{fixture_path, load_path};
+
+        // Load lab fixture and run analyzers so Program.analysis.switches
+        // is populated; then decompile the function containing the
+        // simulated switch entry and confirm structure_hints_from picks it
+        // up (regardless of whether the CFG actually contains BranchInd —
+        // this asserts the plumbing).
+        let mut prog = load_path(fixture_path("analysis_lab.pe")).unwrap();
+        let _ = ghidrust_core::run_analyzers(&mut prog, &[]);
+        let hints = structure_hints_from(&prog);
+        assert!(
+            !hints.switches.is_empty(),
+            "expected switch analyzer to populate hints — got {} switches",
+            hints.switches.len()
+        );
+    }
+
+    #[test]
+    fn stage1_falls_back_when_lift_ratio_too_low() {
+        use ghidrust_decode::Instruction;
+        // hlt is not lifted → Stage-1 emits `unimplemented` markers instead
+        // of fabricating C.
+        let insn = Instruction {
+            address: 0x4000,
+            bytes: vec![0xf4],
+            mnemonic: "hlt".into(),
+            operands: String::new(),
+            length: 1,
+        };
+        let d = decompile_instructions("halted", 0x4000, &[insn.clone()]);
+        let rep = emit_stage1(&d.name, d.entry, &d.blocks, &[insn], CallConv::SystemV);
+        assert!(
+            rep.pseudo_c.contains("unimplemented"),
+            "unlifted op should be preserved as comment:\n{}",
+            rep.pseudo_c
+        );
+        assert!(!is_structured(&rep), "hlt should not count as structured");
+    }
+}

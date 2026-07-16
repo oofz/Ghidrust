@@ -1,0 +1,15 @@
+[package]
+name = "ghidrust-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Type lattice + local/param recovery over ghidrust-ssa (Ghidra Decomp typeprop inspired, hand-rolled)"
+
+[dependencies]
+ghidrust-ir = { workspace = true }
+ghidrust-ssa = { workspace = true }
+ghidrust-lift = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+ghidrust-decode = { workspace = true }

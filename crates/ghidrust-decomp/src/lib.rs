@@ -4,23 +4,55 @@
 //! (wall clock, function discovery, readability, differential correctness on a
 //! fixed x86-64 corpus). Hex-Rays-class quality is a later ceiling after that bar.
 //!
-//! **Stage-0 (current):** linear instructions → basic blocks + branch edges →
-//! CFG / goto-style **pseudo-C** (mnemonic scaffolding). This remains the CPU
-//! and GPU multipass emit today and the regression oracle until SSA emit is default.
+//! ## Emit stages (add capability without removing the oracle)
 //!
-//! ## CPU path (Stage-0)
-//! Linear instructions → basic blocks + branch edges → pseudo-C emit.
+//! | Stage | What it emits | Status |
+//! |-------|----------------|--------|
+//! | **Stage-0** | Linear insns → basic blocks + branch edges → mnemonic-style pseudo-C. | Current default; remains the regression oracle. |
+//! | **Stage-0.5** ([`ir_emit`]) | Same block/edge shape but statements come from lifted [`ghidrust_ir`] ops via [`ghidrust_lift`]. Recognises `xor a,a`, `mov reg,reg`, augmented-assign, `push`/`pop`, direct `call`, and flag-driven `jcc`. Unlifted instructions fall back to Stage-0 scaffolding — never fabricated. | Opt-in via [`decompile_instructions_ir`] / [`decompile_ir_at`]. |
+//! | **Stage-1 (SSA-C)** ([`stage1`]) | Full pipeline: [`ghidrust_ssa::build_ssa`] rename → [`ghidrust_structure::structure_function`] regions (`if`/`while`/`do-while`/`loop`) → [`ghidrust_types::recover`] locals/params → SSA-versioned pseudo-C. Falls back to `goto` or Stage-0.5-shaped scaffolding for irreducible/unlifted regions. | Opt-in via [`decompile_instructions_stage1`] / [`decompile_stage1_at`]. |
 //!
 //! ## GPU-resident path (`gpu_decompile`)
 //! Multi-pass SIMT kernels keep Stage-0 IR/CFG/emit buffers in **VRAM**; host only
 //! uploads code once and downloads the final dump. SSA structuring stays on the
 //! CPU roadmap. See `docs/GPU_DECOMPILE_PROCESS.md`.
 
+pub mod bench;
+pub mod ghidra_oracle;
 pub mod gpu_decompile;
+pub mod ir_emit;
+pub mod stage1;
+
+pub use bench::{bench_functions, bench_program, BenchReport, FunctionBench};
+pub use ghidra_oracle::{
+    compare as ghidra_headtohead, spawn_ghidra_headless, CapturedGhidraDecompile,
+    GhidraOracleConfig, GhidraOracleReport, GhidraSpawnError, MatchKind, StructuralMatch,
+};
+pub use stage1::{emit_stage1, emit_stage1_with_hints, is_structured, Stage1Result, Stage1Summary};
 
 use ghidrust_core::{disassemble_range, Instruction, Program};
+use ghidrust_lift::{coverage as lift_coverage, lift_instructions, LiftCoverage};
+use ghidrust_structure::{StructureHints, SwitchHint};
+use ghidrust_types::CallConv;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Convert `Program.analysis.switches` into a [`StructureHints`] the
+/// structuring layer understands. Used by [`decompile_stage1_at`] so
+/// Stage-1 emits real `switch { case … }` bodies whenever the shipped
+/// `Decompiler Switch Analysis` analyzer recovered a jump table.
+pub fn structure_hints_from(prog: &Program) -> StructureHints {
+    StructureHints::with_switches(
+        prog.analysis
+            .switches
+            .iter()
+            .map(|s| SwitchHint {
+                jump_va: s.jump_va,
+                cases: s.cases.clone(),
+            })
+            .collect(),
+    )
+}
 
 pub use gpu_decompile::{
     bench_vram_decompile_vs_cpu, classic_mnemonic_to_op, decode_gdecomp_pseudo_c,
@@ -131,6 +163,115 @@ pub fn decompile_at(prog: &Program, va: u64, max_insns: usize) -> ghidrust_core:
 pub fn decompile_entry(prog: &Program, max_insns: usize) -> ghidrust_core::Result<DecompileResult> {
     let va = prog.entry.unwrap_or(prog.image_base);
     decompile_at(prog, va, max_insns)
+}
+
+/// **Stage-0.5** decompile — same Stage-0 block/edge structure but the
+/// `pseudo_c` field is emitted from lifted IR (see [`ir_emit`]). Coverage
+/// stats are attached so callers can gate future SSA passes on "enough lift
+/// coverage".
+///
+/// Returns the enriched [`DecompileResult`] plus the [`LiftCoverage`] snapshot
+/// so benches and MCP responses can report Stage-0.5 quality without a
+/// second pass.
+pub fn decompile_instructions_ir(
+    name: impl Into<String>,
+    entry: u64,
+    insns: &[Instruction],
+) -> (DecompileResult, LiftCoverage) {
+    let mut result = decompile_instructions(name, entry, insns);
+    // Stage-0.5 uses the same instruction slice Stage-0 accepted (post-first-ret
+    // truncation). Recompute from `result.blocks` so both stay in sync.
+    let flat_insns: Vec<Instruction> = result
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter().cloned())
+        .collect();
+    let seq = lift_instructions(&flat_insns);
+    let cov = lift_coverage(&seq, flat_insns.len());
+    let ir_text = ir_emit::emit_ir_pseudo_c(&result.name, result.entry, &result.blocks, &seq);
+    result.pseudo_c = ir_text;
+    (result, cov)
+}
+
+/// Program-level Stage-0.5 convenience mirroring [`decompile_at`].
+pub fn decompile_ir_at(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+) -> ghidrust_core::Result<(DecompileResult, LiftCoverage)> {
+    let insns = disassemble_range(prog, va, max_insns)?;
+    let name = prog
+        .analysis
+        .functions
+        .iter()
+        .find(|f| f.entry == va)
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| format!("FUN_{va:016x}"));
+    Ok(decompile_instructions_ir(name, va, &insns))
+}
+
+/// **Stage-1** decompile — runs the full SSA → structure → types pipeline
+/// and returns the enriched [`DecompileResult`] plus the [`Stage1Result`]
+/// (SSA, region tree, type recovery, lift coverage). The result's
+/// `pseudo_c` is the Stage-1 text; the underlying block list matches Stage-0
+/// exactly so callers can render either stage against the same CFG.
+pub fn decompile_instructions_stage1(
+    name: impl Into<String>,
+    entry: u64,
+    insns: &[Instruction],
+    conv: CallConv,
+) -> (DecompileResult, Stage1Result) {
+    decompile_instructions_stage1_with_hints(name, entry, insns, conv, &StructureHints::default())
+}
+
+/// Hint-aware variant. Callers threading `Program.analysis.switches`
+/// through [`structure_hints_from`] land here so Stage-1 can emit a real
+/// `switch { case … }` region instead of raw `goto`.
+pub fn decompile_instructions_stage1_with_hints(
+    name: impl Into<String>,
+    entry: u64,
+    insns: &[Instruction],
+    conv: CallConv,
+    hints: &StructureHints,
+) -> (DecompileResult, Stage1Result) {
+    let mut result = decompile_instructions(name, entry, insns);
+    let flat_insns: Vec<Instruction> = result
+        .blocks
+        .iter()
+        .flat_map(|b| b.instructions.iter().cloned())
+        .collect();
+    let stage1 = emit_stage1_with_hints(
+        &result.name,
+        result.entry,
+        &result.blocks,
+        &flat_insns,
+        conv,
+        hints,
+    );
+    result.pseudo_c = stage1.pseudo_c.clone();
+    (result, stage1)
+}
+
+/// Program-level Stage-1 convenience mirroring [`decompile_at`]. Consumes
+/// any switch-analysis hints already attached to `prog.analysis.switches`.
+pub fn decompile_stage1_at(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+    conv: CallConv,
+) -> ghidrust_core::Result<(DecompileResult, Stage1Result)> {
+    let insns = disassemble_range(prog, va, max_insns)?;
+    let name = prog
+        .analysis
+        .functions
+        .iter()
+        .find(|f| f.entry == va)
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| format!("FUN_{va:016x}"));
+    let hints = structure_hints_from(prog);
+    Ok(decompile_instructions_stage1_with_hints(
+        name, va, &insns, conv, &hints,
+    ))
 }
 
 fn is_uncond_jmp(m: &str) -> bool {
@@ -437,6 +578,23 @@ mod tests {
         assert!(!d.edges.is_empty(), "expected CFG edges");
         assert!(d.pseudo_c.contains("if (") || d.pseudo_c.contains("goto block_"));
         assert!(d.pseudo_c.contains("branchy"));
+    }
+
+    #[test]
+    fn ir_stage_0_5_wraps_stage_0_and_reports_coverage() {
+        let insns = vec![
+            insn(0x1000, "push", "rbp", 1),
+            insn(0x1001, "mov", "rbp, rsp", 3),
+            insn(0x1004, "xor", "eax, eax", 2),
+            insn(0x1006, "pop", "rbp", 1),
+            insn(0x1007, "ret", "", 1),
+        ];
+        let (d, cov) = decompile_instructions_ir("test_ir", 0x1000, &insns);
+        assert!(cov.total_ops > 0);
+        assert!(cov.ratio() > 0.5, "expected majority lift, got {}", cov.ratio());
+        assert!(d.pseudo_c.contains("Stage-0.5"));
+        assert!(d.pseudo_c.contains("eax = 0;"));
+        assert!(d.pseudo_c.contains("return;"));
     }
 
     #[test]
