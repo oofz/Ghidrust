@@ -11,6 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 ghidrust-core = { workspace = true, features = ["gpu"] }
+# CPU Stage-0 (CFG → pseudo-C); do not call GPU decompile APIs from the GUI.
+ghidrust-decomp = { path = "../ghidrust-decomp" }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
 rfd = "0.15"

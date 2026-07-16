@@ -34,9 +34,13 @@ The open question for Ghidrust was:
 4. **Correctness oracles**: multipass text equality (GPU vs CPU multipass) and structural opcode match vs classic `decompile_instructions`.
 5. Honest **performance measurements** on production hardware (no fabricated speedups).
 
-### 1.3 Non-claims
+### 1.3 Non-claims / maturity
 
-This is **not** Hex-Rays / Ghidra parity (SSA, rich types, multi-ISA SLEIGH, recompilable C). It is **not** full x86 ISA emulation on the GPU as a general-purpose CPU substitute. It **is** full *Ghidrust* decompile stages on device with VRAM residency and a file dump.
+This paper covers **Stage-0 GPU multipass** only: the same CFG → goto / mnemonic-style pseudo-C pipeline as classic CPU `decompile_instructions`, run with mid-pipeline buffers in VRAM.
+
+- It is **not** a claim that Ghidrust already surpasses Ghidra or Hex-Rays on C quality (that is the product roadmap; SSA / structuring / typed C are **CPU** stages).
+- It is **not** full x86 ISA emulation on the GPU as a general-purpose CPU substitute.
+- It **is** full *Ghidrust Stage-0* decompile stages on device with VRAM residency and a file dump — a research path for bulk/shallow stages, not a substitute for the hand-rolled IR → SSA → typed-C pipeline.
 
 ---
 
@@ -199,7 +203,7 @@ Naïve designs that download IR after every instruction multiply PCIe cost by *N
 ### 6.2 Limitations
 
 - Opcode coverage is a deliberate subset of the hand-rolled decoder (not full x86-64).  
-- Emit is multipass normal form, not Hex-Rays-quality C.  
+- Emit is Stage-0 multipass normal form (mnemonic scaffolding), not SSA/typed C or Hex-Rays-quality C.  
 - Cold-start wgpu pipeline cost is large relative to a 5-instruction function.  
 - Some stages remain single-threaded *on device* (decode walk, emit); parallelization of those stages is future work without abandoning residency.
 
@@ -208,7 +212,8 @@ Naïve designs that download IR after every instruction multiply PCIe cost by *N
 - Persistent device/pipeline reuse across many functions  
 - Larger IR capacity and multi-function batch upload  
 - Wider opcode coverage shared with `ghidrust-core::disasm`  
-- Optional SSA-lite passes still fully device-resident  
+- Keep GPU focused on bulk seed / Stage-0 scan; **SSA structuring and typed emit stay on the CPU roadmap** (optional later IR-parallel GPU experiments only after that bar)  
+
 
 ---
 

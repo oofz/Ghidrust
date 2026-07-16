@@ -23,4 +23,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<ghidrust_decode::Error> for Error {
+    fn from(e: ghidrust_decode::Error) -> Self {
+        match e {
+            ghidrust_decode::Error::Decode(m) => Error::Decode(m),
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

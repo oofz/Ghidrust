@@ -27,7 +27,7 @@ pub use gpu_analyzers::{
     gpu_enrich_analyzers, merge_seeds_into_program, pad_large, seeds_equal, strategy_matrix,
     AnalyzerBenchRow, GpuStrategyClass,
 };
-pub use disasm::{disassemble_at, disassemble_range, Instruction};
+pub use disasm::{decode_one, disassemble_at, disassemble_range, Instruction};
 pub use error::{Error, Result};
 pub use program::{
     AddressTableInfo, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo,

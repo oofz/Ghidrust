@@ -2,14 +2,20 @@
 //! Icons: Google Material 3 geometry (see `icons.rs`); no emoji in the UI.
 
 mod icons;
+mod menu_actions;
 
 use eframe::egui::{self, Color32, Visuals};
 use ghidrust_core::{
     analyzer_catalog, disassemble_range, load_path, m3_tokens, set_preferred_bulk_mode,
-    AnalysisRunReport, AnalyzerInfo, BulkScanMode, FoundString,
-    Instruction, Program, Project, ProjectTreeModel, RttiReport, ThemeMode,
+    AnalysisRunReport, AnalyzerInfo, BulkScanMode, FoundString, Instruction, Program, Project,
+    ProjectTreeModel, RttiReport, ThemeMode,
 };
 use icons::{m3_icon, m3_linear_progress, status_badge, M3Icon};
+use menu_actions::{
+    decompile_entry_for_va, listing_index_at_or_before, parse_address, parse_hex_pattern,
+    processor_info, search_memory, search_program_text, stage0_pseudo_c, ListingSelection,
+    MemoryHit, TextHit, STAGE0_MAX_INSNS,
+};
 use std::path::{Path, PathBuf};
 
 fn recent_projects_path() -> PathBuf {
@@ -68,7 +74,7 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CenterPane {
     /// File summary + analysis counts (default after open/analyze).
     Overview,
@@ -124,6 +130,26 @@ pub struct GhidrustApp {
     show_startup_picker: bool,
     recent_projects: Vec<String>,
     nyi_note: Option<String>,
+    // ── CodeBrowser selection / search / navigation (Ghidra-analog) ──────
+    listing_selection: ListingSelection,
+    undo_stack: Vec<ListingSelection>,
+    redo_stack: Vec<ListingSelection>,
+    listing_focus_va: Option<u64>,
+    show_goto_dialog: bool,
+    goto_input: String,
+    show_search_memory_dialog: bool,
+    search_memory_input: String,
+    show_search_text_dialog: bool,
+    search_text_input: String,
+    search_text_case_insensitive: bool,
+    show_search_results: bool,
+    memory_hits: Vec<MemoryHit>,
+    text_hits: Vec<TextHit>,
+    show_processor_dialog: bool,
+    /// Cached Stage-0 pseudo-C for the focused function entry (None = stale / empty).
+    decomp_entry: Option<u64>,
+    decomp_text: String,
+    decomp_status: String,
 }
 
 impl GhidrustApp {
@@ -176,7 +202,217 @@ impl GhidrustApp {
             show_startup_picker: false,
             recent_projects: Vec::new(),
             nyi_note: None,
+            listing_selection: ListingSelection::default(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            listing_focus_va: None,
+            show_goto_dialog: false,
+            goto_input: String::new(),
+            show_search_memory_dialog: false,
+            search_memory_input: String::new(),
+            show_search_text_dialog: false,
+            search_text_input: String::new(),
+            search_text_case_insensitive: true,
+            show_search_results: false,
+            memory_hits: Vec::new(),
+            text_hits: Vec::new(),
+            show_processor_dialog: false,
+            decomp_entry: None,
+            decomp_text: String::new(),
+            decomp_status: String::new(),
         }
+    }
+
+    fn clear_decompiler_cache(&mut self) {
+        self.decomp_entry = None;
+        self.decomp_text.clear();
+        self.decomp_status.clear();
+    }
+
+    /// Refresh Stage-0 decompiler cache for `va` (containing / nearest function).
+    pub fn refresh_decompiler_at(&mut self, va: u64) {
+        let Some(prog) = self.program.as_ref() else {
+            self.decomp_entry = None;
+            self.decomp_text.clear();
+            self.decomp_status = "No program loaded.".into();
+            return;
+        };
+        let entry = decompile_entry_for_va(prog, va);
+        if self.decomp_entry == Some(entry) && !self.decomp_text.is_empty() {
+            return;
+        }
+        match stage0_pseudo_c(prog, va, STAGE0_MAX_INSNS) {
+            Ok((entry, text)) => {
+                self.decomp_entry = Some(entry);
+                self.decomp_text = text;
+                self.decomp_status = format!("Stage-0 · {entry:#x}");
+            }
+            Err(e) => {
+                self.decomp_entry = Some(entry);
+                self.decomp_text = format!("// decompile failed at {entry:#x}\n// {e}\n");
+                self.decomp_status = format!("error: {e}");
+            }
+        }
+    }
+
+    /// Symbol Tree / Navigation: focus a function entry in Listing and update Decompiler.
+    pub fn focus_function(&mut self, entry: u64) {
+        let addr = format!("{entry:#x}");
+        if let Err(e) = self.goto_address_str(&addr) {
+            self.status = format!("error: {e}");
+            self.log(self.status.clone());
+            return;
+        }
+        self.refresh_decompiler_at(entry);
+        self.center = CenterPane::Decompiler;
+        self.status = format!("Function {entry:#x}");
+        self.log(self.status.clone());
+    }
+
+    fn push_selection_undo(&mut self) {
+        self.undo_stack.push(self.listing_selection);
+        if self.undo_stack.len() > 64 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Edit → Undo (selection history).
+    pub fn edit_undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push(self.listing_selection);
+            self.listing_selection = prev;
+            self.status = "Undo: restored selection".into();
+            self.log(self.status.clone());
+        } else {
+            self.status = "Nothing to undo".into();
+            self.log(self.status.clone());
+        }
+    }
+
+    /// Edit → Redo.
+    pub fn edit_redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(self.listing_selection);
+            self.listing_selection = next;
+            self.status = "Redo: restored selection".into();
+            self.log(self.status.clone());
+        } else {
+            self.status = "Nothing to redo".into();
+            self.log(self.status.clone());
+        }
+    }
+
+    /// Edit → Clear Selection.
+    pub fn edit_clear_selection(&mut self) {
+        self.push_selection_undo();
+        self.listing_selection = ListingSelection::clear();
+        self.status = "Selection cleared".into();
+        self.log(self.status.clone());
+    }
+
+    /// Select → Select All (listing range).
+    pub fn select_all_listing(&mut self) {
+        self.push_selection_undo();
+        self.listing_selection = ListingSelection::all(self.listing.len());
+        self.status = format!(
+            "Selected all {} listing instruction(s)",
+            self.listing.len()
+        );
+        self.log(self.status.clone());
+        self.center = CenterPane::Listing;
+    }
+
+    /// Navigation → Go To Address.
+    /// If `va` is outside the current listing window, re-disassembles 64 insns at `va`.
+    pub fn goto_address_str(&mut self, s: &str) -> Result<(), String> {
+        let va = parse_address(s)?;
+        self.listing_focus_va = Some(va);
+        self.center = CenterPane::Listing;
+
+        if let Some(i) = listing_index_at_or_before(&self.listing, va) {
+            self.push_selection_undo();
+            self.listing_selection = ListingSelection {
+                start: Some(i),
+                end: Some(i),
+            };
+        } else {
+            // Outside loaded listing (or empty) — re-disassemble at target VA.
+            let prog = self
+                .program
+                .as_ref()
+                .ok_or_else(|| "no program loaded".to_string())?;
+            let l = disassemble_range(prog, va, 64).map_err(|e| e.to_string())?;
+            if l.is_empty() {
+                return Err(format!("no instructions at {va:#x}"));
+            }
+            self.listing = l;
+            self.push_selection_undo();
+            self.listing_selection = ListingSelection {
+                start: Some(0),
+                end: Some(0),
+            };
+        }
+
+        self.status = format!("Go to {va:#x}");
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Navigation → Go To entry.
+    pub fn goto_entry(&mut self) {
+        self.center = CenterPane::Listing;
+        if let Some(prog) = &self.program {
+            if let Some(e) = prog.entry {
+                let _ = self.goto_address_str(&format!("{e:#x}"));
+                return;
+            }
+        }
+        self.status = "No entry point".into();
+        self.log(self.status.clone());
+    }
+
+    /// Search → Memory.
+    pub fn run_search_memory(&mut self) -> Result<(), String> {
+        let prog = self
+            .program
+            .as_ref()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        let pat = parse_hex_pattern(&self.search_memory_input)?;
+        self.memory_hits = search_memory(prog, &pat, 500);
+        self.text_hits.clear();
+        self.show_search_results = true;
+        self.status = format!(
+            "Memory search: {} hit(s) for '{}'",
+            self.memory_hits.len(),
+            self.search_memory_input.trim()
+        );
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Search → Program Text.
+    pub fn run_search_text(&mut self) -> Result<(), String> {
+        let prog = self
+            .program
+            .as_ref()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        self.text_hits = search_program_text(
+            prog,
+            &self.listing,
+            &self.search_text_input,
+            self.search_text_case_insensitive,
+            500,
+        );
+        self.memory_hits.clear();
+        self.show_search_results = true;
+        self.status = format!(
+            "Text search: {} hit(s) for '{}'",
+            self.text_hits.len(),
+            self.search_text_input.trim()
+        );
+        self.log(self.status.clone());
+        Ok(())
     }
 
     fn remember_project(&mut self, dir: &str) {
@@ -322,6 +558,7 @@ impl GhidrustApp {
             self.listing.clear();
             self.strings.clear();
             self.rtti = RttiReport::default();
+            self.clear_decompiler_cache();
             let next = self
                 .project
                 .as_ref()
@@ -540,6 +777,15 @@ impl GhidrustApp {
         }
         self.center = CenterPane::Overview;
         self.show_symbol_tree = true;
+        // Function list / names may have changed — drop cache and re-seed Stage-0.
+        self.clear_decompiler_cache();
+        if let Some(va) = self
+            .listing_focus_va
+            .or_else(|| self.listing.first().map(|i| i.address))
+            .or_else(|| self.program.as_ref().and_then(|p| p.entry))
+        {
+            self.refresh_decompiler_at(va);
+        }
         // Restore default bulk mode after experimental run
         set_preferred_bulk_mode(BulkScanMode::ParallelCpu);
         Ok(())
@@ -600,6 +846,10 @@ impl GhidrustApp {
         self.strings.clear();
         self.last_analysis = AnalysisRunReport::default();
         self.last_analyzers_run.clear();
+        self.clear_decompiler_cache();
+        if let Some(va) = self.listing.first().map(|i| i.address).or(self.listing_focus_va) {
+            self.refresh_decompiler_at(va);
+        }
         Ok(())
     }
 
@@ -744,6 +994,15 @@ impl GhidrustApp {
         self.log(self.status.clone());
         self.program = Some(prog);
         self.listing = listing;
+        self.clear_decompiler_cache();
+        if let Some(va) = self
+            .listing
+            .first()
+            .map(|i| i.address)
+            .or_else(|| self.program.as_ref().and_then(|p| p.entry))
+        {
+            self.refresh_decompiler_at(va);
+        }
         self.center = CenterPane::Overview;
         self.show_symbol_tree = true;
         if let Some(p) = self.project.as_mut() {
@@ -802,6 +1061,7 @@ impl GhidrustApp {
         }
     }
 
+    #[allow(dead_code)] // kept for non-menubar future stubs; menubar stubs are wired
     fn nyi(&mut self, what: &str) {
         let m = format!("Not yet implemented: {what}");
         self.status = m.clone();
@@ -1164,15 +1424,15 @@ impl eframe::App for GhidrustApp {
                 });
                 ui.menu_button("Edit", |ui| {
                     if ui.button("Undo").clicked() {
-                        self.nyi("Edit → Undo");
+                        self.edit_undo();
                         ui.close_menu();
                     }
                     if ui.button("Redo").clicked() {
-                        self.nyi("Edit → Redo");
+                        self.edit_redo();
                         ui.close_menu();
                     }
                     if ui.button("Clear selection").clicked() {
-                        self.nyi("Edit → Clear selection");
+                        self.edit_clear_selection();
                         ui.close_menu();
                     }
                 });
@@ -1190,33 +1450,40 @@ impl eframe::App for GhidrustApp {
                 });
                 ui.menu_button("Navigation", |ui| {
                     if ui.button("Go to entry").clicked() {
-                        self.center = CenterPane::Listing;
+                        self.goto_entry();
                         ui.close_menu();
                     }
                     if ui.button("Go to address…").clicked() {
-                        self.nyi("Navigation → Go to address");
+                        if let Some(prog) = &self.program {
+                            if let Some(e) = prog.entry {
+                                self.goto_input = format!("{e:#x}");
+                            } else {
+                                self.goto_input = format!("{:#x}", prog.image_base);
+                            }
+                        }
+                        self.show_goto_dialog = true;
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("Search", |ui| {
                     if ui.button("Search memory…").clicked() {
-                        self.nyi("Search → Search memory");
+                        self.show_search_memory_dialog = true;
                         ui.close_menu();
                     }
                     if ui.button("Search program text…").clicked() {
-                        self.nyi("Search → Search program text");
+                        self.show_search_text_dialog = true;
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("Select", |ui| {
                     if ui.button("Select all").clicked() {
-                        self.nyi("Select → Select all");
+                        self.select_all_listing();
                         ui.close_menu();
                     }
                 });
                 ui.menu_button("Tools", |ui| {
                     if ui.button("Processor options…").clicked() {
-                        self.nyi("Tools → Processor options");
+                        self.show_processor_dialog = true;
                         ui.close_menu();
                     }
                 });
@@ -1675,16 +1942,40 @@ impl eframe::App for GhidrustApp {
                                     .collect();
                                 let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
                                 let n = rows.len();
+                                let mut clicked_fn: Option<u64> = None;
                                 egui::ScrollArea::vertical()
                                     .id_salt("fn_scroll")
                                     .max_height(220.0)
                                     .show_rows(ui, row_h, n, |ui, range| {
                                         for i in range {
                                             let (va, name) = &rows[i];
-                                            ui.monospace(format!("{va:#x}  {name}"));
+                                            let label = format!("{va:#x}  {name}");
+                                            let focused = self.decomp_entry == Some(*va)
+                                                || self.listing_focus_va == Some(*va);
+                                            let rich = if focused {
+                                                egui::RichText::new(label)
+                                                    .monospace()
+                                                    .color(primary)
+                                            } else {
+                                                egui::RichText::new(label).monospace()
+                                            };
+                                            let r = ui.add(
+                                                egui::Label::new(rich).sense(egui::Sense::click()),
+                                            );
+                                            if r.clicked() {
+                                                clicked_fn = Some(*va);
+                                            }
+                                            if r.hovered() {
+                                                ui.ctx().set_cursor_icon(
+                                                    egui::CursorIcon::PointingHand,
+                                                );
+                                            }
                                         }
                                     });
-                                ui.small(format!("{n} shown"));
+                                if let Some(va) = clicked_fn {
+                                    self.focus_function(va);
+                                }
+                                ui.small(format!("{n} shown · click → Listing + Decompiler"));
                             }
                         });
 
@@ -1806,23 +2097,102 @@ impl eframe::App for GhidrustApp {
                 }
                 CenterPane::Listing => {
                     ui.heading("Listing");
+                    if !self.listing_selection.is_empty() {
+                        ui.small(format!(
+                            "Selection: {}–{}",
+                            self.listing_selection.start.unwrap_or(0),
+                            self.listing_selection.end.unwrap_or(0)
+                        ));
+                    }
+                    if let Some(va) = self.listing_focus_va {
+                        ui.small(format!("Focus VA {va:#x}"));
+                    }
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         if self.listing.is_empty() {
                             ui.weak("No listing — double-click a project file to open.");
                         }
-                        for insn in &self.listing {
-                            ui.monospace(insn.text());
+                        let focus = self.listing_focus_va;
+                        let sel = self.listing_selection;
+                        let t = m3_tokens(self.theme);
+                        let sel_bg = Color32::from_rgb(t.primary[0], t.primary[1], t.primary[2])
+                            .gamma_multiply(0.35);
+                        let rows: Vec<(usize, u64, String)> = self
+                            .listing
+                            .iter()
+                            .enumerate()
+                            .map(|(i, insn)| (i, insn.address, insn.text()))
+                            .collect();
+                        let mut click_i: Option<(usize, u64)> = None;
+                        for (i, addr, row) in rows {
+                            let focused = focus == Some(addr);
+                            let selected = sel.contains(i);
+                            let mut job = egui::text::LayoutJob::default();
+                            let color = if focused {
+                                Color32::from_rgb(0xFF, 0xD5, 0x4F)
+                            } else {
+                                ui.visuals().text_color()
+                            };
+                            job.append(
+                                &row,
+                                0.0,
+                                egui::TextFormat {
+                                    font_id: egui::FontId::monospace(13.0),
+                                    color,
+                                    background: if selected {
+                                        sel_bg
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    },
+                                    ..Default::default()
+                                },
+                            );
+                            let r = ui.add(egui::Label::new(job).sense(egui::Sense::click()));
+                            if r.clicked() {
+                                click_i = Some((i, addr));
+                            }
+                        }
+                        if let Some((i, addr)) = click_i {
+                            self.push_selection_undo();
+                            self.listing_selection = ListingSelection {
+                                start: Some(i),
+                                end: Some(i),
+                            };
+                            self.listing_focus_va = Some(addr);
+                            self.refresh_decompiler_at(addr);
                         }
                     });
                 }
                 CenterPane::Decompiler => {
                     ui.heading("Decompiler");
-                    ui.weak(
-                        "Not yet implemented — Phase 3 production decompiler (structure present).",
-                    );
-                    if let Some(prog) = &self.program {
-                        if let Some(e) = prog.entry {
-                            ui.monospace(format!("// placeholder for function at {e:#x}"));
+                    if self.program.is_none() {
+                        ui.weak("Open a project file, then select a function or listing address.");
+                    } else {
+                        // Keep cache in sync with focus when switching to this pane.
+                        if let Some(va) = self.listing_focus_va.or(self.decomp_entry).or_else(|| {
+                            self.program.as_ref().and_then(|p| p.entry)
+                        }) {
+                            self.refresh_decompiler_at(va);
+                        }
+                        if !self.decomp_status.is_empty() {
+                            ui.small(&self.decomp_status);
+                        }
+                        ui.separator();
+                        if self.decomp_text.is_empty() {
+                            ui.weak(
+                                "Select a Symbol Tree function or a Listing instruction to decompile (Stage-0 CFG → pseudo-C).",
+                            );
+                        } else {
+                            egui::ScrollArea::both()
+                                .id_salt("decomp_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(&self.decomp_text).monospace(),
+                                        )
+                                        .selectable(true),
+                                    );
+                                });
                         }
                     }
                 }
@@ -1838,6 +2208,170 @@ impl eframe::App for GhidrustApp {
                 }
             }
         });
+
+        // Navigation → Go To Address
+        if self.show_goto_dialog {
+            egui::Window::new("Go To Address")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Address (hex, optional 0x prefix):");
+                    ui.text_edit_singleline(&mut self.goto_input);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.show_goto_dialog = false;
+                        }
+                        if ui.button("Go").clicked() {
+                            match self.goto_address_str(&self.goto_input.clone()) {
+                                Ok(()) => self.show_goto_dialog = false,
+                                Err(e) => {
+                                    self.status = format!("error: {e}");
+                                    self.log(self.status.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Search → Memory
+        if self.show_search_memory_dialog {
+            egui::Window::new("Search Memory")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(420.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Byte pattern (hex; ?? = wildcard):");
+                    ui.text_edit_singleline(&mut self.search_memory_input);
+                    ui.small("Example: 55 48 89 e5   or  48??e5");
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.show_search_memory_dialog = false;
+                        }
+                        if ui.button("Search").clicked() {
+                            match self.run_search_memory() {
+                                Ok(()) => self.show_search_memory_dialog = false,
+                                Err(e) => {
+                                    self.status = format!("error: {e}");
+                                    self.log(self.status.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Search → Program Text
+        if self.show_search_text_dialog {
+            egui::Window::new("Search Program Text")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(420.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Query (listing / symbols / functions / memory text):");
+                    ui.text_edit_singleline(&mut self.search_text_input);
+                    ui.checkbox(&mut self.search_text_case_insensitive, "Case insensitive");
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.show_search_text_dialog = false;
+                        }
+                        if ui.button("Search").clicked() {
+                            match self.run_search_text() {
+                                Ok(()) => self.show_search_text_dialog = false,
+                                Err(e) => {
+                                    self.status = format!("error: {e}");
+                                    self.log(self.status.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Search results window
+        if self.show_search_results {
+            egui::Window::new("Search Results")
+                .collapsible(true)
+                .resizable(true)
+                .default_width(480.0)
+                .default_height(280.0)
+                .show(ctx, |ui| {
+                    if ui.button("Close").clicked() {
+                        self.show_search_results = false;
+                    }
+                    ui.separator();
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        for h in self.memory_hits.clone() {
+                            if ui
+                                .button(format!("{:#x}  {}  +{:#x}", h.va, h.block, h.offset_in_block))
+                                .clicked()
+                            {
+                                let _ = self.goto_address_str(&format!("{:#x}", h.va));
+                            }
+                        }
+                        for h in self.text_hits.clone() {
+                            let label = match h.va {
+                                Some(va) => format!("[{}] {:#x}: {}", h.kind, va, h.text),
+                                None => format!("[{}] {}", h.kind, h.text),
+                            };
+                            if ui.button(label).clicked() {
+                                if let Some(va) = h.va {
+                                    let _ = self.goto_address_str(&format!("{va:#x}"));
+                                }
+                            }
+                        }
+                        if self.memory_hits.is_empty() && self.text_hits.is_empty() {
+                            ui.weak("No hits.");
+                        }
+                    });
+                });
+        }
+
+        // Tools → Processor options
+        if self.show_processor_dialog {
+            egui::Window::new("Processor Options")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(440.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    if let Some(prog) = &self.program {
+                        let info = processor_info(prog);
+                        ui.monospace(format!("Language:      {}", info.language));
+                        ui.monospace(format!("Compiler:      {}", info.compiler));
+                        ui.monospace(format!("Format:        {}", info.format));
+                        ui.monospace(format!("Endian:        {}", info.endian));
+                        ui.monospace(format!("Pointer size:  {} bytes", info.pointer_size));
+                        ui.monospace(format!("Image base:    {:#x}", info.image_base));
+                        ui.monospace(format!(
+                            "Entry:         {}",
+                            info.entry
+                                .map(|e| format!("{e:#x}"))
+                                .unwrap_or_else(|| "—".into())
+                        ));
+                        ui.separator();
+                        ui.small(&info.notes);
+                        ui.separator();
+                        ui.label("Sections:");
+                        egui::ScrollArea::vertical().max_height(160.0).show(ui, |ui| {
+                            for s in &prog.sections {
+                                ui.monospace(format!(
+                                    "{}  va={:#x}  vsize={:#x}",
+                                    s.name, s.va, s.virtual_size
+                                ));
+                            }
+                        });
+                    } else {
+                        ui.weak("Load a program to view processor / language options.");
+                    }
+                    if ui.button("Close").clicked() {
+                        self.show_processor_dialog = false;
+                    }
+                });
+        }
 
         if self.show_analysis_dialog && self.analysis_job.is_none() {
             let t = m3_tokens(self.theme);
@@ -2119,6 +2653,29 @@ mod tests {
     }
 
     #[test]
+    fn headless_stage0_decompiler_wires_on_focus() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        assert!(!app.decomp_text.is_empty(), "load should seed Stage-0 text");
+        assert!(!app.decomp_text.contains("Not yet implemented"));
+
+        let va = app.listing[0].address;
+        app.refresh_decompiler_at(va);
+        assert!(app.decomp_entry.is_some());
+        assert!(
+            app.decomp_text.contains("void ") || app.decomp_text.contains("block_"),
+            "expected Stage-0 pseudo-C:\n{}",
+            app.decomp_text
+        );
+
+        let entry = app.decomp_entry.unwrap();
+        app.focus_function(entry);
+        assert_eq!(app.center, CenterPane::Decompiler);
+        assert_eq!(app.listing_focus_va, Some(entry));
+        assert!(!app.decomp_text.is_empty());
+    }
+
+    #[test]
     fn headless_project_import_analyze_save() {
         let dir = std::env::temp_dir().join(format!("ghidrust_gui_proj_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2156,6 +2713,10 @@ mod tests {
         assert!(src.contains("Program Tree"));
         assert!(src.contains("Project Tree") || src.contains("project_tree"));
         assert!(src.contains("Decompiler"));
+        assert!(src.contains("refresh_decompiler_at") || src.contains("stage0_pseudo_c"));
+        assert!(src.contains("focus_function"));
+        assert!(src.contains("Stage-0"));
+        assert!(src.contains("decomp_scroll") || src.contains("decomp_text"));
         assert!(src.contains("ASCII Strings"));
         assert!(src.contains("Analyzed") || src.contains("has_saved_analysis"));
         assert!(src.contains("analyze_from_tree") || src.contains("small_button(\"Analyze\")"));
@@ -2186,5 +2747,134 @@ mod tests {
         assert!(icons.contains("Folder") || icons.contains("folder"));
         assert!(!icons.contains('\u{1F4C1}'));
         assert!(!icons.contains('\u{25CF}'));
+    }
+
+    #[test]
+    fn former_menu_stubs_are_wired_not_nyi_only() {
+        let src = include_str!("main.rs");
+        // No remaining nyi() for inventoried Edit/Nav/Search/Select/Tools stubs
+        assert!(!src.contains("nyi(\"Edit → Undo\")"));
+        assert!(!src.contains("nyi(\"Edit → Redo\")"));
+        assert!(!src.contains("nyi(\"Edit → Clear selection\")"));
+        assert!(!src.contains("nyi(\"Navigation → Go to address\")"));
+        assert!(!src.contains("nyi(\"Search → Search memory\")"));
+        assert!(!src.contains("nyi(\"Search → Search program text\")"));
+        assert!(!src.contains("nyi(\"Select → Select all\")"));
+        assert!(!src.contains("nyi(\"Tools → Processor options\")"));
+        // Real handlers present
+        assert!(src.contains("edit_undo"));
+        assert!(src.contains("edit_redo"));
+        assert!(src.contains("edit_clear_selection"));
+        assert!(src.contains("goto_address_str") || src.contains("show_goto_dialog"));
+        assert!(src.contains("run_search_memory"));
+        assert!(src.contains("run_search_text"));
+        assert!(src.contains("select_all_listing"));
+        assert!(src.contains("show_processor_dialog"));
+    }
+
+    #[test]
+    fn menu_actions_goto_search_select_on_loaded_program() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        assert!(!app.listing.is_empty());
+
+        app.select_all_listing();
+        assert!(!app.listing_selection.is_empty());
+        assert!(app.listing_selection.contains(0));
+
+        app.edit_clear_selection();
+        assert!(app.listing_selection.is_empty());
+
+        app.select_all_listing();
+        app.edit_undo();
+        assert!(app.listing_selection.is_empty());
+        app.edit_redo();
+        assert!(!app.listing_selection.is_empty());
+
+        let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        app.goto_address_str(&format!("{entry:#x}")).expect("goto");
+        assert_eq!(app.listing_focus_va, Some(entry));
+        assert_eq!(app.center, CenterPane::Listing);
+
+        app.search_memory_input = "55 48 89 e5".into();
+        app.run_search_memory().expect("mem search");
+        assert!(!app.memory_hits.is_empty());
+        assert!(app.show_search_results);
+
+        app.search_text_input = "push".into();
+        app.run_search_text().expect("text search");
+        assert!(!app.text_hits.is_empty());
+
+        app.show_processor_dialog = true;
+        let info = processor_info(app.program.as_ref().unwrap());
+        assert!(info.language.contains("x86"));
+    }
+
+    #[test]
+    fn goto_out_of_window_va_redisassembles_listing() {
+        let mut app = GhidrustApp::headless();
+        // analysis_lab has richer layout; load then go to a VA outside entry window
+        app.load_binary(&fixture_path("analysis_lab.pe")).expect("load");
+        let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        let first_listing_va = app.listing[0].address;
+        assert_eq!(first_listing_va, entry);
+
+        // Pick a program block VA that is not covered by the entry listing window
+        let window_end = {
+            let last = app.listing.last().unwrap();
+            last.address + u64::from(last.length).max(1)
+        };
+        let outside = app
+            .program
+            .as_ref()
+            .unwrap()
+            .blocks
+            .iter()
+            .map(|b| b.va)
+            .find(|&va| va < first_listing_va || va >= window_end)
+            .expect("need a block VA outside entry listing window");
+
+        // Confirm helper says outside
+        assert!(
+            listing_index_at_or_before(&app.listing, outside).is_none(),
+            "precondition: {outside:#x} must be outside listing [{first_listing_va:#x}..)"
+        );
+
+        app.goto_address_str(&format!("{outside:#x}"))
+            .expect("goto outside");
+        assert_eq!(app.listing_focus_va, Some(outside));
+        assert!(
+            !app.listing.is_empty(),
+            "re-disassemble must produce listing"
+        );
+        assert_eq!(
+            app.listing[0].address, outside,
+            "listing must start at target VA after re-disassemble"
+        );
+        // Selection points at first insn of new window
+        assert_eq!(app.listing_selection.start, Some(0));
+
+        // Memory search hit navigation also refreshes when needed
+        if let Some(hit) = app.memory_hits.first().cloned() {
+            let _ = hit;
+        }
+        app.search_memory_input = "55 48 89 e5".into();
+        app.run_search_memory().expect("mem");
+        assert!(!app.memory_hits.is_empty());
+        let hit_va = app.memory_hits[0].va;
+        // Force listing back to entry-only window
+        app.goto_address_str(&format!("{entry:#x}")).expect("back to entry");
+        assert_eq!(app.listing[0].address, entry);
+        // Navigate to memory hit (may be same or different region)
+        app.goto_address_str(&format!("{hit_va:#x}"))
+            .expect("goto hit");
+        assert!(
+            app.listing
+                .iter()
+                .any(|i| i.address == hit_va
+                    || (i.address <= hit_va && hit_va < i.address + u64::from(i.length))),
+            "listing must cover hit VA {hit_va:#x} after goto; first={:#x}",
+            app.listing[0].address
+        );
     }
 }

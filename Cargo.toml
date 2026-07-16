@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ghidrust-ir",
+    "crates/ghidrust-decode",
+    "crates/ghidrust-lift",
     "crates/ghidrust-core",
     "crates/ghidrust-decomp",
     "crates/ghidrust-cli",
@@ -15,5 +18,8 @@ license = "Apache-2.0"
 repository = "https://github.com/example/ghidrust"
 
 [workspace.dependencies]
+ghidrust-ir = { path = "crates/ghidrust-ir" }
+ghidrust-decode = { path = "crates/ghidrust-decode" }
+ghidrust-lift = { path = "crates/ghidrust-lift" }
 ghidrust-core = { path = "crates/ghidrust-core" }
 ghidrust-decomp = { path = "crates/ghidrust-decomp" }

@@ -1,0 +1,9 @@
+[package]
+name = "ghidrust-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Architecture-neutral pcode-like IR for Ghidrust decompile pipeline"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

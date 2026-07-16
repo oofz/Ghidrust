@@ -1,0 +1,9 @@
+[package]
+name = "ghidrust-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hand-rolled x86-64 instruction decode (length-disasm + mnemonic)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

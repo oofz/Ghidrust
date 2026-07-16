@@ -12,13 +12,14 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 
 | Goal | Meaning in practice |
 |------|---------------------|
-| **Ghidra-shaped workflow** | Familiar labels and surfaces (Auto Analysis names, project import/analyze/export, listing + decompile) without depending on the Ghidra JVM stack |
-| **Hand-rolled core** | PE/ELF, x86-64 decode, RTTI, analyzers, and decompile implemented in Rust — third-party RE libraries are avoided on purpose ([DEPENDENCIES.md](DEPENDENCIES.md)) |
+| **Surpass Ghidra (measurable)** | On x86-64 PE/ELF: faster Auto Analysis + decompile-all wall clock than Ghidra headless on the same machine/binary; ≥ Ghidra F1 on function discovery; structured typed C (not mnemonic scaffolding); differential correctness vs Ghidra on a fixed corpus — **target**, not a claim of today’s quality |
+| **Ghidra-shaped workflow** | Familiar labels and surfaces (Auto Analysis names, project import/analyze/export, listing + click FUN → decompile) without depending on the Ghidra JVM stack |
+| **Hand-rolled core** | PE/ELF, x86-64 decode, RTTI, analyzers, and the IR → SSA → structure → typed-C pipeline implemented in Rust — third-party RE libraries are avoided at runtime ([DEPENDENCIES.md](DEPENDENCIES.md)); Ghidra sources are reference-only |
 | **CPU-correct first** | CPU paths are the oracle; optional GPU paths must match or enrich them, not replace honesty with speed claims |
 | **Agent-ready** | Headless CLI + stdio MCP so coding agents can load, disassemble, analyze, and decompile without a GUI |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
 
-**Non-goals (today):** full Ghidra/Hex-Rays parity, multi-ISA SLEIGH, debugger integration, or “GPU is always faster.”
+**Current maturity (Stage-0):** decompile emit is still CFG → goto / mnemonic-style **pseudo-C**. SSA, structuring, and typed C are the roadmap; Hex-Rays-class expression/type quality is a later phase after the Ghidra bar is met. **Non-goals (today):** multi-ISA SLEIGH runtime, debugger integration, or “GPU is always faster.”
 
 ---
 
@@ -336,7 +337,7 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 | Crate | Role |
 |-------|------|
 | `ghidrust-core` | PE/ELF, x86-64, analyzers, projects, bulk scan |
-| `ghidrust-decomp` | Hand-rolled decompile (CPU + experimental GPU) |
+| `ghidrust-decomp` | Hand-rolled decompile: Stage-0 CFG→pseudo-C today (+ experimental GPU); SSA/typed C planned in-tree |
 | `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` |
 | `ghidrust-gui` | CodeBrowser-style UI |
 

@@ -13,7 +13,7 @@ metadata:
 
 # Ghidrust — agent skill
 
-Hand-rolled **Rust** reverse-engineering core (Ghidra-inspired labels). Prefer **CLI or MCP** for agents; GUI is for humans. **Never invent analysis** — if a fixture has no evidence, outputs are empty/honest.
+Hand-rolled **Rust** reverse-engineering core (Ghidra-inspired labels; measurable **Ghidra-surpass** target on x86-64, Stage-0 decompile today). Prefer **CLI or MCP** for agents; GUI is for humans. **Never invent analysis** — if a fixture has no evidence, outputs are empty/honest.
 
 ## Paths & binaries
 
@@ -58,8 +58,12 @@ Need RTTI CPU vs GPU timings (PCIe split)?
 Need full matrix bench?
   → analyzer-bench / analyzer-bench-matrix
 
-Full Hex-Rays C decompiler?
-  → NOT AVAILABLE. Use gpu-decompile multipass pseudo-C + listing.
+Need decompiled C?
+  → Staged capability (be honest about which stage you have):
+     Stage-0 (current): `decompile` / `gpu-decompile` → CFG→goto / mnemonic-style pseudo-C + listing
+     SSA-C (roadmap): structured if/while/switch pseudo-C after IR→SSA
+     typed-C (roadmap): locals/params/types; Ghidra-surpass bar before Hex-Rays-class ceiling
+  → Do not invent Hex-Rays-quality C; emit only what the current stage produces.
 ```
 
 ---
@@ -135,7 +139,7 @@ Add `--json` for structured stdout.
 | List analyzers | `ghidrust analyzers` |
 | **Analyze** | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu]` |
 | Bulk bench | `ghidrust bulk-bench <path>` |
-| Decompile (CPU multipass-style) | `ghidrust decompile <path>` |
+| Decompile (CPU Stage-0 pseudo-C) | `ghidrust decompile <path>` |
 | **GPU decompile** | `ghidrust gpu-decompile <path> [--out F] [--metrics F]` |
 | RE bench | `ghidrust re-bench <path>` |
 | Analyzer CPU/GPU matrix bench | `ghidrust analyzer-bench <path> [--large] [--out F]` |
@@ -225,7 +229,7 @@ ASCII Strings · Aggressive Instruction Finder · Call Convention ID · Call-Fix
 
 **Do:** exact analyzer names; `--analyzer` or `--analyzers`; `--gpu` when GPU enrich wanted; `--json` for scripts; `analyzer-bench-matrix` for strategy list.
 
-**Don't:** invent decompiled C; claim Ghidra MCP is Ghidrust; skip empty-result honesty; conflate PCIe with on-device time.
+**Don't:** invent typed/Hex-Rays C beyond Stage-0 emit; claim Ghidra MCP is Ghidrust; claim Ghidra-surpass metrics without captured benches; skip empty-result honesty; conflate PCIe with on-device time.
 
 ---
 

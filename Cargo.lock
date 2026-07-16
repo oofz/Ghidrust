@@ -1328,11 +1328,19 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bytemuck",
+ "ghidrust-decode",
  "pollster",
  "rayon",
  "serde",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "ghidrust-decode"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -1353,7 +1361,23 @@ dependencies = [
  "eframe",
  "egui",
  "ghidrust-core",
+ "ghidrust-decomp",
  "rfd",
+]
+
+[[package]]
+name = "ghidrust-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "ghidrust-lift"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-decode",
+ "ghidrust-ir",
 ]
 
 [[package]]

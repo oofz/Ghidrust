@@ -1,0 +1,13 @@
+[package]
+name = "ghidrust-lift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lift decoded instructions to ghidrust-ir (x86-64 first)"
+
+[dependencies]
+ghidrust-decode = { workspace = true }
+ghidrust-ir = { workspace = true }
+
+[dev-dependencies]
+ghidrust-decode = { workspace = true }

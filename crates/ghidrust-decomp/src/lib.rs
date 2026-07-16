@@ -1,11 +1,20 @@
-//! Hand-rolled reverse-engineering **decompile method** (not Hex-Rays / Ghidra).
+//! Hand-rolled reverse-engineering **decompile method**.
 //!
-//! ## CPU path
-//! Linear instructions → basic blocks + branch edges → structured pseudo-C.
+//! **Aspirational target:** structured, typed C that is measurable against Ghidra
+//! (wall clock, function discovery, readability, differential correctness on a
+//! fixed x86-64 corpus). Hex-Rays-class quality is a later ceiling after that bar.
+//!
+//! **Stage-0 (current):** linear instructions → basic blocks + branch edges →
+//! CFG / goto-style **pseudo-C** (mnemonic scaffolding). This remains the CPU
+//! and GPU multipass emit today and the regression oracle until SSA emit is default.
+//!
+//! ## CPU path (Stage-0)
+//! Linear instructions → basic blocks + branch edges → pseudo-C emit.
 //!
 //! ## GPU-resident path (`gpu_decompile`)
-//! Multi-pass SIMT kernels keep IR/CFG/emit buffers in **VRAM**; host only uploads
-//! code once and downloads the final dump. See `docs/GPU_DECOMPILE_PROCESS.md`.
+//! Multi-pass SIMT kernels keep Stage-0 IR/CFG/emit buffers in **VRAM**; host only
+//! uploads code once and downloads the final dump. SSA structuring stays on the
+//! CPU roadmap. See `docs/GPU_DECOMPILE_PROCESS.md`.
 
 pub mod gpu_decompile;
 
