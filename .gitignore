@@ -18,6 +18,8 @@ Thumbs.db
 *.gdecomp
 *_metrics.log
 re_metrics.log
+headtohead_*.json
+headtohead_*.txt
 
 # Local development notes (parity tracking, roadmaps, private benches)
 # Not published — research/metrics stay in docs/

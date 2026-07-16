@@ -8,14 +8,12 @@ with the [decompiler superiority roadmap](../../.cursor/plans/decompiler_superio
 — specifically **Phase C** ("Faster than Ghidra") which requires captured
 head-to-head numbers, never invented ones.
 
-`ghidra-headtohead --ghidra <DIR>` now auto-spawns `analyzeHeadless` on the
-supplied binary using the embedded `DecompileAndReport.java` post-script
-(source lives in `crates/ghidrust-decomp/src/ghidra_oracle.rs :: DECOMPILE_AND_REPORT_JAVA`).
-When spawn succeeds the report includes real per-function `wall_us`
-timings and structural matches. When spawn fails (missing install,
-unreadable binary, non-zero exit, JVM timeout, parse error), the report
-records the exact failure reason via [`GhidraSpawnError`] and leaves the
-Ghidra column blank — no fabricated numbers, ever.
+`ghidra-headtohead --ghidra <DIR>` auto-spawns `analyzeHeadless` with an
+embedded `DecompileAndReport.java` post-script (see
+`crates/ghidrust-decomp/src/ghidra_oracle.rs`). Spawn failures leave the
+Ghidra column blank — no fabricated numbers. **Do not treat current
+ledger rows as a quality or speed win over Ghidra** until both sides
+share the same function-entry list and a real quality metric (see §5).
 
 ---
 
@@ -41,7 +39,7 @@ Ghidra column blank — no fabricated numbers, ever.
 
 ## Runbook — capturing Ghidra headless output
 
-### 1. Install Ghidra 11.x
+### 1. Install Ghidra 11.x / 12.x
 - Linux/macOS: unpack the release, ensure `<ghidraDir>/support/analyzeHeadless`
   is executable.
 - Windows: use `<ghidraDir>\support\analyzeHeadless.bat`.
@@ -150,17 +148,41 @@ The report includes:
 * `methodology` — this runbook, embedded so external readers can reproduce
   the numbers.
 
-### 5. Publish tables
+### 5. What this harness is (and is not) for
 
-Landed timings live under `docs/headtohead/` (git-tracked) so every claim is
-reproducible. Add a new row each time the harness runs on a new machine:
+**Useful for:** wiring a reproducible spawn/capture path, locking Ghidrust
+baselines (`--json` without Ghidra), and future *fair* comparisons once both
+sides decompile the **same entry addresses**.
 
-| Date | Host | Binary | Ghidrust wall (Stage-0) | Ghidrust wall (Stage-0.5) | Ghidra wall | Notes |
-|------|------|--------|------------------------|---------------------------|-------------|-------|
-| _(fill in from actual capture)_ | | | | | | |
+**Not useful for marketing “we beat Ghidra” today.** Early live runs showed
+large `MissingGhidra` counts because each tool took its own first *N*
+functions — different work sets, so summed timings are not comparable. The
+`Similar` label is only a coarse block-count proxy (`floor(ir_ops/8)` vs `{`
+count in Ghidra C), not “same C.” Those run tables were **removed** from this
+doc so we do not publish an inaccurate head-to-head.
 
-The row **must** cite the captured `headtohead.json` and Ghidra version. No
-row without a captured file — the roadmap forbids fabricated numbers.
+**Fair comparison (future):** fix a shared address list (same entries both
+sides), measure Stage-1 vs Ghidra C on those entries, and compare quality with
+a real structural/AST metric — then publish tables under `docs/headtohead/`.
+
+### Why Ghidrust Stage-0 / 0.5 looks “impossibly fast”
+
+Ghidra’s decompiler runs the heavy pipeline: pcode lift, SSA/dataflow, type
+propagation, high-level structuring, and pretty-printed C. That is milliseconds
+per function for a reason.
+
+Ghidrust Stage-0 / Stage-0.5 (what the harness times today) does **much less**:
+
+| Stage | Work | Roughly like… |
+|-------|------|----------------|
+| Stage-0 | Decode + CFG → goto scaffolding | Fast structured listing |
+| Stage-0.5 | + x86→IR lift + assignment-ish emit | Lift, not full decompile |
+| Stage-1 | + SSA / structure / types (partial) | Closer, still not Ghidra C |
+| Ghidra | Full DecompInterface C | The expensive product |
+
+So a μs vs ms gap mostly means **we are not doing the same job yet**, not that
+we finished Ghidra’s work faster. Native Rust and no JVM help, but they are
+secondary next to the work-product difference.
 
 ---
 

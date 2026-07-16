@@ -68,7 +68,7 @@ fn print_help() {
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
            ghidrust decompile <path> [--addr HEX] [--count N] [--stage05|--stage1] [--json]\n\
            ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--json]\n\
-           ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--json]\n\
+           ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]\n\
            ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]\n\
            ghidrust re-bench <path> [--out FILE] [--json]  # CPU then GPU metrics (decomp+bulk)\n\
            ghidrust analyzer-bench <path> [--large] [--out FILE] [--json]\n\
@@ -1145,7 +1145,7 @@ fn cmd_ghidra_headtohead(args: &[String], json: bool) -> ExitCode {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!(
-                "usage: ghidrust ghidra-headtohead <path> [--functions N] [--count N] \\\n                   [--ghidra DIR] [--captured JSON] [--out FILE] [--json]"
+                "usage: ghidrust ghidra-headtohead <path> [--functions N] [--count N] \\\n                   [--ghidra DIR] [--captured JSON] [--out FILE] \\\n                   [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]"
             );
             return ExitCode::from(2);
         }
@@ -1155,6 +1155,8 @@ fn cmd_ghidra_headtohead(args: &[String], json: bool) -> ExitCode {
     let mut out_path: Option<PathBuf> = None;
     let mut ghidra_dir: Option<PathBuf> = None;
     let mut captured_path: Option<PathBuf> = None;
+    let mut spawn_timeout_secs: Option<u64> = None;
+    let mut ghidra_fn_cap: Option<usize> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1176,6 +1178,14 @@ fn cmd_ghidra_headtohead(args: &[String], json: bool) -> ExitCode {
             }
             "--captured" if i + 1 < args.len() => {
                 captured_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--spawn-timeout" if i + 1 < args.len() => {
+                spawn_timeout_secs = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "--ghidra-fn-cap" if i + 1 < args.len() => {
+                ghidra_fn_cap = args[i + 1].parse().ok();
                 i += 2;
             }
             _ => i += 1,
@@ -1212,9 +1222,9 @@ fn cmd_ghidra_headtohead(args: &[String], json: bool) -> ExitCode {
         max_functions,
         max_insns_per_fn: count,
         captured_ghidra_decompiles: captured,
-        // Forward the binary path so `--ghidra DIR` can auto-spawn
-        // analyzeHeadless against the same bytes Ghidrust just benched.
         binary_path: Some(path.clone()),
+        spawn_timeout_secs,
+        ghidra_fn_cap,
         ..Default::default()
     };
     let report = ghidrust_decomp::ghidra_headtohead(&prog, &cfg);

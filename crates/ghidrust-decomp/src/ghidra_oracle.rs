@@ -72,6 +72,15 @@ pub struct GhidraOracleConfig {
     /// back to a 5-minute cap when unspecified so runaway JVMs don't
     /// deadlock the harness.
     pub spawn_timeout_secs: Option<u64>,
+    /// Optional cap on how many functions the Ghidra post-script will
+    /// decompile. The Java loop walks `getFunctions(true)` and stops after
+    /// this many rows. `None` = decompile every function in the imported
+    /// binary (only tractable on small fixtures).
+    ///
+    /// Wired through as the second `-postScript` argument
+    /// (`DecompileAndReport.java <out.json> <max_fn>`); the Java script
+    /// treats a missing or non-numeric value as "no cap".
+    pub ghidra_fn_cap: Option<usize>,
 }
 
 impl GhidraOracleConfig {
@@ -337,7 +346,15 @@ pub enum GhidraSpawnError {
     NonZeroExit { code: Option<i32>, stderr: String },
     Timeout(Duration),
     ParseCapture(String),
-    NoCaptureEmitted(PathBuf),
+    /// analyzeHeadless exited 0 but never wrote our capture JSON (typical
+    /// causes: post-script compile error, wrong output path, script threw).
+    /// The scratch dir is intentionally left on disk so callers can inspect
+    /// the source, compiled classes, and any partial output.
+    NoCaptureEmitted {
+        path: PathBuf,
+        scratch: PathBuf,
+        stderr_tail: String,
+    },
 }
 
 impl std::fmt::Display for GhidraSpawnError {
@@ -354,7 +371,15 @@ impl std::fmt::Display for GhidraSpawnError {
             }
             Self::Timeout(d) => write!(f, "analyzeHeadless timed out after {}s", d.as_secs()),
             Self::ParseCapture(e) => write!(f, "capture JSON parse failed: {e}"),
-            Self::NoCaptureEmitted(p) => write!(f, "no capture file written at {}", p.display()),
+            Self::NoCaptureEmitted { path, scratch, stderr_tail } => {
+                write!(
+                    f,
+                    "no capture file written at {} (scratch kept at {} for inspection); stderr tail: {}",
+                    path.display(),
+                    scratch.display(),
+                    if stderr_tail.is_empty() { "<empty>" } else { stderr_tail.as_str() }
+                )
+            }
         }
     }
 }
@@ -395,10 +420,47 @@ import ghidra.program.model.listing.Function;
 import java.io.PrintWriter;
 
 public class DecompileAndReport extends GhidraScript {
+    // Escape a Java string for embedding inside a JSON string literal.
+    // Handles backslash, double-quote, and ALL control characters
+    // (0x00-0x1F) that a strict JSON parser (serde_json) rejects unless
+    // escaped. NOTE: this comment intentionally avoids the six-character
+    // sequence "backslash+u+four-hex" because the Java lexer processes
+    // that sequence BEFORE comments are recognized and would raise
+    // "illegal unicode escape" at compile time.
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\': sb.append("\\\\"); break;
+                case '"':  sb.append("\\\""); break;
+                case '\b': sb.append("\\b"); break;
+                case '\f': sb.append("\\f"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        return sb.toString();
+    }
+
     public void run() throws Exception {
         String[] argv = getScriptArgs();
         if (argv.length < 1) {
             throw new IllegalArgumentException("expected output json path as script arg");
+        }
+        // Optional second arg: max function count. Missing/non-numeric = no cap.
+        int maxFn = Integer.MAX_VALUE;
+        if (argv.length >= 2) {
+            try { maxFn = Integer.parseInt(argv[1]); } catch (NumberFormatException ignored) {}
+            if (maxFn <= 0) maxFn = Integer.MAX_VALUE;
         }
         DecompInterface dc = new DecompInterface();
         dc.setOptions(new DecompileOptions());
@@ -406,7 +468,9 @@ public class DecompileAndReport extends GhidraScript {
         try (PrintWriter out = new PrintWriter(argv[0])) {
             out.println("[");
             boolean first = true;
+            int emitted = 0;
             for (Function f : currentProgram.getFunctionManager().getFunctions(true)) {
+                if (emitted >= maxFn) break;
                 long t0 = System.nanoTime();
                 DecompileResults r = dc.decompileFunction(f, 30, monitor);
                 long t1 = System.nanoTime();
@@ -414,14 +478,14 @@ public class DecompileAndReport extends GhidraScript {
                 first = false;
                 String src = "";
                 if (r != null && r.getDecompiledFunction() != null) {
-                    src = r.getDecompiledFunction().getC()
-                        .replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+                    src = jsonEscape(r.getDecompiledFunction().getC());
                 }
                 out.printf("{\"name\":\"%s\",\"entry\":%d,\"wall_us\":%d,\"c_source\":\"%s\"}",
-                    f.getName().replace("\"","\\\""),
+                    jsonEscape(f.getName()),
                     f.getEntryPoint().getOffset(),
                     (t1 - t0) / 1000L,
                     src);
+                emitted++;
             }
             out.println("]");
         }
@@ -480,8 +544,15 @@ pub fn spawn_ghidra_headless(
         .arg(&scratch)
         .arg("-postScript")
         .arg("DecompileAndReport.java")
-        .arg(&out_json)
-        .arg("-deleteProject");
+        .arg(&out_json);
+    if let Some(cap) = cfg.ghidra_fn_cap {
+        // Second post-script arg is an optional function cap. Any positive
+        // integer here makes Ghidra stop after decompiling that many
+        // functions instead of every function in the binary — essential
+        // for keeping large-image spawns under the wall-clock timeout.
+        cmd.arg(cap.to_string());
+    }
+    cmd.arg("-deleteProject");
 
     let output = run_with_timeout(cmd, timeout).map_err(|e| match e {
         RunErr::Spawn(msg) => GhidraSpawnError::Spawn(msg),
@@ -497,8 +568,22 @@ pub fn spawn_ghidra_headless(
     }
 
     if !out_json.is_file() {
-        let _ = std::fs::remove_dir_all(&scratch);
-        return Err(GhidraSpawnError::NoCaptureEmitted(out_json));
+        // Keep the scratch dir around for post-mortem — Ghidra headless may
+        // have written the capture at an unexpected path, or the post-script
+        // may have thrown. Surface a stderr tail so callers don't have to
+        // fish through logs.
+        let stderr_txt = String::from_utf8_lossy(&output.stderr).to_string();
+        let mut lines: Vec<&str> = stderr_txt.lines().collect();
+        let n = lines.len();
+        if n > 30 {
+            lines = lines.split_off(n - 30);
+        }
+        let stderr_tail = lines.join("\n");
+        return Err(GhidraSpawnError::NoCaptureEmitted {
+            path: out_json,
+            scratch: scratch.clone(),
+            stderr_tail,
+        });
     }
     let text = std::fs::read_to_string(&out_json)
         .map_err(|e| GhidraSpawnError::ParseCapture(e.to_string()))?;
