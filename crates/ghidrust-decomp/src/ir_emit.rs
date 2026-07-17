@@ -109,17 +109,26 @@ fn emit_from_ir(insn: &Instruction, ir: &[PcodeOp]) -> String {
                 | OpCode::IntAnd
                 | OpCode::IntOr
                 | OpCode::IntMult
+                | OpCode::IntDiv
+                | OpCode::IntSDiv
+                | OpCode::IntRem
+                | OpCode::IntSRem
                 | OpCode::IntLeft
                 | OpCode::IntRight
                 | OpCode::IntSRight
                 | OpCode::IntNegate
                 | OpCode::IntNot
+                | OpCode::IntSExt
+                | OpCode::IntZExt
                 | OpCode::Load
                 | OpCode::Store
                 | OpCode::Push
                 | OpCode::Pop
                 | OpCode::Call
                 | OpCode::CallInd
+                | OpCode::Trap
+                | OpCode::Cast
+                | OpCode::Ptradd
         )
     });
 
@@ -163,9 +172,36 @@ fn pretty_op(op: &PcodeOp) -> Option<String> {
         OpCode::IntAnd => binop_augmented(op, "&"),
         OpCode::IntOr => binop_augmented(op, "|"),
         OpCode::IntMult => binop_augmented(op, "*"),
+        OpCode::IntDiv | OpCode::IntSDiv => binop_augmented(op, "/"),
+        OpCode::IntRem | OpCode::IntSRem => binop_augmented(op, "%"),
         OpCode::IntLeft => binop_augmented(op, "<<"),
         OpCode::IntRight => binop_augmented(op, ">>"),
         OpCode::IntSRight => binop_augmented(op, ">>>"),
+        OpCode::IntSExt => {
+            let dst = op.output.as_ref()?;
+            let a = op.inputs.first()?;
+            Some(format!("{} = (int{}_t){};", vn(dst), dst.size * 8, vn(a)))
+        }
+        OpCode::IntZExt => {
+            let dst = op.output.as_ref()?;
+            let a = op.inputs.first()?;
+            Some(format!("{} = (uint{}_t){};", vn(dst), dst.size * 8, vn(a)))
+        }
+        OpCode::Cast => {
+            let dst = op.output.as_ref()?;
+            let a = op.inputs.first()?;
+            Some(format!("{} = (uint64_t){};", vn(dst), vn(a)))
+        }
+        OpCode::Ptradd => {
+            let dst = op.output.as_ref()?;
+            let a = op.inputs.first()?;
+            let b = op.inputs.get(1)?;
+            Some(format!("{} = {} + {};", vn(dst), vn(a), vn(b)))
+        }
+        OpCode::Trap => Some(format!(
+            "/* trap: {} */;",
+            op.note.as_deref().unwrap_or("trap")
+        )),
         OpCode::IntNegate => {
             let dst = op.output.as_ref()?;
             let a = op.inputs.first()?;
@@ -413,8 +449,9 @@ mod tests {
 
     #[test]
     fn ir_emit_falls_back_when_ir_unavailable() {
-        // Instruction the lift can't understand — text should fall back to
-        // Stage-0-style comment scaffolding, not fabricated C.
+        // `hlt` is a lifted `Trap` op — Stage-0.5 emits an honest trap
+        // comment rather than fabricating a C statement. A truly unlifted
+        // opcode falls back to Stage-0 scaffolding (`/* mnemonic operands */;`).
         let insn = Instruction {
             address: 0x3000,
             bytes: vec![0xf4],
@@ -425,6 +462,26 @@ mod tests {
         let d = decompile_instructions("halted", 0x3000, &[insn.clone()]);
         let seq = lift_instructions(&[insn]);
         let text = emit_ir_pseudo_c(&d.name, d.entry, &d.blocks, &seq);
-        assert!(text.contains("/* hlt */;"), "should preserve unknown mnemonic:\n{text}");
+        assert!(
+            text.contains("trap: hlt") || text.contains("/* hlt */"),
+            "hlt should render as a Trap comment or stage-0 scaffolding:\n{text}"
+        );
+
+        // A truly unhandled mnemonic (never lifted, never decoded) still
+        // survives via the Stage-0 fallback branch of emit_ir_pseudo_c.
+        let unknown = Instruction {
+            address: 0x3010,
+            bytes: vec![0xff, 0xff],
+            mnemonic: "wibble".into(),
+            operands: "42".into(),
+            length: 2,
+        };
+        let d2 = decompile_instructions("wibbler", 0x3010, &[unknown.clone()]);
+        let seq2 = lift_instructions(&[unknown]);
+        let text2 = emit_ir_pseudo_c(&d2.name, d2.entry, &d2.blocks, &seq2);
+        assert!(
+            text2.contains("/* wibble 42 */;"),
+            "unhandled mnemonic should preserve scaffolding:\n{text2}"
+        );
     }
 }

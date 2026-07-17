@@ -10,7 +10,7 @@
 //! [`Program::display_name_at`] / [`Program::display_function_name_at`].
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::program::Program;
 
@@ -72,6 +72,20 @@ pub struct RetypeEdit {
     pub type_desc: String,
 }
 
+/// One record for an equate — Ghidra `EquateTablePlugin` binds a symbolic name
+/// to a scalar so the Listing can render `MY_FLAG` instead of `0x1234`.
+///
+/// Equates are attached to a (VA, operand-index) pair rather than to the raw
+/// value so a single number can be renamed in one place without recolouring
+/// every occurrence in the program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquateEdit {
+    /// Ghidra display name (e.g. `SW_HIDE`, `O_RDONLY`).
+    pub name: String,
+    /// Underlying scalar value the equate stands in for.
+    pub value: i64,
+}
+
 /// Side-car user-edit store for a [`Program`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProgramEdits {
@@ -97,6 +111,55 @@ pub struct ProgramEdits {
     /// User-applied types at specific VAs (Listing "Data Type" apply).
     #[serde(default)]
     pub applied_types: BTreeMap<u64, String>,
+    /// Equates keyed by `(va, op_index)` — Ghidra `EquateTablePlugin` model.
+    ///
+    /// Serialized as a flat `Vec` because JSON map keys must be strings.
+    #[serde(default, with = "equates_serde")]
+    pub equates: BTreeMap<(u64, u8), EquateEdit>,
+    /// Per-function tags (Ghidra `FunctionTagPlugin`). Keyed by function entry VA.
+    #[serde(default)]
+    pub function_tags: BTreeMap<u64, BTreeSet<String>>,
+    /// The universe of tags the user has ever created — retained even when no
+    /// function currently uses them so the "All Tags" pane keeps them listed.
+    #[serde(default)]
+    pub all_function_tags: BTreeSet<String>,
+}
+
+/// Serde helper — turns the equates map into a flat `Vec` so JSON
+/// (string-keyed) and bincode (any-keyed) can round-trip it identically.
+mod equates_serde {
+    use super::EquateEdit;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    #[derive(Serialize, Deserialize)]
+    struct Row {
+        va: u64,
+        op: u8,
+        edit: EquateEdit,
+    }
+
+    pub fn serialize<S: Serializer>(
+        map: &BTreeMap<(u64, u8), EquateEdit>,
+        ser: S,
+    ) -> Result<S::Ok, S::Error> {
+        let rows: Vec<Row> = map
+            .iter()
+            .map(|((va, op), edit)| Row {
+                va: *va,
+                op: *op,
+                edit: edit.clone(),
+            })
+            .collect();
+        rows.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        de: D,
+    ) -> Result<BTreeMap<(u64, u8), EquateEdit>, D::Error> {
+        let rows: Vec<Row> = Vec::deserialize(de)?;
+        Ok(rows.into_iter().map(|r| ((r.va, r.op), r.edit)).collect())
+    }
 }
 
 /// Serde helper — turns the comments map into `Vec<(u64, CommentKind, String)>`
@@ -282,7 +345,127 @@ impl ProgramEdits {
             function_signatures: self.function_signatures.len(),
             user_types: self.user_types.len(),
             applied_types: self.applied_types.len(),
+            equates: self.equates.len(),
+            function_tags: self.function_tags.values().map(|s| s.len()).sum(),
         }
+    }
+
+    // ─── Equates (Ghidra `EquateTablePlugin`) ────────────────────────────
+
+    /// Attach an equate at `(va, op_index)`.
+    pub fn set_equate(&mut self, va: u64, op: u8, name: impl Into<String>, value: i64) {
+        let name = name.into();
+        if name.is_empty() {
+            self.equates.remove(&(va, op));
+        } else {
+            self.equates.insert((va, op), EquateEdit { name, value });
+        }
+    }
+
+    pub fn equate_at(&self, va: u64, op: u8) -> Option<&EquateEdit> {
+        self.equates.get(&(va, op))
+    }
+
+    /// Every occurrence of the equate `name` in the program.
+    ///
+    /// Returned rows share `(name, value)` and are ordered by (va, op) so the
+    /// Equates Table reference pane can render them stably.
+    pub fn equate_references(&self, name: &str) -> Vec<(u64, u8, i64)> {
+        self.equates
+            .iter()
+            .filter(|(_, e)| e.name == name)
+            .map(|((va, op), e)| (*va, *op, e.value))
+            .collect()
+    }
+
+    /// Grouped list of `(name, value, ref_count)` rows for the Equates Table's
+    /// left pane. Sorted alphabetically by name so the table is deterministic.
+    pub fn equate_groups(&self) -> Vec<(String, i64, usize)> {
+        let mut groups: BTreeMap<(String, i64), usize> = BTreeMap::new();
+        for edit in self.equates.values() {
+            *groups.entry((edit.name.clone(), edit.value)).or_insert(0) += 1;
+        }
+        groups
+            .into_iter()
+            .map(|((name, value), n)| (name, value, n))
+            .collect()
+    }
+
+    // ─── Function Tags (Ghidra `FunctionTagPlugin`) ─────────────────────
+
+    /// Whether `entry` currently has `tag` assigned.
+    pub fn function_has_tag(&self, entry: u64, tag: &str) -> bool {
+        self.function_tags
+            .get(&entry)
+            .map(|s| s.contains(tag))
+            .unwrap_or(false)
+    }
+
+    /// Assign `tag` to the function at `entry`.
+    pub fn add_function_tag(&mut self, entry: u64, tag: impl Into<String>) {
+        let tag = tag.into();
+        if tag.trim().is_empty() {
+            return;
+        }
+        self.all_function_tags.insert(tag.clone());
+        self.function_tags
+            .entry(entry)
+            .or_default()
+            .insert(tag);
+    }
+
+    /// Remove `tag` from the function at `entry`. Does not remove the tag from
+    /// [`ProgramEdits::all_function_tags`] (so the "All Tags" pane keeps it).
+    pub fn remove_function_tag(&mut self, entry: u64, tag: &str) -> bool {
+        let removed = self
+            .function_tags
+            .get_mut(&entry)
+            .map(|s| s.remove(tag))
+            .unwrap_or(false);
+        if let Some(set) = self.function_tags.get_mut(&entry) {
+            if set.is_empty() {
+                self.function_tags.remove(&entry);
+            }
+        }
+        removed
+    }
+
+    /// Assigned tags for `entry`, sorted alphabetically.
+    pub fn function_tags_for(&self, entry: u64) -> Vec<String> {
+        self.function_tags
+            .get(&entry)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Delete a tag globally — removes it from every function and from the
+    /// universe of known tags. Returns the number of functions the tag was
+    /// removed from.
+    pub fn delete_tag_everywhere(&mut self, tag: &str) -> usize {
+        let mut n = 0;
+        let entries: Vec<u64> = self.function_tags.keys().copied().collect();
+        for entry in entries {
+            if self.remove_function_tag(entry, tag) {
+                n += 1;
+            }
+        }
+        self.all_function_tags.remove(tag);
+        n
+    }
+
+    /// `(tag, count)` rows for the "All Tags" pane. Sorted alphabetically.
+    pub fn all_tag_counts(&self) -> Vec<(String, usize)> {
+        let mut counts: BTreeMap<String, usize> = self
+            .all_function_tags
+            .iter()
+            .map(|t| (t.clone(), 0))
+            .collect();
+        for tags in self.function_tags.values() {
+            for t in tags {
+                *counts.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+        counts.into_iter().collect()
     }
 }
 
@@ -294,6 +477,8 @@ pub struct ProgramEditTotals {
     pub function_signatures: usize,
     pub user_types: usize,
     pub applied_types: usize,
+    pub equates: usize,
+    pub function_tags: usize,
 }
 
 impl Program {
@@ -429,6 +614,66 @@ mod tests {
         assert_eq!(t.renames, 2);
         assert_eq!(t.retypes, 1);
         assert_eq!(t.comments, 1);
+    }
+
+    #[test]
+    fn equates_group_and_reference_across_addresses() {
+        let mut e = ProgramEdits::default();
+        e.set_equate(0x1000, 1, "SW_HIDE", 0);
+        e.set_equate(0x1010, 1, "SW_HIDE", 0);
+        e.set_equate(0x1020, 1, "SW_SHOW", 5);
+        let groups = e.equate_groups();
+        assert_eq!(groups.len(), 2);
+        let (name, value, n) = groups
+            .iter()
+            .find(|(n, _, _)| n == "SW_HIDE")
+            .cloned()
+            .unwrap();
+        assert_eq!((name.as_str(), value, n), ("SW_HIDE", 0, 2));
+        // Reference table for the equate.
+        let refs = e.equate_references("SW_HIDE");
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().any(|(va, _, _)| *va == 0x1010));
+        // Setting the name to empty clears the equate.
+        e.set_equate(0x1000, 1, "", 0);
+        assert!(e.equate_at(0x1000, 1).is_none());
+    }
+
+    #[test]
+    fn function_tags_assign_remove_and_delete_everywhere() {
+        let mut e = ProgramEdits::default();
+        e.add_function_tag(0x1000, "MALLOC");
+        e.add_function_tag(0x2000, "MALLOC");
+        e.add_function_tag(0x1000, "SANITIZED");
+        assert!(e.function_has_tag(0x1000, "MALLOC"));
+        assert!(e.function_has_tag(0x1000, "SANITIZED"));
+        assert!(e.function_has_tag(0x2000, "MALLOC"));
+        // Tag universe includes both.
+        let counts = e.all_tag_counts();
+        assert_eq!(counts.iter().find(|(t, _)| t == "MALLOC").unwrap().1, 2);
+        // Remove a single (entry, tag) association.
+        assert!(e.remove_function_tag(0x1000, "SANITIZED"));
+        assert!(!e.function_has_tag(0x1000, "SANITIZED"));
+        // The tag persists in the universe until explicitly deleted.
+        assert!(e.all_function_tags.contains("SANITIZED"));
+        // Delete a tag globally.
+        let n = e.delete_tag_everywhere("MALLOC");
+        assert_eq!(n, 2);
+        assert!(!e.function_has_tag(0x2000, "MALLOC"));
+        assert!(!e.all_function_tags.contains("MALLOC"));
+    }
+
+    #[test]
+    fn totals_include_equates_and_function_tags() {
+        let mut e = ProgramEdits::default();
+        e.set_equate(0x100, 0, "A", 1);
+        e.set_equate(0x104, 0, "B", 2);
+        e.add_function_tag(0x1000, "T1");
+        e.add_function_tag(0x1000, "T2");
+        e.add_function_tag(0x2000, "T1");
+        let t = e.totals();
+        assert_eq!(t.equates, 2);
+        assert_eq!(t.function_tags, 3);
     }
 
     #[test]

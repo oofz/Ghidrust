@@ -119,6 +119,16 @@ pub enum Region {
     },
     /// `return;` — a block whose terminator is [`OpCode::Return`].
     Return(u32),
+    /// `break;` — an edge from inside a natural loop to the loop's
+    /// canonical exit block. Emitted by the structurer when the target of
+    /// what would otherwise be a `Goto(exit)` is exactly the enclosing
+    /// loop's exit successor. Falls back to `Goto` when the exit set is
+    /// ambiguous.
+    Break,
+    /// `continue;` — an edge from inside a natural loop back to the loop
+    /// header that isn't the natural latch. Rendered by Stage-1 as a bare
+    /// `continue;` inside the enclosing `while`/`for`/`do-while`.
+    Continue,
     /// `goto block_<id>;` — unstructured fallback for edges that don't fit
     /// any pattern (irreducible graphs, unresolved indirect branches).
     Goto(u32),
@@ -185,6 +195,7 @@ impl Region {
     pub fn block_count(&self) -> usize {
         match self {
             Region::Block(_) | Region::Return(_) | Region::Goto(_) => 1,
+            Region::Break | Region::Continue => 1,
             Region::Seq(rs) => rs.iter().map(|r| r.block_count()).sum(),
             Region::IfThen { then_branch, .. } => 1 + then_branch.block_count(),
             Region::IfThenElse {
@@ -214,6 +225,7 @@ impl Region {
     pub fn depth(&self) -> usize {
         match self {
             Region::Block(_) | Region::Return(_) | Region::Goto(_) => 0,
+            Region::Break | Region::Continue => 0,
             Region::Seq(rs) => rs.iter().map(|r| r.depth()).max().unwrap_or(0),
             Region::IfThen { then_branch, .. } => 1 + then_branch.depth(),
             Region::IfThenElse {
@@ -257,6 +269,7 @@ impl Region {
             Region::Block(b) | Region::Return(b) | Region::Goto(b) => {
                 set.insert(*b);
             }
+            Region::Break | Region::Continue => {}
             Region::Seq(rs) => rs.iter().for_each(|r| r.collect_blocks(set)),
             Region::IfThen { header, then_branch } => {
                 set.insert(*header);
@@ -365,6 +378,7 @@ pub fn structure_function_with_hints(
         pdom: &pdom,
         loops: &loops,
         switches: &switch_targets,
+        loop_stack: Vec::new(),
     };
     let mut visited: HashSet<u32> = HashSet::new();
     let raw = ctx.build_region_from(ENTRY_BLOCK, None, &mut visited);
@@ -497,6 +511,19 @@ struct StructCtx<'a> {
     pdom: &'a [u32],
     loops: &'a [NaturalLoop],
     switches: &'a BTreeMap<u32, ResolvedSwitch>,
+    /// Stack of enclosing loops so nested regions can emit `break;` /
+    /// `continue;` instead of goto when they hit the loop's canonical exit
+    /// or its header. The innermost loop is at the top of the stack.
+    loop_stack: Vec<LoopFrame>,
+}
+
+#[derive(Debug, Clone)]
+struct LoopFrame {
+    header: u32,
+    /// Canonical exit block for this loop (first successor of any body
+    /// block that leaves the loop). `None` means the loop has no natural
+    /// exit successor and `Break` won't be synthesised.
+    exit: Option<u32>,
 }
 
 impl<'a> StructCtx<'a> {
@@ -513,14 +540,11 @@ impl<'a> StructCtx<'a> {
                 break;
             }
             if !visited.insert(b) {
-                // Already emitted somewhere else — stop expansion but leave
-                // a goto so control-flow is still visible in the printed
-                // structure.
-                if !seq.is_empty() {
-                    // Terminate the chain here; the outer emit_region will
-                    // print a `goto block_<b>;` as its last statement.
-                }
-                seq.push(Region::Goto(b));
+                // Already emitted somewhere else. Prefer break/continue
+                // over goto when the target matches the enclosing loop's
+                // exit or header — that keeps the printed structure
+                // gotoless for the common Cifuentes shapes.
+                seq.push(self.loop_terminator_for(b));
                 break;
             }
 
@@ -620,18 +644,104 @@ impl<'a> StructCtx<'a> {
             seq.push(Region::Block(b));
             let next: Option<u32> = match succs.as_slice() {
                 [] => None,
-                [s] => Some(*s),
+                [s] => {
+                    // If this single-successor edge would leave the
+                    // enclosing loop, emit a `break;` instead of a
+                    // fall-through so the loop body stays gotoless.
+                    if let Some(term) = self.loop_exit_terminator(*s) {
+                        seq.push(term);
+                        None
+                    } else {
+                        Some(*s)
+                    }
+                }
                 _ => {
                     // >2 successors (e.g. switch, indirect) — fall through
                     // to goto for the first, others are unreachable at this
                     // stage. Switch structuring is deferred.
-                    seq.push(Region::Goto(succs[0]));
+                    seq.push(self.loop_terminator_for(succs[0]));
                     None
                 }
             };
             cur = next;
         }
         collapse_seq(seq)
+    }
+
+    /// Pick the "cheapest" terminator for a control-flow edge from the
+    /// current context to `target`: prefer `Continue` when the target is
+    /// the innermost enclosing loop header, `Break` when it's that
+    /// loop's canonical exit, an inline `Return(target)` when the target
+    /// is a return-only block (Cifuentes' return-duplication rule keeps
+    /// gotos out of arms that would otherwise re-emit the same trivial
+    /// return), and fall back to `Goto` otherwise.
+    fn loop_terminator_for(&self, target: u32) -> Region {
+        for frame in self.loop_stack.iter().rev() {
+            if frame.header == target {
+                return Region::Continue;
+            }
+            if frame.exit == Some(target) {
+                return Region::Break;
+            }
+        }
+        if self.is_trivial_return_block(target) {
+            return Region::Return(target);
+        }
+        Region::Goto(target)
+    }
+
+    /// A "trivial" return block has zero side-effecting ops before its
+    /// terminating `Return` — safe to duplicate inline in place of a
+    /// `goto block_<id>;` that would otherwise re-target the same
+    /// register-writing return. Intermediate Return ops (from post-ret
+    /// dead-code that the leader analysis chose not to split off) are
+    /// accepted because the emitted `return;` collapses them.
+    fn is_trivial_return_block(&self, b: u32) -> bool {
+        let Some(block) = self.ssa.blocks.get(b as usize) else {
+            return false;
+        };
+        if !matches!(block.ops.last().map(|o| o.opcode), Some(OpCode::Return)) {
+            return false;
+        }
+        for op in block.ops.iter().take(block.ops.len().saturating_sub(1)) {
+            match op.opcode {
+                OpCode::Nop | OpCode::Return => {}
+                OpCode::Copy
+                | OpCode::IntXor
+                | OpCode::IntAnd
+                | OpCode::IntOr
+                | OpCode::IntAdd
+                | OpCode::IntSub
+                | OpCode::IntEqual
+                | OpCode::IntNotEqual
+                | OpCode::IntLess
+                | OpCode::IntLessEqual
+                | OpCode::IntSLess
+                | OpCode::IntSLessEqual
+                | OpCode::IntSExt
+                | OpCode::IntZExt => {
+                    if op.output.is_none() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    /// When `succ` is the innermost enclosing loop's exit, return
+    /// `Some(Break)`. Otherwise return `None` so the caller keeps the
+    /// natural fall-through.
+    fn loop_exit_terminator(&self, succ: u32) -> Option<Region> {
+        let frame = self.loop_stack.last()?;
+        if frame.exit == Some(succ) {
+            Some(Region::Break)
+        } else if frame.header == succ {
+            Some(Region::Continue)
+        } else {
+            None
+        }
     }
 
     /// Find the loop whose header is `b`, if any.
@@ -661,6 +771,14 @@ impl<'a> StructCtx<'a> {
             .find(|s| l.body.contains(s))
             .unwrap_or(l.header);
 
+        // Push a loop frame so descendant regions can emit `break;` /
+        // `continue;` for edges that hit the exit / header.
+        let exit = self.loop_exit(l);
+        self.loop_stack.push(LoopFrame {
+            header: l.header,
+            exit,
+        });
+
         let body_region = if header_cbr {
             // Emit body starting from the loop-body successor, stopping at the
             // header itself (natural back-edge).
@@ -669,6 +787,8 @@ impl<'a> StructCtx<'a> {
             // Body is everything reachable from header inside the loop.
             self.build_region_from(l.header, Some(l.header), &mut inner_visited)
         };
+
+        self.loop_stack.pop();
 
         // Restore the outer visited set + record the whole loop body.
         *visited = outer_visited;
@@ -935,6 +1055,8 @@ fn render(r: &Region, indent: usize, out: &mut String) {
     match r {
         Region::Block(b) => out.push_str(&format!("{pad}block_{b};\n")),
         Region::Return(b) => out.push_str(&format!("{pad}return; // block_{b}\n")),
+        Region::Break => out.push_str(&format!("{pad}break;\n")),
+        Region::Continue => out.push_str(&format!("{pad}continue;\n")),
         Region::Goto(b) => out.push_str(&format!("{pad}goto block_{b};\n")),
         Region::Seq(rs) => {
             for r in rs {
@@ -1079,7 +1201,11 @@ pub fn flatten_short_circuit(r: Region, ssa: &SsaFunction) -> Region {
             then_branch: Box::new(flatten_short_circuit(*then_branch, ssa)),
             else_branch: else_branch.map(|e| Box::new(flatten_short_circuit(*e, ssa))),
         },
-        leaf @ (Region::Block(_) | Region::Return(_) | Region::Goto(_)) => leaf,
+        leaf @ (Region::Block(_)
+        | Region::Return(_)
+        | Region::Goto(_)
+        | Region::Break
+        | Region::Continue) => leaf,
     }
 }
 
@@ -1208,6 +1334,82 @@ fn region_bodies_equivalent(a: &Region, b: &Region) -> bool {
 /// Convenience: total number of natural loops recognised.
 pub fn loop_count(report: &StructureReport) -> usize {
     report.loops.len()
+}
+
+/// Count of `Region::Goto` leaves in the recovered structure tree — the
+/// primary "unstructured escape" indicator. Break/Continue don't count
+/// (they're structured escapes). Combined with [`region_leaf_count`] this
+/// yields the Phase D `goto_rate` metric.
+pub fn goto_count(region: &Region) -> usize {
+    match region {
+        Region::Goto(_) => 1,
+        Region::Seq(rs) => rs.iter().map(goto_count).sum(),
+        Region::IfThen { then_branch, .. } => goto_count(then_branch),
+        Region::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => goto_count(then_branch) + goto_count(else_branch),
+        Region::While { body, .. }
+        | Region::DoWhile { body, .. }
+        | Region::Loop { body, .. } => goto_count(body),
+        Region::Switch { cases, default, .. } => {
+            cases.iter().map(|c| goto_count(&c.body)).sum::<usize>()
+                + default.as_ref().map(|d| goto_count(d)).unwrap_or(0)
+        }
+        Region::ShortCircuit {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            goto_count(then_branch)
+                + else_branch.as_ref().map(|e| goto_count(e)).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
+/// Count of every leaf statement in a region — used as the denominator
+/// for the `goto_rate` metric. Every terminal region (Block, Return, Goto,
+/// Break, Continue) counts as one leaf.
+pub fn region_leaf_count(region: &Region) -> usize {
+    match region {
+        Region::Block(_)
+        | Region::Return(_)
+        | Region::Goto(_)
+        | Region::Break
+        | Region::Continue => 1,
+        Region::Seq(rs) => rs.iter().map(region_leaf_count).sum(),
+        Region::IfThen { then_branch, .. } => 1 + region_leaf_count(then_branch),
+        Region::IfThenElse {
+            then_branch,
+            else_branch,
+            ..
+        } => 1 + region_leaf_count(then_branch) + region_leaf_count(else_branch),
+        Region::While { body, .. }
+        | Region::DoWhile { body, .. }
+        | Region::Loop { body, .. } => 1 + region_leaf_count(body),
+        Region::Switch { cases, default, .. } => {
+            1 + cases.iter().map(|c| region_leaf_count(&c.body)).sum::<usize>()
+                + default.as_ref().map(|d| region_leaf_count(d)).unwrap_or(0)
+        }
+        Region::ShortCircuit {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            1 + region_leaf_count(then_branch)
+                + else_branch.as_ref().map(|e| region_leaf_count(e)).unwrap_or(0)
+        }
+    }
+}
+
+/// `goto_rate = goto_count / max(1, region_leaf_count)`. The Phase D gate
+/// is < 0.15 on the lab fixture; consumers can also report this metric
+/// on shared-entry corpora.
+pub fn goto_rate(region: &Region) -> f32 {
+    let leaves = region_leaf_count(region).max(1);
+    goto_count(region) as f32 / leaves as f32
 }
 
 /// Convenience: how many distinct blocks the structured tree references.
@@ -1454,6 +1656,69 @@ mod tests {
         }
         let text = dump_region(&flattened);
         assert!(text.contains("&&"), "compound && should render:\n{text}");
+    }
+
+    #[test]
+    fn loop_with_body_exit_emits_break_instead_of_goto() {
+        // 0x0: unconditional jmp → 0x2 (loop header, block b1)
+        // 0x2: cbranch to 0x8 (exit) fallthrough 0x4
+        // 0x4: unconditional jmp → 0x6 (body block)
+        // 0x6: unconditional jmp → 0x2 (latch)
+        // 0x8: return
+        // Body path (0x4→0x6→0x2) forms the loop; an artificial "escape" is
+        // not present in this shape but the header cbranch itself already
+        // exits to 0x8 → the exit is 0x8. The re-visit of the header from
+        // the latch should be a Continue.
+        let mut seq = IrSequence::new();
+        seq.push_addressed(
+            0x0,
+            2,
+            PcodeOp::new(OpCode::Branch, None, vec![Varnode::constant(0x2, 8)]),
+        );
+        seq.push_addressed(
+            0x2,
+            2,
+            PcodeOp::new(
+                OpCode::CBranch,
+                None,
+                vec![Varnode::unique(0, 1), Varnode::constant(0x8, 8)],
+            ),
+        );
+        seq.push_addressed(
+            0x4,
+            2,
+            PcodeOp::new(OpCode::Branch, None, vec![Varnode::constant(0x6, 8)]),
+        );
+        seq.push_addressed(
+            0x6,
+            2,
+            PcodeOp::new(OpCode::Branch, None, vec![Varnode::constant(0x2, 8)]),
+        );
+        seq.push_addressed(0x8, 1, PcodeOp::new(OpCode::Return, None, vec![]));
+        let cfg = build_cfg(&seq, 0x0, 0x9);
+        let ssa = build_ssa(&cfg);
+        let rep = structure_function(&cfg, &ssa);
+        let text = dump_region(&rep.region);
+        // With break/continue plumbing, the structured region should be a
+        // While over the header with no `goto block_` in the body.
+        assert!(text.contains("while"), "expected while:\n{text}");
+        assert!(
+            goto_count(&rep.region) == 0,
+            "expected zero gotos, tree:\n{text}"
+        );
+    }
+
+    #[test]
+    fn goto_rate_zero_on_diamond() {
+        let bytes = [0x39, 0xc1, 0x74, 0x02, 0x31, 0xc0, 0xc3, 0x31, 0xc9, 0xc3];
+        let rep = structure_bytes(&bytes, 0x2000);
+        let rate = goto_rate(&rep.region);
+        assert!(
+            rate < 0.15,
+            "diamond should have goto_rate <0.15, got {}\nRegion tree:\n{}",
+            rate,
+            dump_region(&rep.region)
+        );
     }
 
     #[test]

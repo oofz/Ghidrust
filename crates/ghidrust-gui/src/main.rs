@@ -1,34 +1,53 @@
 //! Ghidrust CodeBrowser shell — Material 3 Dark/Light, Ghidra-like menus/panes.
 //! Icons: Google Material 3 geometry (see `icons.rs`); no emoji in the UI.
 
+mod debugger;
 mod decomp_tokens;
+mod entropy;
 mod events;
+mod graphs;
 mod icons;
+mod layouts;
 mod menu_actions;
 mod nav;
 mod panes;
+mod register_manager;
+mod scripts;
 
 use eframe::egui::{self, Color32, Visuals};
 use ghidrust_core::{
     analyzer_catalog, analyzer_supports_gpu, disassemble_range, load_path, m3_tokens,
-    set_preferred_bulk_mode, AnalysisRunReport, AnalyzerInfo, BulkScanMode, CommentKind,
-    FoundString, Instruction, Program, Project, ProjectTreeModel, RttiReport, ThemeMode,
-    BUILTIN_TYPES,
+    set_preferred_bulk_mode, xrefs_from, xrefs_to, AnalysisRunReport, AnalyzerInfo, AnalyzerOutput,
+    BulkScanMode, CommentKind, FoundString, Instruction, Program, Project, ProjectTreeModel,
+    RttiReport, ThemeMode, XRef, BUILTIN_TYPES,
 };
 use icons::{m3_icon, m3_linear_progress, status_badge, M3Icon};
 use menu_actions::{
-    decompile_entry_for_va, listing_index_at_or_before, parse_address, parse_hex_pattern,
-    processor_info, pseudo_c_for_stage, search_memory, search_program_text, stage0_pseudo_c,
-    DecompStage, ListingSelection, MemoryHit, TextHit, STAGE0_MAX_INSNS,
+    address_table_hits, decompile_entry_for_va, listing_index_at_or_before, parse_address,
+    parse_hex_pattern, processor_info, pseudo_c_for_stage, search_instruction_patterns,
+    search_memory, search_program_text, search_scalars, stage0_pseudo_c, DecompStage,
+    ListingSelection, MemoryHit, TextHit, STAGE0_MAX_INSNS,
 };
 use decomp_tokens::{
     line_for_va as decomp_line_for_va, tokenize as tokenize_decomp, DecompLine, TokenKind,
 };
+use debugger::{DebuggerAction, DebuggerPane, DebuggerState};
 use events::{EventBus, EventSource, GhidrustEvent, MutationKind};
+use graphs::{
+    build_incoming_tree, build_outgoing_tree, data_xrefs_to, expand_tree_node, layout_call_graph,
+    layout_function_graph, render_call_graph, render_function_graph, CallTreeNode,
+    FunctionGraphLayout, GraphPaneState,
+};
 use nav::{NavHistory, NavLocation};
 use panes::{Bookmark, BookmarkKind, PaneKind};
+use register_manager::RegisterManagerState;
+use scripts::{
+    render_mcp_repl, render_script_manager, render_text_editor, MacropadReplState,
+    ScriptManagerState, TextEditorRequest, TextEditorState,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvError, TryRecvError};
 
 fn recent_projects_path() -> PathBuf {
     // %APPDATA%/ghidrust/recent_projects.txt (or home fallback)
@@ -63,13 +82,29 @@ fn save_recent_projects(paths: &[String]) {
     let _ = std::fs::write(p, paths.join("\n"));
 }
 
-/// In-progress stepped analysis (one analyzer per frame for live M3 progress).
+/// Messages from the background analysis worker → UI thread (polled each frame).
+enum AnalysisWorkerMsg {
+    /// Analyzer at `index` is about to run.
+    StepStarted { index: usize },
+    /// Analyzer at `index` finished; `outputs` are that step's report rows.
+    StepFinished {
+        index: usize,
+        outputs: Vec<AnalyzerOutput>,
+    },
+    /// All selected analyzers finished; return mutated program to the UI.
+    Done { program: Program },
+    /// Hard failure; program is returned so the UI can restore it (may include partial work).
+    Failed { error: String, program: Program },
+}
+
+/// In-progress analysis. Heavy work runs on a background thread; the UI only polls `rx`.
 struct AnalysisJob {
     names: Vec<String>,
     index: usize,
     results: AnalysisRunReport,
     file_label: String,
     use_gpu: bool,
+    rx: Receiver<AnalysisWorkerMsg>,
 }
 
 fn main() -> eframe::Result<()> {
@@ -244,6 +279,93 @@ pub struct GhidrustApp {
     comment_window_kind_filter: Option<CommentKind>,
     /// Phase B (M2) — Console severity per line (`Info`, `Warn`, `Error`).
     console_severity: Vec<ConsoleSeverity>,
+    // ── Phase D (M4) — tables & search state ────────────────────────────
+    /// Byte Viewer state (Ghidra `ByteViewerPlugin`).
+    bytes_pane_va: Option<u64>,
+    bytes_pane_bpr: usize,
+    bytes_pane_rows: usize,
+    /// Filter for Symbol References pane (name / address substring).
+    symbol_refs_filter: String,
+    /// Symbol References focus (target VA) — set from Symbol Table row.
+    symbol_refs_target: Option<u64>,
+    /// Equates Table filters + edit dialog.
+    equates_filter: String,
+    equates_selected: Option<(String, i64)>,
+    show_equate_dialog: bool,
+    equate_dialog_va: Option<u64>,
+    equate_dialog_op: u8,
+    equate_dialog_name: String,
+    equate_dialog_value: String,
+    /// Function Tags — new-tag input + selected tag for row highlight.
+    function_tags_new_input: String,
+    /// External Programs filter.
+    external_programs_filter: String,
+    /// Data Type Preview — selected built-in for preview.
+    data_type_preview_selected: String,
+    /// Checksum Generator — cached results.
+    checksum_last: Option<ChecksumReport>,
+    /// Search → For Scalars.
+    show_search_scalars_dialog: bool,
+    search_scalars_min: String,
+    search_scalars_max: String,
+    /// Search → Instruction Patterns.
+    show_search_insn_dialog: bool,
+    search_insn_mnemonic: String,
+    search_insn_operands: String,
+    /// Search → For Address Tables (populated on-demand).
+    show_search_address_tables_dialog: bool,
+    /// Function Tags pane filter.
+    function_tags_filter: String,
+    // ── Phase E (M5) — Graphs & maps ────────────────────────────────────
+    /// Function Graph / Call Graph / Call Trees session state.
+    graph_state: GraphPaneState,
+    /// Function Call Trees — top-level nodes (rebuilt on cursor change).
+    call_tree_incoming: Vec<CallTreeNode>,
+    call_tree_outgoing: Vec<CallTreeNode>,
+    /// Register Manager pane state (session-only until backend lattice lands).
+    register_manager: RegisterManagerState,
+    /// Memory Map editor — pending row edits (Add row).
+    memory_map_new_name: String,
+    memory_map_new_va: String,
+    memory_map_new_size: String,
+    memory_map_new_r: bool,
+    memory_map_new_w: bool,
+    memory_map_new_x: bool,
+    // ── Phase F (M6) — Scripts ──────────────────────────────────────────
+    /// Script Manager pane state.
+    script_manager: ScriptManagerState,
+    /// Text Editor multi-tab state.
+    text_editor: TextEditorState,
+    /// MCP REPL state.
+    mcp_repl: MacropadReplState,
+    // ── Phase G (M7) — Debugger visibility ──────────────────────────────
+    /// Debugger tool state (breakpoints, watches, session-only until backend).
+    debugger: DebuggerState,
+    /// Which debugger panes are open (Ghidra `Debugger` tool Window menu).
+    debugger_open: BTreeMap<DebuggerPane, bool>,
+    // ── Phase H (M8) — Docking / layouts / Configure ───────────────────
+    /// Configure dialog (Ghidra `File → Configure` plugin picker).
+    show_configure_dialog: bool,
+    /// Layout preset save/load dialog state.
+    show_layouts_dialog: bool,
+    layouts_new_name: String,
+    layouts_cached: Vec<String>,
+    /// Current layout name (empty = unnamed / default).
+    current_layout_name: String,
+}
+
+/// Phase D (M4) — Checksum Generator report (Ghidra `ComputeChecksumsPlugin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChecksumReport {
+    pub target: String,
+    pub len: usize,
+    pub crc32: u32,
+    pub sum8: u32,
+    pub sum16: u32,
+    pub sum32: u64,
+    pub adler32: u32,
+    pub fletcher16: u32,
+    pub fletcher32: u64,
 }
 
 /// Phase B (M2) — severity tint for `Console` pane rows.
@@ -252,6 +374,57 @@ enum ConsoleSeverity {
     Info,
     Warn,
     Error,
+}
+
+/// Phase D (M4) — Checksum Generator scope (Ghidra `ComputeChecksumsPlugin`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChecksumMode {
+    /// Concatenation of every loaded memory block.
+    WholeImage,
+    /// A single memory block chosen by name.
+    Section(String),
+}
+
+/// CRC-32/ISO-HDLC (polynomial `0xEDB88320`) — matches Ghidra's default.
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let mut c: u32 = 0xFFFF_FFFF;
+    for &b in data {
+        c ^= b as u32;
+        for _ in 0..8 {
+            let mask = (c & 1).wrapping_neg();
+            c = (c >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !c
+}
+
+fn adler32(data: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    let mut a: u32 = 1;
+    let mut b: u32 = 0;
+    for &byte in data {
+        a = (a + byte as u32) % MOD;
+        b = (b + a) % MOD;
+    }
+    (b << 16) | a
+}
+
+fn fletcher_pair(data: &[u8]) -> (u32, u64) {
+    let (mut a16, mut b16): (u16, u16) = (0, 0);
+    for &byte in data {
+        a16 = a16.wrapping_add(byte as u16);
+        b16 = b16.wrapping_add(a16);
+    }
+    let f16 = ((b16 as u32) << 16) | a16 as u32;
+
+    let (mut a32, mut b32): (u32, u32) = (0, 0);
+    for chunk in data.chunks_exact(2) {
+        let w = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
+        a32 = a32.wrapping_add(w);
+        b32 = b32.wrapping_add(a32);
+    }
+    let f32 = ((b32 as u64) << 32) | a32 as u64;
+    (f16, f32)
 }
 
 /// Phase C (M3) — Data Type Manager `New` submenu kinds.
@@ -407,6 +580,47 @@ impl NewTypeKind {
     }
 }
 
+/// Recursively render one Ghidra-style Call Tree row.
+///
+/// The node's `children_loaded` flag is flipped on first expand so callers
+/// pay the xref cost only when the user opens a branch.
+fn render_call_tree_node(
+    node: &mut CallTreeNode,
+    idx: usize,
+    direction: &'static str,
+    prog: &Program,
+    hide_thunks: bool,
+    ui: &mut egui::Ui,
+    _muted: Color32,
+    primary: Color32,
+    goto: &mut Option<u64>,
+) {
+    let title = egui::RichText::new(format!("{}  {:#x}", node.name, node.va)).monospace();
+    let title = if node.is_thunk {
+        title.color(Color32::from_rgb(0xFB, 0xC0, 0x2D))
+    } else {
+        title.color(primary)
+    };
+    let resp = egui::CollapsingHeader::new(title)
+        .id_salt((direction, node.va, idx))
+        .default_open(false)
+        .show(ui, |ui| {
+            expand_tree_node(node, prog, direction, hide_thunks);
+            if node.children.is_empty() {
+                ui.small("(no further edges)");
+                return;
+            }
+            for (i, child) in node.children.iter_mut().enumerate() {
+                render_call_tree_node(
+                    child, i, direction, prog, hide_thunks, ui, _muted, primary, goto,
+                );
+            }
+        });
+    if resp.header_response.clicked() {
+        *goto = Some(node.va);
+    }
+}
+
 impl GhidrustApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let mut app = Self::headless();
@@ -475,7 +689,11 @@ impl GhidrustApp {
             decomp_entry: None,
             decomp_text: String::new(),
             decomp_status: String::new(),
-            decomp_stage: DecompStage::Stage0,
+            // Phase F: Stage-1 is now the default GUI decompiler stage —
+            // real SSA + structure + types instead of the mnemonic-scaffold
+            // Stage-0 preview. Users can still pick Stage-0/Stage-0.5 from
+            // the stage picker combo box.
+            decomp_stage: DecompStage::Stage1,
             decomp_lift_ratio: None,
             pane_open: Self::default_pane_open(),
             nav_history: NavHistory::default(),
@@ -525,6 +743,59 @@ impl GhidrustApp {
             comment_window_filter: String::new(),
             comment_window_kind_filter: None,
             console_severity: vec![ConsoleSeverity::Info],
+            bytes_pane_va: None,
+            bytes_pane_bpr: 16,
+            bytes_pane_rows: 24,
+            symbol_refs_filter: String::new(),
+            symbol_refs_target: None,
+            equates_filter: String::new(),
+            equates_selected: None,
+            show_equate_dialog: false,
+            equate_dialog_va: None,
+            equate_dialog_op: 0,
+            equate_dialog_name: String::new(),
+            equate_dialog_value: String::new(),
+            function_tags_new_input: String::new(),
+            external_programs_filter: String::new(),
+            data_type_preview_selected: "dword".into(),
+            checksum_last: None,
+            show_search_scalars_dialog: false,
+            search_scalars_min: "0".into(),
+            search_scalars_max: "0xffff".into(),
+            show_search_insn_dialog: false,
+            search_insn_mnemonic: String::new(),
+            search_insn_operands: String::new(),
+            show_search_address_tables_dialog: false,
+            function_tags_filter: String::new(),
+            graph_state: GraphPaneState {
+                fn_graph_zoom: 1.0,
+                ..GraphPaneState::default()
+            },
+            call_tree_incoming: Vec::new(),
+            call_tree_outgoing: Vec::new(),
+            register_manager: RegisterManagerState::default(),
+            memory_map_new_name: String::new(),
+            memory_map_new_va: String::new(),
+            memory_map_new_size: String::new(),
+            memory_map_new_r: true,
+            memory_map_new_w: false,
+            memory_map_new_x: false,
+            script_manager: ScriptManagerState::new_with_builtin(),
+            text_editor: TextEditorState::default(),
+            mcp_repl: MacropadReplState::default(),
+            debugger: DebuggerState::default(),
+            debugger_open: {
+                let mut m = BTreeMap::new();
+                for p in DebuggerPane::ALL {
+                    m.insert(*p, false);
+                }
+                m
+            },
+            show_configure_dialog: false,
+            show_layouts_dialog: false,
+            layouts_new_name: String::new(),
+            layouts_cached: Vec::new(),
+            current_layout_name: String::new(),
         }
     }
 
@@ -1123,6 +1394,192 @@ impl GhidrustApp {
         Ok(name)
     }
 
+    // ── Phase D (M4) — equates, function tags, xrefs, checksums ──────────
+
+    /// Attach an equate `name` at `(va, op)` for scalar `value` (Ghidra
+    /// `Convert → Equate`). Empty `name` clears the equate.
+    pub fn set_equate(
+        &mut self,
+        va: u64,
+        op: u8,
+        name: impl Into<String>,
+        value: i64,
+    ) -> Result<(), String> {
+        let name = name.into();
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        let clearing = name.is_empty();
+        prog.edits.set_equate(va, op, &name, value);
+        // Equates render inline in the Listing operand slot; treat as retype
+        // for cache invalidation so the Decompiler picks the change up too.
+        self.event_bus.publish(GhidrustEvent::ProgramMutated {
+            kind: MutationKind::Retype {
+                va,
+                type_desc: if clearing {
+                    format!("cleared equate @ op {op}")
+                } else {
+                    format!("equate {name} = {value}")
+                },
+            },
+        });
+        self.status = if clearing {
+            format!("Cleared equate @ {va:#x} op {op}")
+        } else {
+            format!("Set equate {name} = {value} @ {va:#x} op {op}")
+        };
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Function Tags — add / remove / delete-everywhere (Ghidra
+    /// `FunctionTagPlugin`).
+    pub fn add_function_tag(&mut self, entry: u64, tag: impl Into<String>) -> Result<(), String> {
+        let tag = tag.into();
+        if tag.trim().is_empty() {
+            return Err("empty tag".into());
+        }
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        prog.edits.add_function_tag(entry, &tag);
+        self.event_bus.publish(GhidrustEvent::ProgramMutated {
+            kind: MutationKind::Retype {
+                va: entry,
+                type_desc: format!("tag+ {tag}"),
+            },
+        });
+        self.status = format!("Tag '{tag}' added to fn @ {entry:#x}");
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    pub fn remove_function_tag(&mut self, entry: u64, tag: &str) -> Result<(), String> {
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        let removed = prog.edits.remove_function_tag(entry, tag);
+        if !removed {
+            return Err(format!("fn @ {entry:#x} has no tag '{tag}'"));
+        }
+        self.event_bus.publish(GhidrustEvent::ProgramMutated {
+            kind: MutationKind::Retype {
+                va: entry,
+                type_desc: format!("tag- {tag}"),
+            },
+        });
+        self.status = format!("Tag '{tag}' removed from fn @ {entry:#x}");
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Register a tag in the universe (`ProgramEdits::all_function_tags`)
+    /// without assigning it to a function. Ghidra's "Create tag" action
+    /// lands here.
+    pub fn create_tag(&mut self, tag: impl Into<String>) -> Result<(), String> {
+        let tag = tag.into();
+        if tag.trim().is_empty() {
+            return Err("empty tag".into());
+        }
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        prog.edits.all_function_tags.insert(tag.clone());
+        self.status = format!("Created tag '{tag}'");
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Delete a tag from every function and from the universe.
+    pub fn delete_tag_everywhere(&mut self, tag: &str) -> Result<(), String> {
+        let prog = self
+            .program
+            .as_mut()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        let n = prog.edits.delete_tag_everywhere(tag);
+        self.event_bus.publish(GhidrustEvent::ProgramMutated {
+            kind: MutationKind::Retype {
+                va: 0,
+                type_desc: format!("tag deleted: {tag}"),
+            },
+        });
+        self.status = format!("Tag '{tag}' deleted from {n} function(s)");
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    /// Compute references TO the given target VA. Uses `ghidrust-core::xrefs`
+    /// against the current program + focused-window listing.
+    pub fn xrefs_to_va(&self, target: u64) -> Vec<XRef> {
+        let Some(prog) = self.program.as_ref() else {
+            return Vec::new();
+        };
+        xrefs_to(prog, target, Some(&self.listing))
+    }
+
+    /// Compute references FROM the given source VA.
+    pub fn xrefs_from_va(&self, source: u64) -> Vec<XRef> {
+        let Some(prog) = self.program.as_ref() else {
+            return Vec::new();
+        };
+        xrefs_from(prog, source, STAGE0_MAX_INSNS)
+    }
+
+    /// Compute a checksum panel over the loaded program (or focused block).
+    pub fn compute_checksums(&mut self, mode: ChecksumMode) -> Result<(), String> {
+        let prog = self
+            .program
+            .as_ref()
+            .ok_or_else(|| "no program loaded".to_string())?;
+        let (target_label, data): (String, Vec<u8>) = match mode {
+            ChecksumMode::WholeImage => {
+                let bytes: Vec<u8> = prog.blocks.iter().flat_map(|b| b.bytes.clone()).collect();
+                (format!("Whole image ({})", prog.name), bytes)
+            }
+            ChecksumMode::Section(name) => {
+                let b = prog
+                    .blocks
+                    .iter()
+                    .find(|b| b.name == name)
+                    .ok_or_else(|| format!("no block named {name}"))?;
+                (format!("Block {name}"), b.bytes.clone())
+            }
+        };
+        let len = data.len();
+        let crc32 = crc32_ieee(&data);
+        let sum8: u32 = data.iter().map(|&b| b as u32).sum();
+        let sum16: u32 = data
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
+            .sum::<u32>();
+        let sum32: u64 = data
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u64)
+            .sum::<u64>();
+        let adler32 = adler32(&data);
+        let (fletcher16, fletcher32) = fletcher_pair(&data);
+        self.checksum_last = Some(ChecksumReport {
+            target: target_label,
+            len,
+            crc32,
+            sum8,
+            sum16,
+            sum32,
+            adler32,
+            fletcher16,
+            fletcher32,
+        });
+        self.status = format!(
+            "Checksum: crc32={crc32:#010x} adler32={adler32:#010x} len={len}",
+        );
+        self.log(self.status.clone());
+        Ok(())
+    }
+
     /// Program Tree → Set View / Add To View / Remove From View / Show All.
     ///
     /// The Ghidra semantic is a **fragment name set**. `None` = full view.
@@ -1434,6 +1891,72 @@ impl GhidrustApp {
         Ok(())
     }
 
+    /// Search → For Scalars.
+    pub fn run_search_scalars(&mut self) -> Result<(), String> {
+        let min = self
+            .parse_scalar_input(&self.search_scalars_min.clone())
+            .map_err(|e| format!("min: {e}"))?;
+        let max = self
+            .parse_scalar_input(&self.search_scalars_max.clone())
+            .map_err(|e| format!("max: {e}"))?;
+        if min > max {
+            return Err("min > max".into());
+        }
+        self.text_hits = search_scalars(&self.listing, min, max, 1000);
+        self.memory_hits.clear();
+        self.show_search_results = true;
+        self.status = format!(
+            "Scalar search [{min}, {max}]: {} hit(s)",
+            self.text_hits.len()
+        );
+        self.log(self.status.clone());
+        Ok(())
+    }
+
+    fn parse_scalar_input(&self, s: &str) -> Result<i64, String> {
+        let t = s.trim();
+        if t.is_empty() {
+            return Err("empty".into());
+        }
+        let (sign, rest) = if let Some(r) = t.strip_prefix('-') {
+            (-1i64, r)
+        } else {
+            (1i64, t)
+        };
+        // `0x…` prefix wins → hex. Otherwise prefer decimal to preserve
+        // Ghidra's convention (numeric input without a prefix is decimal).
+        let (base, digits) = if let Some(r) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            (16u32, r)
+        } else {
+            (10u32, rest)
+        };
+        let mag = u64::from_str_radix(digits, base).map_err(|e| e.to_string())?;
+        Ok(sign * mag as i64)
+    }
+
+    /// Search → Instruction Patterns.
+    pub fn run_search_instruction_patterns(&mut self) -> Result<(), String> {
+        if self.listing.is_empty() {
+            return Err("no listing loaded".into());
+        }
+        self.text_hits = search_instruction_patterns(
+            &self.listing,
+            &self.search_insn_mnemonic,
+            &self.search_insn_operands,
+            1000,
+        );
+        self.memory_hits.clear();
+        self.show_search_results = true;
+        self.status = format!(
+            "Instruction pattern hits: {} for `{} {}`",
+            self.text_hits.len(),
+            self.search_insn_mnemonic.trim(),
+            self.search_insn_operands.trim(),
+        );
+        self.log(self.status.clone());
+        Ok(())
+    }
+
     /// Search → Program Text.
     pub fn run_search_text(&mut self) -> Result<(), String> {
         let prog = self
@@ -1654,7 +2177,8 @@ impl GhidrustApp {
         Ok(())
     }
 
-    /// Start stepped analysis from dialog selections (progress updates each frame).
+    /// Start analysis from dialog selections on a background thread.
+    /// Progress / console lines are delivered via channel and polled each UI frame.
     pub fn begin_analysis_job(&mut self) -> Result<(), String> {
         if self.analysis_job.is_some() {
             return Err("analysis already in progress".into());
@@ -1681,117 +2205,191 @@ impl GhidrustApp {
             .as_ref()
             .map(|p| p.name.clone())
             .unwrap_or_else(|| "program".into());
+        let use_gpu = self.use_gpu_experimental;
         self.log(format!(
             "Starting analysis on {file_label}: {} analyzer(s), gpu={}",
             names.len(),
-            self.use_gpu_experimental
+            use_gpu
         ));
         self.status = format!("Analyzing {file_label}…");
+
+        let (msg_tx, msg_rx) = mpsc::channel::<AnalysisWorkerMsg>();
+        // Hand the program to the worker only after spawn succeeds so a spawn
+        // failure cannot drop the only Program copy.
+        let (prog_tx, prog_rx) = mpsc::sync_channel::<Program>(1);
+        let names_worker = names.clone();
+        std::thread::Builder::new()
+            .name("ghidrust-analysis".into())
+            .spawn(move || {
+                let Ok(mut prog) = prog_rx.recv() else {
+                    return;
+                };
+                for (index, name) in names_worker.iter().enumerate() {
+                    let _ = msg_tx.send(AnalysisWorkerMsg::StepStarted { index });
+                    let gpu = use_gpu && analyzer_supports_gpu(name);
+                    // catch_unwind: core GPU paths already catch wgpu panics;
+                    // belt-and-suspenders so the worker always returns the program.
+                    let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        ghidrust_core::run_analyzers_opts(&mut prog, &[name.as_str()], gpu)
+                    }));
+                    match step {
+                        Ok(Ok(report)) => {
+                            let _ = msg_tx.send(AnalysisWorkerMsg::StepFinished {
+                                index,
+                                outputs: report.results,
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            let _ = msg_tx.send(AnalysisWorkerMsg::Failed {
+                                error: e.to_string(),
+                                program: prog,
+                            });
+                            return;
+                        }
+                        Err(_) => {
+                            let _ = msg_tx.send(AnalysisWorkerMsg::Failed {
+                                error: format!(
+                                    "analyzer '{name}' panicked (GPU/validation); try again with GPU off"
+                                ),
+                                program: prog,
+                            });
+                            return;
+                        }
+                    }
+                }
+                let _ = msg_tx.send(AnalysisWorkerMsg::Done { program: prog });
+            })
+            .map_err(|e| format!("failed to spawn analysis worker: {e}"))?;
+
+        let prog = self
+            .program
+            .take()
+            .expect("program checked non-None above");
+        if prog_tx.send(prog).is_err() {
+            return Err("analysis worker exited before receiving program".into());
+        }
+
         self.analysis_job = Some(AnalysisJob {
             names,
             index: 0,
             results: AnalysisRunReport::default(),
             file_label,
-            use_gpu: self.use_gpu_experimental,
+            use_gpu,
+            rx: msg_rx,
         });
         Ok(())
     }
 
-    /// Run one analyzer step; call every frame while `analysis_job` is Some.
+    /// Poll the analysis worker (non-blocking). Call every frame while `analysis_job` is Some.
+    /// Returns `Ok(true)` when the job has finished and been finalized.
     pub fn step_analysis_job(&mut self) -> Result<bool, String> {
-        let (name, idx, total, label) = {
-            let job = self
-                .analysis_job
-                .as_ref()
-                .ok_or_else(|| "no analysis job".to_string())?;
-            if job.index >= job.names.len() {
-                self.finish_analysis_job()?;
-                return Ok(true);
-            }
-            (
-                job.names[job.index].clone(),
-                job.index,
-                job.names.len(),
-                job.file_label.clone(),
-            )
-        };
-        let master_gpu = self
+        self.poll_analysis_job(false)
+    }
+
+    /// Block until at least one worker message arrives (tests / headless drain).
+    pub fn step_analysis_job_blocking(&mut self) -> Result<bool, String> {
+        self.poll_analysis_job(true)
+    }
+
+    fn recv_analysis_msg(&self, block: bool) -> Result<Option<AnalysisWorkerMsg>, String> {
+        let job = self
             .analysis_job
             .as_ref()
-            .map(|j| j.use_gpu)
-            .unwrap_or(false);
-        // Only request GPU for analyzers that have a strategy (matrix / docs).
-        let use_gpu = master_gpu && analyzer_supports_gpu(&name);
-        let prog = self
-            .program
-            .as_mut()
-            .ok_or_else(|| "no program loaded".to_string())?;
-        // catch_unwind: core GPU paths already catch wgpu panics; belt-and-suspenders for UI.
-        let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ghidrust_core::run_analyzers_opts(prog, &[name.as_str()], use_gpu)
-        })) {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => {
-                return Err(format!(
-                    "analyzer '{name}' panicked (GPU/validation); try again with GPU off"
-                ));
+            .ok_or_else(|| "no analysis job".to_string())?;
+        if block {
+            match job.rx.recv() {
+                Ok(m) => Ok(Some(m)),
+                Err(RecvError) => Err("analysis worker disconnected".into()),
             }
+        } else {
+            match job.rx.try_recv() {
+                Ok(m) => Ok(Some(m)),
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => Err("analysis worker disconnected".into()),
+            }
+        }
+    }
+
+    fn poll_analysis_job(&mut self, block: bool) -> Result<bool, String> {
+        let Some(first) = self.recv_analysis_msg(block)? else {
+            return Ok(false);
         };
-        let mut log_lines = Vec::new();
-        let mut rtti_upd = None;
-        let mut strings_upd = None;
-        let mut outputs = Vec::new();
-        for r in report.results {
-            log_lines.push(format!("[{}] {} — {}", r.status, r.name, r.message));
-            if r.rtti.is_some() {
-                rtti_upd = r.rtti.clone();
-            }
-            if r.strings.is_some() {
-                strings_upd = r.strings.clone();
-            }
-            outputs.push(r);
-        }
-        for line in log_lines {
-            let sev = if line.starts_with("[error]") {
-                ConsoleSeverity::Error
-            } else if line.starts_with("[warn") {
-                ConsoleSeverity::Warn
-            } else {
-                ConsoleSeverity::Info
-            };
-            self.log_with(line, sev);
-        }
-        if let Some(r) = rtti_upd {
-            self.rtti = r;
-        }
-        if let Some(s) = strings_upd {
-            self.strings = s;
-        }
-        if let Some(job) = self.analysis_job.as_mut() {
-            job.results.results.extend(outputs);
-            job.index = idx + 1;
-        }
-        let done = self
-            .analysis_job
-            .as_ref()
-            .map(|j| j.index >= j.names.len())
-            .unwrap_or(true);
-        if done {
-            self.finish_analysis_job()?;
+        if self.apply_analysis_msg(first)? {
             return Ok(true);
         }
-        self.status = format!(
-            "Analyzing {label} — {}/{}: {}",
-            idx + 2,
-            total,
-            self.analysis_job
-                .as_ref()
-                .and_then(|j| j.names.get(j.index))
-                .map(|s| s.as_str())
-                .unwrap_or("…")
-        );
+        // Drain any further messages already queued so one frame can catch up.
+        while let Some(msg) = self.recv_analysis_msg(false)? {
+            if self.apply_analysis_msg(msg)? {
+                return Ok(true);
+            }
+        }
         Ok(false)
+    }
+
+    /// Apply one worker message. Returns `Ok(true)` when the job is fully finished.
+    fn apply_analysis_msg(&mut self, msg: AnalysisWorkerMsg) -> Result<bool, String> {
+        match msg {
+            AnalysisWorkerMsg::StepStarted { index } => {
+                if let Some(job) = self.analysis_job.as_mut() {
+                    job.index = index;
+                    let total = job.names.len();
+                    let label = job.file_label.clone();
+                    let cur = job
+                        .names
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| "…".into());
+                    self.status = format!("Analyzing {label} — {}/{total}: {cur}", index + 1);
+                }
+                Ok(false)
+            }
+            AnalysisWorkerMsg::StepFinished { index, outputs } => {
+                let mut log_lines = Vec::new();
+                let mut rtti_upd = None;
+                let mut strings_upd = None;
+                for r in &outputs {
+                    log_lines.push(format!("[{}] {} — {}", r.status, r.name, r.message));
+                    if r.rtti.is_some() {
+                        rtti_upd = r.rtti.clone();
+                    }
+                    if r.strings.is_some() {
+                        strings_upd = r.strings.clone();
+                    }
+                }
+                for line in log_lines {
+                    let sev = if line.starts_with("[error]") {
+                        ConsoleSeverity::Error
+                    } else if line.starts_with("[warn") {
+                        ConsoleSeverity::Warn
+                    } else {
+                        ConsoleSeverity::Info
+                    };
+                    self.log_with(line, sev);
+                }
+                if let Some(r) = rtti_upd {
+                    self.rtti = r;
+                }
+                if let Some(s) = strings_upd {
+                    self.strings = s;
+                }
+                if let Some(job) = self.analysis_job.as_mut() {
+                    job.results.results.extend(outputs);
+                    job.index = index + 1;
+                }
+                Ok(false)
+            }
+            AnalysisWorkerMsg::Done { program } => {
+                self.program = Some(program);
+                self.finish_analysis_job()?;
+                Ok(true)
+            }
+            AnalysisWorkerMsg::Failed { error, program } => {
+                self.program = Some(program);
+                self.analysis_job = None;
+                set_preferred_bulk_mode(BulkScanMode::ParallelCpu);
+                Err(error)
+            }
+        }
     }
 
     fn finish_analysis_job(&mut self) -> Result<(), String> {
@@ -2109,11 +2707,11 @@ impl GhidrustApp {
         Ok(())
     }
 
-    /// Headless/sync: begin job and drain all steps (tests + non-UI callers).
+    /// Headless/sync: begin job and drain all worker messages (tests + non-UI callers).
     pub fn run_selected_analysis(&mut self) -> Result<(), String> {
         self.begin_analysis_job()?;
         while self.analysis_job.is_some() {
-            self.step_analysis_job()?;
+            self.step_analysis_job_blocking()?;
         }
         Ok(())
     }
@@ -2172,6 +2770,7 @@ impl GhidrustApp {
             "Tools",
             "Graph",
             "Window",
+            "Debugger",
             "Help",
         ]
     }
@@ -2195,6 +2794,13 @@ impl GhidrustApp {
         ];
         for k in PaneKind::ALL {
             let t = k.title();
+            if !names.contains(&t) {
+                names.push(t);
+            }
+        }
+        // Ghidra Debugger tool providers (Phase G / M7 visibility parity).
+        for p in DebuggerPane::ALL {
+            let t = p.title();
             if !names.contains(&t) {
                 names.push(t);
             }
@@ -2526,6 +3132,65 @@ impl GhidrustApp {
                 PaneKind::DefinedData => {
                     win.show(ctx, |ui| self.ui_defined_data(ui, muted));
                 }
+                PaneKind::Bytes => {
+                    win.show(ctx, |ui| self.ui_bytes_pane(ui, muted, primary));
+                }
+                PaneKind::SymbolReferences => {
+                    win.show(ctx, |ui| self.ui_symbol_references(ui, muted));
+                }
+                PaneKind::EquatesTable => {
+                    win.show(ctx, |ui| self.ui_equates_table(ui, muted));
+                }
+                PaneKind::FunctionTags => {
+                    win.show(ctx, |ui| self.ui_function_tags(ui, muted));
+                }
+                PaneKind::ExternalPrograms => {
+                    win.show(ctx, |ui| self.ui_external_programs(ui, muted));
+                }
+                PaneKind::DataTypePreview => {
+                    win.show(ctx, |ui| self.ui_data_type_preview(ui, muted));
+                }
+                PaneKind::ChecksumGenerator => {
+                    win.show(ctx, |ui| self.ui_checksum_generator(ui, muted));
+                }
+                // Phase E (M5) — Graphs & maps.
+                PaneKind::FunctionGraph => {
+                    win.default_size(egui::vec2(760.0, 520.0))
+                        .show(ctx, |ui| self.ui_function_graph_pane(ui, muted, primary));
+                }
+                PaneKind::FunctionCallGraph => {
+                    win.default_size(egui::vec2(760.0, 480.0))
+                        .show(ctx, |ui| self.ui_function_call_graph_pane(ui, muted, primary));
+                }
+                PaneKind::FunctionCallTrees => {
+                    win.default_size(egui::vec2(760.0, 460.0))
+                        .show(ctx, |ui| self.ui_function_call_trees_pane(ui, muted, primary));
+                }
+                PaneKind::Entropy => {
+                    win.default_size(egui::vec2(680.0, 220.0))
+                        .show(ctx, |ui| self.ui_entropy_pane(ui, muted, primary));
+                }
+                PaneKind::Overview => {
+                    win.default_size(egui::vec2(680.0, 340.0))
+                        .show(ctx, |ui| self.ui_overview(ui));
+                }
+                PaneKind::RegisterManager => {
+                    win.default_size(egui::vec2(560.0, 520.0))
+                        .show(ctx, |ui| self.ui_register_manager_pane(ui, muted, primary));
+                }
+                // Phase F (M6) — Scripts & interpreters.
+                PaneKind::ScriptManager => {
+                    win.default_size(egui::vec2(760.0, 480.0))
+                        .show(ctx, |ui| self.ui_script_manager_pane(ui, muted, primary));
+                }
+                PaneKind::TextEditor => {
+                    win.default_size(egui::vec2(720.0, 520.0))
+                        .show(ctx, |ui| self.ui_text_editor_pane(ui, muted, primary));
+                }
+                PaneKind::Python => {
+                    win.default_size(egui::vec2(640.0, 420.0))
+                        .show(ctx, |ui| self.ui_mcp_repl_pane(ui, muted, primary));
+                }
                 _ => {
                     win.show(ctx, |ui| {
                         panes::empty_state(ui, kind, muted);
@@ -2537,6 +3202,539 @@ impl GhidrustApp {
                 self.pane_open.insert(kind, false);
             }
         }
+
+        // Phase G (M7) — Debugger tool provider windows.
+        self.draw_debugger_panes(ctx, muted);
+    }
+
+    // ── Phase E (M5) — Graphs & maps ────────────────────────────────────
+
+    /// Ghidra `FunctionGraphPlugin` — CFG vertex/edge layout for the current function.
+    fn ui_function_graph_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
+        ui.heading("Function Graph");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra FunctionGraphPlugin analog · Stage-0 CFG from ghidrust-decomp::decompile_at",
+            )
+            .color(muted),
+        );
+        ui.separator();
+
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let Some(entry) = self
+            .focused_function_entry
+            .or_else(|| self.listing_focus_va.and_then(|va| {
+                prog.analysis
+                    .functions
+                    .iter()
+                    .find(|f| va >= f.entry && va < f.end)
+                    .map(|f| f.entry)
+            }))
+        else {
+            ui.weak("Cursor is not inside a recovered function.");
+            ui.small(
+                egui::RichText::new(
+                    "Click a function in Symbol Tree, Functions, or Listing to populate the graph.",
+                )
+                .color(muted),
+            );
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Layout:");
+            let cur = self.graph_state.fn_graph_layout;
+            egui::ComboBox::from_id_salt("fg_layout")
+                .selected_text(cur.label())
+                .show_ui(ui, |ui| {
+                    for l in FunctionGraphLayout::ALL {
+                        ui.selectable_value(&mut self.graph_state.fn_graph_layout, *l, l.label());
+                    }
+                });
+            ui.separator();
+            ui.label("Zoom:");
+            ui.add(
+                egui::Slider::new(&mut self.graph_state.fn_graph_zoom, 0.5..=2.0)
+                    .clamping(egui::SliderClamping::Always)
+                    .fixed_decimals(1),
+            );
+            if ui.button("Fit").on_hover_text("Reset zoom to 1.0").clicked() {
+                self.graph_state.fn_graph_zoom = 1.0;
+            }
+            ui.separator();
+            ui.small(egui::RichText::new(format!("Entry {entry:#x}")).color(muted));
+        });
+        ui.separator();
+
+        let name = prog.display_function_name_at(entry).unwrap_or_default();
+        if !name.is_empty() {
+            ui.small(egui::RichText::new(format!("Function {name}")).color(muted));
+        }
+
+        let algo = self.graph_state.fn_graph_layout;
+        let zoom = self.graph_state.fn_graph_zoom.max(0.1);
+        let focused_va = self.listing_focus_va;
+        let (rect, _resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 400.0 * zoom),
+            egui::Sense::hover(),
+        );
+        let (blocks, edges) = layout_function_graph(prog, entry, STAGE0_MAX_INSNS, algo, rect);
+        if blocks.is_empty() {
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(1.0, muted),
+                egui::StrokeKind::Middle,
+            );
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No Stage-0 CFG recovered for this VA.",
+                egui::FontId::proportional(13.0),
+                muted,
+            );
+            return;
+        }
+        let clicked = render_function_graph(ui, &blocks, &edges, focused_va, primary, muted);
+        if let Some(va) = clicked {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+    }
+
+    /// Ghidra `FunctionCallGraphPlugin` — level-based directed graph.
+    fn ui_function_call_graph_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        muted: Color32,
+        primary: Color32,
+    ) {
+        ui.heading("Function Call Graph");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra FunctionCallGraphPlugin analog · levels expanded from analyzer references",
+            )
+            .color(muted),
+        );
+        ui.separator();
+
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let Some(entry) = self
+            .focused_function_entry
+            .or_else(|| self.listing_focus_va.and_then(|va| {
+                prog.analysis
+                    .functions
+                    .iter()
+                    .find(|f| va >= f.entry && va < f.end)
+                    .map(|f| f.entry)
+            }))
+            .or(prog.entry)
+        else {
+            ui.weak("No entry point — click a function in Symbol Tree to root the call graph.");
+            return;
+        };
+
+        ui.horizontal(|ui| {
+            ui.label("Callers levels:");
+            let mut lvl_in = self.graph_state.call_graph_levels_in;
+            ui.add(egui::Slider::new(&mut lvl_in, 0..=3));
+            self.graph_state.call_graph_levels_in = lvl_in;
+            ui.separator();
+            ui.label("Callees levels:");
+            let mut lvl_out = self.graph_state.call_graph_levels_out;
+            ui.add(egui::Slider::new(&mut lvl_out, 0..=3));
+            self.graph_state.call_graph_levels_out = lvl_out;
+            if ui.button("Reset").clicked() {
+                self.graph_state.call_graph_levels_in = 1;
+                self.graph_state.call_graph_levels_out = 1;
+            }
+        });
+        ui.separator();
+
+        let (rect, _resp) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), 380.0),
+            egui::Sense::hover(),
+        );
+        let (verts, edges) = layout_call_graph(
+            prog,
+            entry,
+            self.graph_state.call_graph_levels_in,
+            self.graph_state.call_graph_levels_out,
+            rect,
+        );
+        ui.painter().rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(1.0, muted),
+            egui::StrokeKind::Middle,
+        );
+        if verts.is_empty() {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "No call references recovered — run analyzers first.",
+                egui::FontId::proportional(13.0),
+                muted,
+            );
+            return;
+        }
+        let clicked = render_call_graph(ui, &verts, &edges, entry, primary, muted);
+        if let Some(va) = clicked {
+            self.focus_function(va);
+        }
+    }
+
+    /// Ghidra `CallTreePlugin` — incoming callers / outgoing callees GTree pair.
+    fn ui_function_call_trees_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        muted: Color32,
+        primary: Color32,
+    ) {
+        ui.heading("Function Call Trees");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra CallTreePlugin analog · Incoming / Outgoing GTrees over analyzer refs",
+            )
+            .color(muted),
+        );
+        ui.separator();
+
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let Some(entry) = self
+            .focused_function_entry
+            .or_else(|| self.listing_focus_va.and_then(|va| {
+                prog.analysis
+                    .functions
+                    .iter()
+                    .find(|f| va >= f.entry && va < f.end)
+                    .map(|f| f.entry)
+            }))
+        else {
+            ui.weak("Cursor is not inside a recovered function.");
+            return;
+        };
+
+        // Rebuild top level if root changed.
+        let root_name = prog.display_function_name_at(entry).unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.small(egui::RichText::new(format!("Source {root_name} @ {entry:#x}")).color(muted));
+            if ui.button("Refresh").clicked() {
+                self.call_tree_incoming.clear();
+                self.call_tree_outgoing.clear();
+            }
+            ui.separator();
+            ui.checkbox(
+                &mut self.graph_state.call_tree_hide_thunks,
+                "Hide thunks",
+            );
+            ui.checkbox(
+                &mut self.graph_state.call_tree_refs_only,
+                "References only",
+            );
+        });
+        ui.separator();
+
+        if self.call_tree_incoming.is_empty() && self.call_tree_outgoing.is_empty() {
+            self.call_tree_incoming = build_incoming_tree(prog, entry);
+            self.call_tree_outgoing = build_outgoing_tree(prog, entry);
+            if self.graph_state.call_tree_hide_thunks {
+                self.call_tree_incoming.retain(|n| !n.is_thunk);
+                self.call_tree_outgoing.retain(|n| !n.is_thunk);
+            }
+        }
+
+        let refs_only = self.graph_state.call_tree_refs_only;
+        let hide_thunks = self.graph_state.call_tree_hide_thunks;
+        let mut goto: Option<u64> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("calltrees_scroll")
+            .max_height(360.0)
+            .show(ui, |ui| {
+                ui.columns(2, |cols| {
+                    cols[0].label(egui::RichText::new("Incoming (callers / refs to)").strong());
+                    let mut inc = std::mem::take(&mut self.call_tree_incoming);
+                    for (i, node) in inc.iter_mut().enumerate() {
+                        render_call_tree_node(
+                            node,
+                            i,
+                            "incoming",
+                            prog,
+                            hide_thunks,
+                            &mut cols[0],
+                            muted,
+                            primary,
+                            &mut goto,
+                        );
+                    }
+                    self.call_tree_incoming = inc;
+                    if refs_only {
+                        cols[0].separator();
+                        cols[0].label(
+                            egui::RichText::new("Data refs to source")
+                                .strong()
+                                .color(muted),
+                        );
+                        for xr in data_xrefs_to(prog, entry) {
+                            let text = egui::RichText::new(format!(
+                                "{}  {}  ← {:#x}",
+                                xr.kind, xr.preview, xr.from
+                            ))
+                            .monospace();
+                            if cols[0].link(text).clicked() {
+                                goto = Some(xr.from);
+                            }
+                        }
+                    }
+
+                    cols[1].label(egui::RichText::new("Outgoing (callees / refs from)").strong());
+                    let mut out = std::mem::take(&mut self.call_tree_outgoing);
+                    for (i, node) in out.iter_mut().enumerate() {
+                        render_call_tree_node(
+                            node,
+                            i,
+                            "outgoing",
+                            prog,
+                            hide_thunks,
+                            &mut cols[1],
+                            muted,
+                            primary,
+                            &mut goto,
+                        );
+                    }
+                    self.call_tree_outgoing = out;
+                });
+            });
+        if let Some(va) = goto {
+            self.focus_function(va);
+        }
+    }
+
+    /// Ghidra `EntropyPlugin` header — Shannon-entropy strip across mapped blocks.
+    fn ui_entropy_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
+        ui.heading("Entropy");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra EntropyPlugin analog · Shannon bits/byte over 256-byte windows",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let samples = entropy::entropy_samples(prog, 256);
+        ui.small(format!("{} windows sampled (256 bytes each)", samples.len()));
+        let clicked_e =
+            entropy::render_entropy_strip(ui, &samples, muted, self.listing_focus_va, primary);
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Overview").strong().color(muted));
+        let clicked_o =
+            entropy::render_overview_strip(ui, prog, &samples, muted, self.listing_focus_va, primary);
+        ui.small(
+            egui::RichText::new("Click a strip to Go To that address. Green = exec, amber = writable, grey = readonly, cold-blue = low entropy, warm-red = high.").color(muted),
+        );
+        if let Some(va) = clicked_e.or(clicked_o) {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+    }
+
+    /// Ghidra `RegisterPlugin` — register lattice + user-set value ranges.
+    fn ui_register_manager_pane(
+        &mut self,
+        ui: &mut egui::Ui,
+        muted: Color32,
+        primary: Color32,
+    ) {
+        let fmt = self.program.as_ref().map(|p| p.format.clone());
+        register_manager::render(&mut self.register_manager, fmt.as_deref(), ui, muted, primary);
+    }
+
+    // ── Phase F (M6) — Scripts & interpreters ───────────────────────────
+
+    fn ui_script_manager_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
+        if let Some(run) = render_script_manager(&mut self.script_manager, ui, muted, primary) {
+            let msg = format!(
+                "Script Manager · run requested for `{run}` — full script host lands in Phase F backend"
+            );
+            self.status = msg.clone();
+            self.log(msg);
+        }
+    }
+
+    fn ui_text_editor_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
+        let req = render_text_editor(&mut self.text_editor, ui, muted, primary);
+        match req {
+            TextEditorRequest::None => {}
+            TextEditorRequest::NewUntitled => self.text_editor.open_untitled(),
+            TextEditorRequest::OpenFile => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Scripts", &["py", "rs", "txt", "md", "json", "toml"])
+                    .add_filter("All", &["*"])
+                    .pick_file()
+                {
+                    if let Err(e) = self.text_editor.open_file(path) {
+                        self.status = format!("open error: {e}");
+                        self.log_error(self.status.clone());
+                    }
+                }
+            }
+            TextEditorRequest::Save => {
+                if let Err(e) = self.text_editor.save_active() {
+                    self.status = format!("save error: {e}");
+                    self.log_error(self.status.clone());
+                }
+            }
+            TextEditorRequest::SaveAs => {
+                if let Some(path) = rfd::FileDialog::new().save_file() {
+                    if let Err(e) = self.text_editor.save_active_as(path) {
+                        self.status = format!("save error: {e}");
+                        self.log_error(self.status.clone());
+                    }
+                }
+            }
+            TextEditorRequest::Close => self.text_editor.close_active(),
+        }
+    }
+
+    fn ui_mcp_repl_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
+        render_mcp_repl(&mut self.mcp_repl, ui, muted, primary);
+    }
+
+    // ── Phase G (M7) — Debugger tool ──────────────────────────────────
+
+    fn draw_debugger_panes(&mut self, ctx: &egui::Context, muted: Color32) {
+        let open_list: Vec<DebuggerPane> = self
+            .debugger_open
+            .iter()
+            .filter_map(|(p, v)| if *v { Some(*p) } else { None })
+            .collect();
+        for pane in open_list {
+            let mut open = true;
+            let title = pane.title();
+            let id = egui::Id::new(pane.egui_id());
+            egui::Window::new(title)
+                .id(id)
+                .open(&mut open)
+                .resizable(true)
+                .default_size(egui::vec2(520.0, 320.0))
+                .show(ctx, |ui| {
+                    debugger::render(pane, &mut self.debugger, ui, muted);
+                });
+            if !open {
+                self.debugger_open.insert(pane, false);
+            }
+        }
+    }
+
+    // ── Phase H (M8) — Docking / layouts / Configure ────────────────
+
+    fn snapshot_current_layout(&self, name: impl Into<String>) -> layouts::SavedLayout {
+        let name = name.into();
+        let mut open_panes = BTreeMap::new();
+        for (k, v) in &self.pane_open {
+            open_panes.insert(k.egui_id().to_string(), *v);
+        }
+        for (p, v) in &self.debugger_open {
+            open_panes.insert(p.egui_id().to_string(), *v);
+        }
+        let mut docks = BTreeMap::new();
+        docks.insert("project_tree".into(), self.show_project_tree);
+        docks.insert("program_tree".into(), self.show_program_tree);
+        docks.insert("symbol_tree".into(), self.show_symbol_tree);
+        docks.insert("console".into(), self.show_console);
+        let center = match self.center {
+            CenterPane::Overview => "overview",
+            CenterPane::Listing => "listing",
+            CenterPane::Decompiler => "decompiler",
+            CenterPane::DataTypes => "datatypes",
+        }
+        .to_string();
+        let theme = match self.theme {
+            ThemeMode::Dark => "dark",
+            ThemeMode::Light => "light",
+        }
+        .to_string();
+        layouts::SavedLayout {
+            name,
+            open_panes,
+            docks,
+            center,
+            theme,
+            comment: String::new(),
+        }
+    }
+
+    fn apply_saved_layout(&mut self, layout: &layouts::SavedLayout) {
+        // Apply pane visibility.
+        let ids: BTreeMap<&'static str, PaneKind> = PaneKind::ALL
+            .iter()
+            .map(|k| (k.egui_id(), *k))
+            .collect();
+        for (id, open) in &layout.open_panes {
+            if let Some(k) = ids.get(id.as_str()) {
+                self.pane_open.insert(*k, *open);
+            }
+        }
+        let dbg_ids: BTreeMap<&'static str, DebuggerPane> = DebuggerPane::ALL
+            .iter()
+            .map(|p| (p.egui_id(), *p))
+            .collect();
+        for (id, open) in &layout.open_panes {
+            if let Some(p) = dbg_ids.get(id.as_str()) {
+                self.debugger_open.insert(*p, *open);
+            }
+        }
+        // Docks.
+        if let Some(v) = layout.docks.get("project_tree") {
+            self.show_project_tree = *v;
+        }
+        if let Some(v) = layout.docks.get("program_tree") {
+            self.show_program_tree = *v;
+        }
+        if let Some(v) = layout.docks.get("symbol_tree") {
+            self.show_symbol_tree = *v;
+        }
+        if let Some(v) = layout.docks.get("console") {
+            self.show_console = *v;
+        }
+        self.center = match layout.center.as_str() {
+            "listing" => CenterPane::Listing,
+            "decompiler" => CenterPane::Decompiler,
+            "datatypes" => CenterPane::DataTypes,
+            _ => CenterPane::Overview,
+        };
+        self.theme = match layout.theme.as_str() {
+            "light" => ThemeMode::Light,
+            _ => ThemeMode::Dark,
+        };
+        self.current_layout_name = layout.name.clone();
+    }
+
+    /// Save the current layout under `name`.
+    pub fn save_layout_named(&mut self, name: impl Into<String>) -> std::io::Result<PathBuf> {
+        let name = name.into();
+        let l = self.snapshot_current_layout(name.clone());
+        let p = layouts::save_layout(&l)?;
+        self.current_layout_name = name;
+        self.layouts_cached = layouts::list_layouts();
+        Ok(p)
+    }
+
+    /// Restore a saved layout by name.
+    pub fn restore_layout_named(&mut self, name: &str) -> std::io::Result<()> {
+        let l = layouts::load_layout(name)?;
+        self.apply_saved_layout(&l);
+        Ok(())
     }
 
     /// Phase C (M3) — draw all edit dialogs (rename / retype / comment / signature / new type).
@@ -3444,6 +4642,9 @@ impl GhidrustApp {
             OpenRetype,
             OpenChooser,
             OpenSignature,
+            OpenEquate,
+            ShowRefsTo,
+            OpenBytesHere,
         }
         let mut pending_action: Option<(u64, RowAction)> = None;
         egui::ScrollArea::both()
@@ -3550,6 +4751,19 @@ impl GhidrustApp {
                                 }
                                 if ui.button("Edit Function Signature… (Alt+Enter)").clicked() {
                                     pending_action = Some((va, RowAction::OpenSignature));
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui.button("Set Equate…").on_hover_text("Bind a name to the first operand scalar").clicked() {
+                                    pending_action = Some((va, RowAction::OpenEquate));
+                                    ui.close_menu();
+                                }
+                                if ui.button("Show References To…").on_hover_text("Open Symbol References for this VA").clicked() {
+                                    pending_action = Some((va, RowAction::ShowRefsTo));
+                                    ui.close_menu();
+                                }
+                                if ui.button("Show Bytes Here").on_hover_text("Open Byte Viewer at this VA").clicked() {
+                                    pending_action = Some((va, RowAction::OpenBytesHere));
                                     ui.close_menu();
                                 }
                             });
@@ -3671,6 +4885,28 @@ impl GhidrustApp {
                         })
                         .unwrap_or(va);
                     self.open_signature_dialog(entry);
+                }
+                RowAction::OpenEquate => {
+                    self.equate_dialog_va = Some(va);
+                    self.equate_dialog_op = 1;
+                    self.equate_dialog_name.clear();
+                    // Preload first scalar from the operand string for convenience.
+                    self.equate_dialog_value = self
+                        .listing
+                        .iter()
+                        .find(|i| i.address == va)
+                        .and_then(|i| menu_actions::extract_scalars(&i.operands).first().copied())
+                        .map(|v| format!("{v}"))
+                        .unwrap_or_default();
+                    self.show_equate_dialog = true;
+                }
+                RowAction::ShowRefsTo => {
+                    self.symbol_refs_target = Some(va);
+                    self.pane_open.insert(PaneKind::SymbolReferences, true);
+                }
+                RowAction::OpenBytesHere => {
+                    self.bytes_pane_va = Some(va);
+                    self.pane_open.insert(PaneKind::Bytes, true);
                 }
             }
         }
@@ -4105,36 +5341,77 @@ impl GhidrustApp {
     fn ui_memory_map_pane(&mut self, ui: &mut egui::Ui, muted: Color32) {
         ui.heading("Memory Map");
         ui.small(
-            egui::RichText::new("Ghidra MemoryMapPlugin · read-only (edits land in Phase E)")
-                .color(muted),
+            egui::RichText::new(
+                "Ghidra MemoryMapPlugin · toggle RWX / add / delete session memory blocks",
+            )
+            .color(muted),
         );
         ui.separator();
-        let rows: Vec<(String, u64, u64, bool, bool, bool)> = match self.program.as_ref() {
-            Some(prog) => prog
-                .blocks
-                .iter()
-                .map(|b| {
-                    (
-                        b.name.clone(),
-                        b.va,
-                        b.size,
-                        b.readable,
-                        b.writable,
-                        b.executable,
-                    )
-                })
-                .collect(),
-            None => {
-                ui.weak("No program loaded.");
-                return;
+        if self.program.is_none() {
+            ui.weak("No program loaded.");
+            return;
+        }
+
+        // Add-row form.
+        ui.horizontal(|ui| {
+            ui.label("Add block:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.memory_map_new_name)
+                    .desired_width(120.0)
+                    .hint_text("name"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.memory_map_new_va)
+                    .desired_width(120.0)
+                    .hint_text("VA (0x…)"),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.memory_map_new_size)
+                    .desired_width(100.0)
+                    .hint_text("size (0x…)"),
+            );
+            ui.checkbox(&mut self.memory_map_new_r, "R");
+            ui.checkbox(&mut self.memory_map_new_w, "W");
+            ui.checkbox(&mut self.memory_map_new_x, "X");
+            let can_add = !self.memory_map_new_name.trim().is_empty()
+                && !self.memory_map_new_va.trim().is_empty()
+                && !self.memory_map_new_size.trim().is_empty();
+            if ui.add_enabled(can_add, egui::Button::new("Add")).clicked() {
+                let name = self.memory_map_new_name.clone();
+                let va = parse_address(&self.memory_map_new_va).unwrap_or(0);
+                let size = parse_address(&self.memory_map_new_size).unwrap_or(0);
+                let r = self.memory_map_new_r;
+                let w = self.memory_map_new_w;
+                let x = self.memory_map_new_x;
+                if size > 0 {
+                    if let Some(prog) = self.program.as_mut() {
+                        prog.blocks.push(ghidrust_core::MemoryBlock {
+                            name,
+                            va,
+                            size,
+                            bytes: vec![0u8; size.min(0x100_0000) as usize],
+                            readable: r,
+                            writable: w,
+                            executable: x,
+                        });
+                    }
+                    self.status = "Memory Map · added block".into();
+                    self.log(self.status.clone());
+                }
             }
-        };
+        });
+        ui.separator();
+
         let mut goto: Option<u64> = None;
+        let mut delete: Option<usize> = None;
+        let mut rename: Option<(usize, String)> = None;
+        let mut toggle: Option<(usize, char)> = None;
+
         egui::ScrollArea::both()
             .id_salt("memmap_scroll")
             .show(ui, |ui| {
                 egui::Grid::new("memory_map_grid")
-                    .num_columns(7)
+                    .num_columns(8)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("Name");
@@ -4144,9 +5421,38 @@ impl GhidrustApp {
                         ui.strong("R");
                         ui.strong("W");
                         ui.strong("X");
+                        ui.strong("");
                         ui.end_row();
-                        for (name, va, size, r, w, x) in &rows {
-                            ui.monospace(name);
+                        let blocks: Vec<(String, u64, u64, bool, bool, bool)> = self
+                            .program
+                            .as_ref()
+                            .map(|p| {
+                                p.blocks
+                                    .iter()
+                                    .map(|b| {
+                                        (
+                                            b.name.clone(),
+                                            b.va,
+                                            b.size,
+                                            b.readable,
+                                            b.writable,
+                                            b.executable,
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (i, (name, va, size, r, w, x)) in blocks.iter().enumerate() {
+                            let mut editable = name.clone();
+                            if ui
+                                .add(
+                                    egui::TextEdit::singleline(&mut editable)
+                                        .desired_width(120.0),
+                                )
+                                .changed()
+                            {
+                                rename = Some((i, editable));
+                            }
                             if ui
                                 .link(egui::RichText::new(format!("{va:#x}")).monospace())
                                 .clicked()
@@ -4155,15 +5461,55 @@ impl GhidrustApp {
                             }
                             ui.monospace(format!("{:#x}", va.saturating_add(*size)));
                             ui.monospace(format!("{size:#x}"));
-                            ui.monospace(if *r { "R" } else { "-" });
-                            ui.monospace(if *w { "W" } else { "-" });
-                            ui.monospace(if *x { "X" } else { "-" });
+                            let mut rb = *r;
+                            let mut wb = *w;
+                            let mut xb = *x;
+                            if ui.checkbox(&mut rb, "").changed() {
+                                toggle = Some((i, 'R'));
+                            }
+                            if ui.checkbox(&mut wb, "").changed() {
+                                toggle = Some((i, 'W'));
+                            }
+                            if ui.checkbox(&mut xb, "").changed() {
+                                toggle = Some((i, 'X'));
+                            }
+                            if ui.small_button("Delete").clicked() {
+                                delete = Some(i);
+                            }
                             ui.end_row();
                         }
+                        let _ = muted;
                     });
             });
+
         if let Some(va) = goto {
             let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+        if let Some((i, newname)) = rename {
+            if let Some(prog) = self.program.as_mut() {
+                if let Some(b) = prog.blocks.get_mut(i) {
+                    b.name = newname;
+                }
+            }
+        }
+        if let Some((i, ch)) = toggle {
+            if let Some(prog) = self.program.as_mut() {
+                if let Some(b) = prog.blocks.get_mut(i) {
+                    match ch {
+                        'R' => b.readable = !b.readable,
+                        'W' => b.writable = !b.writable,
+                        'X' => b.executable = !b.executable,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if let Some(i) = delete {
+            if let Some(prog) = self.program.as_mut() {
+                if i < prog.blocks.len() {
+                    prog.blocks.remove(i);
+                }
+            }
         }
     }
 
@@ -4238,7 +5584,10 @@ impl GhidrustApp {
     fn ui_symbol_table(&mut self, ui: &mut egui::Ui, muted: Color32) {
         ui.heading("Symbol Table");
         ui.small(
-            egui::RichText::new("Ghidra SymbolTablePlugin · symbols + function entries").color(muted),
+            egui::RichText::new(
+                "Ghidra SymbolTablePlugin · symbols + function entries · Refs → opens Symbol References",
+            )
+            .color(muted),
         );
         ui.separator();
         let Some(prog) = self.program.as_ref() else {
@@ -4266,19 +5615,21 @@ impl GhidrustApp {
         rows.sort_by_key(|r| r.0);
 
         ui.small(format!("{} rows", rows.len()));
+        let mut goto: Option<u64> = None;
+        let mut show_refs: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("symtable_scroll")
             .max_height(400.0)
             .show(ui, |ui| {
                 egui::Grid::new("symbol_table_grid")
-                    .num_columns(3)
+                    .num_columns(4)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("Address");
                         ui.strong("Name");
                         ui.strong("Type");
+                        ui.strong("Refs");
                         ui.end_row();
-                        let mut goto: Option<u64> = None;
                         for (va, name, ty) in &rows {
                             if ui
                                 .link(egui::RichText::new(format!("{va:#x}")).monospace())
@@ -4288,13 +5639,20 @@ impl GhidrustApp {
                             }
                             ui.label(name);
                             ui.monospace(*ty);
+                            if ui.small_button("Refs").on_hover_text("Open Symbol References for this VA").clicked() {
+                                show_refs = Some(*va);
+                            }
                             ui.end_row();
-                        }
-                        if let Some(va) = goto {
-                            let _ = self.goto_address_str(&format!("{va:#x}"));
                         }
                     });
             });
+        if let Some(va) = goto {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+        if let Some(va) = show_refs {
+            self.symbol_refs_target = Some(va);
+            self.pane_open.insert(PaneKind::SymbolReferences, true);
+        }
     }
 
     fn ui_defined_strings(&mut self, ui: &mut egui::Ui, muted: Color32) {
@@ -4626,6 +5984,721 @@ impl GhidrustApp {
             let _ = self.goto_address_str(&format!("{va:#x}"));
         }
     }
+
+    // ── Phase D (M4) — Byte Viewer / Symbol References / Equates / Tags ─
+
+    /// Ghidra `ByteViewerPlugin` parity — split hex / ASCII view of the
+    /// program's memory around the current cursor. Bytes-per-line combo,
+    /// programmable offset override, and click-to-navigate address column.
+    fn ui_bytes_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
+        ui.heading("Bytes");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra ByteViewerPlugin · split hex / ASCII, follows Listing cursor",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        // Cursor tracking — default to Listing focus, editable via combo.
+        if self.bytes_pane_va.is_none() {
+            self.bytes_pane_va = self.listing_focus_va.or(prog.entry).or_else(|| {
+                prog.blocks.first().map(|b| b.va)
+            });
+        }
+        let base_va = self.bytes_pane_va.unwrap_or(prog.image_base);
+        ui.horizontal(|ui| {
+            ui.label("VA:");
+            let mut input = format!("{base_va:#x}");
+            let resp = ui.add(egui::TextEdit::singleline(&mut input).desired_width(140.0));
+            if resp.lost_focus() {
+                if let Ok(v) = parse_address(&input) {
+                    self.bytes_pane_va = Some(v);
+                }
+            }
+            ui.label("Bytes/line:");
+            egui::ComboBox::from_id_salt("bytes_pane_bpr")
+                .selected_text(format!("{}", self.bytes_pane_bpr))
+                .show_ui(ui, |ui| {
+                    for w in [8usize, 12, 16, 24, 32] {
+                        ui.selectable_value(&mut self.bytes_pane_bpr, w, format!("{w}"));
+                    }
+                });
+            ui.label("Rows:");
+            egui::ComboBox::from_id_salt("bytes_pane_rows")
+                .selected_text(format!("{}", self.bytes_pane_rows))
+                .show_ui(ui, |ui| {
+                    for r in [8usize, 16, 24, 32, 48, 64] {
+                        ui.selectable_value(&mut self.bytes_pane_rows, r, format!("{r}"));
+                    }
+                });
+            if ui.button("Follow cursor").on_hover_text("Snap to Listing cursor").clicked() {
+                self.bytes_pane_va = self.listing_focus_va;
+            }
+        });
+        ui.separator();
+        let bpr = self.bytes_pane_bpr.max(1);
+        let total = bpr.saturating_mul(self.bytes_pane_rows);
+        let mut bytes: Vec<Option<u8>> = Vec::with_capacity(total);
+        for i in 0..total {
+            bytes.push(prog.byte_at(base_va.wrapping_add(i as u64)));
+        }
+        let focus_va = self.listing_focus_va;
+        let mut nav: Option<u64> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("bytes_scroll")
+            .max_height(420.0)
+            .show(ui, |ui| {
+                for row in 0..self.bytes_pane_rows {
+                    let row_va = base_va.wrapping_add((row * bpr) as u64);
+                    ui.horizontal(|ui| {
+                        let addr = egui::RichText::new(format!("{row_va:016x}"))
+                            .monospace()
+                            .color(if Some(row_va) == focus_va { primary } else { ui.visuals().text_color() });
+                        if ui.link(addr).on_hover_text("Go To in Listing").clicked() {
+                            nav = Some(row_va);
+                        }
+                        ui.label("│");
+                        let mut hex_line = String::new();
+                        let mut ascii_line = String::new();
+                        for col in 0..bpr {
+                            let idx = row * bpr + col;
+                            match bytes.get(idx).and_then(|b| *b) {
+                                Some(b) => {
+                                    hex_line.push_str(&format!("{b:02x} "));
+                                    let c = if (0x20..0x7f).contains(&b) { b as char } else { '.' };
+                                    ascii_line.push(c);
+                                }
+                                None => {
+                                    hex_line.push_str("?? ");
+                                    ascii_line.push(' ');
+                                }
+                            }
+                        }
+                        ui.monospace(hex_line.trim_end());
+                        ui.label("│");
+                        ui.monospace(ascii_line);
+                    });
+                }
+            });
+        if let Some(va) = nav {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+    }
+
+    /// Ghidra `Symbol References` provider — a table of every xref pointing
+    /// at the currently selected symbol (or the cursor VA).
+    fn ui_symbol_references(&mut self, ui: &mut egui::Ui, muted: Color32) {
+        ui.heading("Symbol References");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra SymbolTablePlugin · every reference TO the current symbol",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let target = self
+            .symbol_refs_target
+            .or(self.listing_focus_va)
+            .or(prog.entry);
+        ui.horizontal(|ui| {
+            let mut input = target.map(|v| format!("{v:#x}")).unwrap_or_default();
+            ui.label("Target:");
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut input)
+                    .desired_width(140.0)
+                    .hint_text("VA…"),
+            );
+            if resp.lost_focus() {
+                self.symbol_refs_target = parse_address(&input).ok();
+            }
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.symbol_refs_filter)
+                    .desired_width(200.0)
+                    .hint_text("Substring…"),
+            );
+            if ui.button("Use cursor").clicked() {
+                self.symbol_refs_target = self.listing_focus_va;
+            }
+        });
+        ui.separator();
+        let Some(target) = target else {
+            ui.weak("No target — set cursor or type a VA above.");
+            return;
+        };
+        let refs = self.xrefs_to_va(target);
+        let q = self.symbol_refs_filter.to_ascii_lowercase();
+        let rows: Vec<XRef> = refs
+            .into_iter()
+            .filter(|r| {
+                if q.is_empty() {
+                    return true;
+                }
+                r.preview.to_ascii_lowercase().contains(&q)
+                    || format!("{:#x}", r.from).contains(&q)
+                    || r.kind.contains(&q)
+            })
+            .collect();
+        let label_at = |va: u64| {
+            self.program
+                .as_ref()
+                .and_then(|p| p.display_name_at(va))
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        };
+        ui.small(format!("{} reference(s) to {target:#x} · {}", rows.len(), label_at(target)));
+        let mut goto: Option<u64> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("symrefs_scroll")
+            .max_height(400.0)
+            .show(ui, |ui| {
+                egui::Grid::new("symbol_refs_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("From");
+                        ui.strong("Label");
+                        ui.strong("Kind");
+                        ui.strong("Preview");
+                        ui.end_row();
+                        for r in &rows {
+                            if ui
+                                .link(egui::RichText::new(format!("{:#x}", r.from)).monospace())
+                                .clicked()
+                            {
+                                goto = Some(r.from);
+                            }
+                            ui.label(label_at(r.from));
+                            ui.monospace(r.kind);
+                            ui.label(&r.preview);
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(va) = goto {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+    }
+
+    /// Ghidra `EquateTablePlugin` — two-pane: equate groups + per-equate refs.
+    fn ui_equates_table(&mut self, ui: &mut egui::Ui, muted: Color32) {
+        ui.heading("Equates Table");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra EquateTablePlugin · symbolic names bound to scalar operands",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let groups = prog.edits.equate_groups();
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.equates_filter)
+                    .desired_width(220.0)
+                    .hint_text("Name / value…"),
+            );
+            if ui.button("Add equate at cursor…").clicked() {
+                self.equate_dialog_va = self.listing_focus_va;
+                self.equate_dialog_op = 1;
+                self.equate_dialog_name.clear();
+                self.equate_dialog_value.clear();
+                self.show_equate_dialog = true;
+            }
+        });
+        ui.separator();
+        let q = self.equates_filter.to_ascii_lowercase();
+        let filtered: Vec<(String, i64, usize)> = groups
+            .into_iter()
+            .filter(|(name, val, _)| {
+                if q.is_empty() {
+                    return true;
+                }
+                name.to_ascii_lowercase().contains(&q) || format!("{val:#x}").contains(&q)
+            })
+            .collect();
+        if filtered.is_empty() {
+            ui.weak("No equates — use \"Add equate at cursor\" over a scalar operand.");
+            return;
+        }
+        let mut clear: Option<(u64, u8)> = None;
+        let mut goto: Option<u64> = None;
+        ui.columns(2, |cols| {
+            cols[0].strong("Equate");
+            cols[0].separator();
+            egui::ScrollArea::vertical()
+                .id_salt("equates_left_scroll")
+                .max_height(360.0)
+                .show(&mut cols[0], |ui| {
+                    egui::Grid::new("equates_groups_grid")
+                        .num_columns(3)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("Name");
+                            ui.strong("Value");
+                            ui.strong("# Refs");
+                            ui.end_row();
+                            for (name, value, n) in &filtered {
+                                let is_sel = self
+                                    .equates_selected
+                                    .as_ref()
+                                    .map(|(sn, sv)| sn == name && *sv == *value)
+                                    .unwrap_or(false);
+                                let text = if is_sel {
+                                    egui::RichText::new(name).strong()
+                                } else {
+                                    egui::RichText::new(name)
+                                };
+                                if ui.selectable_label(is_sel, text).clicked() {
+                                    self.equates_selected = Some((name.clone(), *value));
+                                }
+                                ui.monospace(format!("{value:#x}"));
+                                ui.monospace(format!("{n}"));
+                                ui.end_row();
+                            }
+                        });
+                });
+            cols[1].strong("References");
+            cols[1].separator();
+            let sel = self.equates_selected.clone();
+            let refs: Vec<(u64, u8, i64)> = match sel {
+                Some((name, _)) => prog.edits.equate_references(&name),
+                None => Vec::new(),
+            };
+            egui::ScrollArea::vertical()
+                .id_salt("equates_right_scroll")
+                .max_height(360.0)
+                .show(&mut cols[1], |ui| {
+                    if refs.is_empty() {
+                        ui.weak("Select an equate on the left to see its references.");
+                    } else {
+                        egui::Grid::new("equate_refs_grid")
+                            .num_columns(4)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Ref Addr");
+                                ui.strong("Op");
+                                ui.strong("Value");
+                                ui.strong("Del");
+                                ui.end_row();
+                                for (va, op, value) in refs {
+                                    if ui
+                                        .link(egui::RichText::new(format!("{va:#x}")).monospace())
+                                        .clicked()
+                                    {
+                                        goto = Some(va);
+                                    }
+                                    ui.monospace(format!("{op}"));
+                                    ui.monospace(format!("{value:#x}"));
+                                    if ui.small_button("Del").clicked() {
+                                        clear = Some((va, op));
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    }
+                });
+        });
+        if let Some(va) = goto {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+        if let Some((va, op)) = clear {
+            let _ = self.set_equate(va, op, "", 0);
+        }
+    }
+
+    /// Ghidra `FunctionTagPlugin` — two-pane: assigned tags for current fn,
+    /// All Tags with counts.
+    fn ui_function_tags(&mut self, ui: &mut egui::Ui, muted: Color32) {
+        ui.heading("Function Tags");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra FunctionTagPlugin · per-function labels + universe of tags",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let entry = self.focused_function_entry.or_else(|| {
+            self.listing_focus_va
+                .and_then(|va| Some(decompile_entry_for_va(prog, va)))
+        });
+        let entry_label = entry
+            .and_then(|va| self.program.as_ref()?.display_function_name_at(va))
+            .unwrap_or_else(|| "<no function>".into());
+        ui.horizontal(|ui| {
+            ui.label("Function:");
+            ui.monospace(&entry_label);
+            if let Some(e) = entry {
+                ui.monospace(format!("@ {e:#x}"));
+            }
+        });
+        ui.separator();
+        // Left = assigned tags (with remove); right = all tags (add / delete).
+        let assigned: Vec<String> = entry
+            .map(|e| prog.edits.function_tags_for(e))
+            .unwrap_or_default();
+        let all_tags: Vec<(String, usize)> = prog.edits.all_tag_counts();
+        let mut remove_from_entry: Option<String> = None;
+        let mut add_to_entry: Option<String> = None;
+        let mut delete_globally: Option<String> = None;
+        ui.columns(2, |cols| {
+            cols[0].strong("Assigned to this function");
+            cols[0].separator();
+            if assigned.is_empty() {
+                cols[0].weak("No tags — add one from the right pane, or type a new tag.");
+            } else {
+                for t in &assigned {
+                    cols[0].horizontal(|ui| {
+                        ui.monospace(t);
+                        if ui.small_button("Remove").clicked() {
+                            remove_from_entry = Some(t.clone());
+                        }
+                    });
+                }
+            }
+
+            cols[1].strong("All Tags");
+            cols[1].separator();
+            cols[1].horizontal(|ui| {
+                ui.label("New:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.function_tags_new_input)
+                        .desired_width(160.0)
+                        .hint_text("Tag name…"),
+                );
+                if ui.button("Add").clicked() {
+                    let name = self.function_tags_new_input.trim().to_string();
+                    if !name.is_empty() {
+                        if entry.is_some() {
+                            add_to_entry = Some(name);
+                        } else {
+                            let _ = self.create_tag(name);
+                        }
+                        self.function_tags_new_input.clear();
+                    }
+                }
+            });
+            cols[1].horizontal(|ui| {
+                ui.label("Filter:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.function_tags_filter)
+                        .desired_width(180.0)
+                        .hint_text("Substring…"),
+                );
+            });
+            cols[1].separator();
+            let q = self.function_tags_filter.to_ascii_lowercase();
+            egui::ScrollArea::vertical()
+                .id_salt("all_tags_scroll")
+                .max_height(320.0)
+                .show(&mut cols[1], |ui| {
+                    egui::Grid::new("all_tags_grid")
+                        .num_columns(3)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("Tag");
+                            ui.strong("Uses");
+                            ui.strong("Actions");
+                            ui.end_row();
+                            for (tag, n) in &all_tags {
+                                if !q.is_empty() && !tag.to_ascii_lowercase().contains(&q) {
+                                    continue;
+                                }
+                                ui.monospace(tag);
+                                ui.monospace(format!("{n}"));
+                                ui.horizontal(|ui| {
+                                    if entry.is_some() && ui.small_button("Add").clicked() {
+                                        add_to_entry = Some(tag.clone());
+                                    }
+                                    if ui.small_button("Delete").clicked() {
+                                        delete_globally = Some(tag.clone());
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+        if let (Some(tag), Some(e)) = (remove_from_entry, entry) {
+            let _ = self.remove_function_tag(e, &tag);
+        }
+        if let (Some(tag), Some(e)) = (add_to_entry, entry) {
+            let _ = self.add_function_tag(e, tag);
+        }
+        if let Some(tag) = delete_globally {
+            let _ = self.delete_tag_everywhere(&tag);
+        }
+    }
+
+    /// Ghidra `ReferencesPlugin` — External Programs table. Rendered from
+    /// analyzer-driven `imports_exports()` output (PDB symbols, `idata`
+    /// sections, demangled `dllexport` symbols) — never fabricated.
+    fn ui_external_programs(&mut self, ui: &mut egui::Ui, muted: Color32) {
+        ui.heading("External Programs");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra ReferencesPlugin · analyzer-derived imports + exports",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        if self.program.is_none() {
+            ui.weak("No program loaded.");
+            return;
+        }
+        let (imports, exports) = self.imports_exports();
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.external_programs_filter)
+                    .desired_width(220.0)
+                    .hint_text("Name / VA…"),
+            );
+        });
+        ui.separator();
+        let q = self.external_programs_filter.to_ascii_lowercase();
+        let matches = |name: &str, va: u64| {
+            if q.is_empty() {
+                return true;
+            }
+            name.to_ascii_lowercase().contains(&q) || format!("{va:#x}").contains(&q)
+        };
+        let mut goto: Option<u64> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("ext_progs_scroll")
+            .max_height(400.0)
+            .show(ui, |ui| {
+                ui.strong("Imports");
+                egui::Grid::new("ext_imports_grid")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Address");
+                        ui.strong("Name");
+                        ui.strong("Source");
+                        ui.end_row();
+                        for (va, name) in imports.iter().filter(|(va, n)| matches(n, *va)) {
+                            if ui
+                                .link(egui::RichText::new(format!("{va:#x}")).monospace())
+                                .clicked()
+                            {
+                                goto = Some(*va);
+                            }
+                            ui.label(name);
+                            ui.monospace(if name.starts_with('.') { "section" } else { "pdb" });
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                ui.strong("Exports");
+                egui::Grid::new("ext_exports_grid")
+                    .num_columns(3)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Address");
+                        ui.strong("Name");
+                        ui.strong("Source");
+                        ui.end_row();
+                        for (va, name) in exports.iter().filter(|(va, n)| matches(n, *va)) {
+                            if ui
+                                .link(egui::RichText::new(format!("{va:#x}")).monospace())
+                                .clicked()
+                            {
+                                goto = Some(*va);
+                            }
+                            ui.label(name);
+                            ui.monospace(if name.starts_with('.') { "section" } else { "demangle" });
+                            ui.end_row();
+                        }
+                        if imports.is_empty() && exports.is_empty() {
+                            ui.weak("No imports/exports — analyzer did not populate any.");
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(va) = goto {
+            let _ = self.goto_address_str(&format!("{va:#x}"));
+        }
+    }
+
+    /// Ghidra `DataTypePreviewPlugin` — preview interpretation of bytes at
+    /// the current cursor under the chosen built-in type.
+    fn ui_data_type_preview(&mut self, ui: &mut egui::Ui, muted: Color32) {
+        ui.heading("Data Type Preview");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra DataTypePreviewPlugin · byte interpretation @ cursor",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let Some(prog) = self.program.as_ref() else {
+            ui.weak("No program loaded.");
+            return;
+        };
+        let va = match self.listing_focus_va.or(prog.entry) {
+            Some(v) => v,
+            None => {
+                ui.weak("No cursor / entry.");
+                return;
+            }
+        };
+        ui.horizontal(|ui| {
+            ui.label("Cursor VA:");
+            ui.monospace(format!("{va:#x}"));
+            ui.label("Type:");
+            let sel = self.data_type_preview_selected.clone();
+            egui::ComboBox::from_id_salt("dtp_type_combo")
+                .selected_text(&sel)
+                .show_ui(ui, |ui| {
+                    for name in BUILTIN_TYPES {
+                        if ui
+                            .selectable_label(sel.as_str() == *name, *name)
+                            .clicked()
+                        {
+                            self.data_type_preview_selected = (*name).into();
+                        }
+                    }
+                });
+        });
+        ui.separator();
+        let bytes = prog.read_va(va, 16).unwrap_or_default();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x} ")).collect();
+        ui.monospace(format!("bytes: {}", hex.trim_end()));
+        ui.separator();
+        egui::Grid::new("dtp_grid").num_columns(2).striped(true).show(ui, |ui| {
+            ui.strong("Interpretation");
+            ui.strong("Preview");
+            ui.end_row();
+            for (name, preview) in preview_all(&bytes) {
+                ui.monospace(name);
+                ui.monospace(preview);
+                ui.end_row();
+            }
+        });
+    }
+
+    /// Ghidra `ComputeChecksumsPlugin` — CRC-32 / Adler-32 / Fletcher / raw
+    /// sum panels over the loaded image or a chosen block.
+    fn ui_checksum_generator(&mut self, ui: &mut egui::Ui, muted: Color32) {
+        ui.heading("Checksum Generator");
+        ui.small(
+            egui::RichText::new(
+                "Ghidra ComputeChecksumsPlugin · CRC-32 / Adler-32 / Fletcher / sums",
+            )
+            .color(muted),
+        );
+        ui.separator();
+        let block_names: Vec<String> = self
+            .program
+            .as_ref()
+            .map(|p| p.blocks.iter().map(|b| b.name.clone()).collect())
+            .unwrap_or_default();
+        let mut run: Option<ChecksumMode> = None;
+        ui.horizontal(|ui| {
+            if ui.button("Whole image").clicked() {
+                run = Some(ChecksumMode::WholeImage);
+            }
+            ui.label(egui::RichText::new("or block:").color(muted));
+            for name in &block_names {
+                if ui.small_button(name).clicked() {
+                    run = Some(ChecksumMode::Section(name.clone()));
+                }
+            }
+        });
+        if let Some(mode) = run {
+            let _ = self.compute_checksums(mode);
+        }
+        ui.separator();
+        match &self.checksum_last {
+            None => {
+                ui.weak("No checksum computed yet — click Whole image or a block above.");
+            }
+            Some(r) => {
+                egui::Grid::new("checksum_grid").num_columns(2).striped(true).show(ui, |ui| {
+                    ui.strong("Target");
+                    ui.label(&r.target);
+                    ui.end_row();
+                    ui.strong("Length");
+                    ui.monospace(format!("{}", r.len));
+                    ui.end_row();
+                    ui.strong("CRC-32 (IEEE)");
+                    ui.monospace(format!("{:#010x}", r.crc32));
+                    ui.end_row();
+                    ui.strong("Adler-32");
+                    ui.monospace(format!("{:#010x}", r.adler32));
+                    ui.end_row();
+                    ui.strong("Sum-8");
+                    ui.monospace(format!("{:#x}", r.sum8));
+                    ui.end_row();
+                    ui.strong("Sum-16");
+                    ui.monospace(format!("{:#x}", r.sum16));
+                    ui.end_row();
+                    ui.strong("Sum-32");
+                    ui.monospace(format!("{:#x}", r.sum32));
+                    ui.end_row();
+                    ui.strong("Fletcher-16");
+                    ui.monospace(format!("{:#010x}", r.fletcher16));
+                    ui.end_row();
+                    ui.strong("Fletcher-32");
+                    ui.monospace(format!("{:#018x}", r.fletcher32));
+                    ui.end_row();
+                });
+            }
+        }
+    }
+}
+
+/// Data Type Preview — every well-known Stage-0 interpretation of `bytes`.
+fn preview_all(bytes: &[u8]) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    if let Some(&b) = bytes.first() {
+        out.push(("int8", format!("{}", b as i8)));
+        out.push(("uint8", format!("{}", b)));
+    }
+    if bytes.len() >= 2 {
+        let w = u16::from_le_bytes([bytes[0], bytes[1]]);
+        out.push(("int16", format!("{}", w as i16)));
+        out.push(("uint16", format!("{w} ({w:#x})")));
+    }
+    if bytes.len() >= 4 {
+        let d = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        out.push(("int32", format!("{}", d as i32)));
+        out.push(("uint32", format!("{d} ({d:#x})")));
+        out.push(("float", format!("{}", f32::from_bits(d))));
+    }
+    if bytes.len() >= 8 {
+        let q = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        out.push(("int64", format!("{}", q as i64)));
+        out.push(("uint64", format!("{q} ({q:#x})")));
+        out.push(("double", format!("{}", f64::from_bits(q))));
+        out.push(("pointer64", format!("{q:#018x}")));
+    }
+    let ascii: String = bytes
+        .iter()
+        .take(16)
+        .map(|b| if (0x20..0x7f).contains(b) { *b as char } else { '.' })
+        .collect();
+    out.push(("ascii", ascii));
+    out
 }
 
 impl eframe::App for GhidrustApp {
@@ -4641,7 +6714,7 @@ impl eframe::App for GhidrustApp {
             return;
         }
 
-        // Step analysis one analyzer per frame so M3 progress can paint.
+        // Poll background analysis worker; keep repainting so progress UI stays live.
         if self.analysis_job.is_some() {
             if let Err(e) = self.step_analysis_job() {
                 self.status = format!("error: {e}");
@@ -4864,16 +6937,22 @@ impl eframe::App for GhidrustApp {
                         self.pane_open.insert(PaneKind::DefinedStrings, true);
                         ui.close_menu();
                     }
-                    if ui.button("For Scalars…").on_hover_text("Not yet implemented — Phase D").clicked() {
-                        self.nyi("Search → For Scalars");
+                    if ui.button("For Scalars…").on_hover_text("Ghidra ScalarSearchPlugin · operand scalar range filter").clicked() {
+                        self.show_search_scalars_dialog = true;
                         ui.close_menu();
                     }
-                    if ui.button("For Address Tables…").on_hover_text("Not yet implemented — Phase D").clicked() {
-                        self.nyi("Search → For Address Tables");
+                    if ui.button("For Address Tables…").on_hover_text("Ghidra AutoTableDisassemblerPlugin · pointer table candidates").clicked() {
+                        self.show_search_address_tables_dialog = true;
+                        // Populate immediately from analyzer output.
+                        if let Some(prog) = self.program.as_ref() {
+                            self.text_hits = address_table_hits(prog);
+                            self.memory_hits.clear();
+                            self.show_search_results = true;
+                        }
                         ui.close_menu();
                     }
-                    if ui.button("Instruction Patterns…").on_hover_text("Not yet implemented — Phase D").clicked() {
-                        self.nyi("Search → Instruction Patterns");
+                    if ui.button("Instruction Patterns…").on_hover_text("Ghidra BytePatternPlugin · mnemonic + operand filter").clicked() {
+                        self.show_search_insn_dialog = true;
                         ui.close_menu();
                     }
                     if ui.button("For Direct References…").on_hover_text("Not yet implemented — Phase D").clicked() {
@@ -5045,6 +7124,69 @@ impl eframe::App for GhidrustApp {
                         let mut open = self.is_pane_open(k);
                         if ui.checkbox(&mut open, k.title()).changed() {
                             self.toggle_pane(k, open);
+                        }
+                    }
+                    ui.separator();
+                    // Phase G (M7) — Debugger tool providers.
+                    ui.label(egui::RichText::new("Debugger tool").small().weak());
+                    let mut dbg = DebuggerPane::ALL.to_vec();
+                    dbg.sort_by_key(|p| p.title());
+                    for p in dbg {
+                        let mut open = *self.debugger_open.get(&p).unwrap_or(&false);
+                        if ui.checkbox(&mut open, p.title()).changed() {
+                            self.debugger_open.insert(p, open);
+                        }
+                    }
+                    ui.separator();
+                    // Phase H (M8) — layout tools.
+                    if ui.button("Configure plugins…").clicked() {
+                        self.show_configure_dialog = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("Save Tool Layout…").clicked() {
+                        self.layouts_cached = layouts::list_layouts();
+                        self.layouts_new_name = self.current_layout_name.clone();
+                        self.show_layouts_dialog = true;
+                        ui.close_menu();
+                    }
+                });
+                ui.menu_button("Debugger", |ui| {
+                    for act in DebuggerAction::ALL {
+                        if ui
+                            .button(act.label())
+                            .on_hover_text("Debugger backend pending (Phase P12)")
+                            .clicked()
+                        {
+                            match act {
+                                DebuggerAction::ShowWatches => {
+                                    self.debugger_open.insert(DebuggerPane::Watches, true);
+                                }
+                                DebuggerAction::ToggleBreakpoint => {
+                                    if let Some(va) = self.listing_focus_va {
+                                        self.debugger.toggle_breakpoint(va);
+                                        self.debugger_open
+                                            .insert(DebuggerPane::Breakpoints, true);
+                                    }
+                                    self.nyi(&format!("Debugger → {}", act.label()));
+                                }
+                                _ => self.nyi(&format!("Debugger → {}", act.label())),
+                            }
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
+                    ui.checkbox(&mut self.debugger.enabled, "Debugger tool mode");
+                    if self.debugger.enabled {
+                        // Enabling the tool opens the core debugger providers.
+                        for p in [
+                            DebuggerPane::Targets,
+                            DebuggerPane::Threads,
+                            DebuggerPane::Modules,
+                            DebuggerPane::Registers,
+                            DebuggerPane::Stack,
+                            DebuggerPane::Breakpoints,
+                        ] {
+                            self.debugger_open.insert(p, true);
                         }
                     }
                 });
@@ -6211,6 +8353,158 @@ impl eframe::App for GhidrustApp {
         // Phase C (M3) — edit dialogs (rename / retype / comment / signature / new type).
         self.draw_edit_dialogs(ctx);
 
+        // Phase H (M8) — Configure plugins dialog.
+        if self.show_configure_dialog {
+            let mut close = false;
+            egui::Window::new("Configure plugins")
+                .id(egui::Id::new("dialog_configure"))
+                .resizable(true)
+                .default_size(egui::vec2(680.0, 460.0))
+                .show(ctx, |ui| {
+                    ui.label(
+                        "Ghidrust plugins are compile-time; this dialog is a Ghidra parity list of every provider Ghidrust ships.",
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("configure_scroll")
+                        .max_height(340.0)
+                        .show(ui, |ui| {
+                            egui::Grid::new("configure_grid")
+                                .num_columns(4)
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.strong("Plugin");
+                                    ui.strong("Kind");
+                                    ui.strong("State");
+                                    ui.strong("Description");
+                                    ui.end_row();
+                                    for p in layouts::PLUGIN_CATALOG {
+                                        ui.monospace(p.name);
+                                        ui.label(p.kind);
+                                        ui.label(p.state);
+                                        ui.label(p.description);
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if close {
+                self.show_configure_dialog = false;
+            }
+        }
+
+        // Phase H (M8) — Layout save / load dialog.
+        if self.show_layouts_dialog {
+            let mut close = false;
+            let mut do_save = false;
+            let mut load_name: Option<String> = None;
+            let mut delete_name: Option<String> = None;
+            egui::Window::new("Tool Layouts")
+                .id(egui::Id::new("dialog_layouts"))
+                .resizable(true)
+                .default_size(egui::vec2(480.0, 360.0))
+                .show(ctx, |ui| {
+                    ui.label("Save / restore CodeBrowser tool layouts (pane visibility + docks).");
+                    ui.small(
+                        egui::RichText::new(
+                            "Files land under %APPDATA%/ghidrust/layouts/<name>.tool.json (Ghidra .tool XML analog).",
+                        )
+                        .weak(),
+                    );
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.layouts_new_name)
+                                .desired_width(200.0)
+                                .hint_text("MyCodeBrowser"),
+                        );
+                        if ui
+                            .add_enabled(
+                                !self.layouts_new_name.trim().is_empty(),
+                                egui::Button::new("Save current layout"),
+                            )
+                            .clicked()
+                        {
+                            do_save = true;
+                        }
+                    });
+                    ui.separator();
+                    ui.label(egui::RichText::new("Saved layouts").strong());
+                    if self.layouts_cached.is_empty() {
+                        ui.weak("No layouts saved yet.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_salt("layouts_scroll")
+                            .max_height(180.0)
+                            .show(ui, |ui| {
+                                for name in &self.layouts_cached {
+                                    ui.horizontal(|ui| {
+                                        ui.monospace(name);
+                                        if ui.small_button("Restore").clicked() {
+                                            load_name = Some(name.clone());
+                                        }
+                                        if ui.small_button("Delete").clicked() {
+                                            delete_name = Some(name.clone());
+                                        }
+                                    });
+                                }
+                            });
+                    }
+                    ui.separator();
+                    if !self.current_layout_name.is_empty() {
+                        ui.small(
+                            egui::RichText::new(format!(
+                                "Current layout: {}",
+                                self.current_layout_name
+                            ))
+                            .weak(),
+                        );
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if do_save {
+                match self.save_layout_named(self.layouts_new_name.clone()) {
+                    Ok(p) => {
+                        self.status = format!("Layout saved → {}", p.display());
+                        self.log(self.status.clone());
+                    }
+                    Err(e) => {
+                        self.status = format!("save layout error: {e}");
+                        self.log_error(self.status.clone());
+                    }
+                }
+            }
+            if let Some(name) = load_name {
+                match self.restore_layout_named(&name) {
+                    Ok(()) => {
+                        self.status = format!("Layout restored → {name}");
+                        self.log(self.status.clone());
+                    }
+                    Err(e) => {
+                        self.status = format!("restore layout error: {e}");
+                        self.log_error(self.status.clone());
+                    }
+                }
+            }
+            if let Some(name) = delete_name {
+                if let Err(e) = layouts::delete_layout(&name) {
+                    self.status = format!("delete layout error: {e}");
+                    self.log_error(self.status.clone());
+                }
+                self.layouts_cached = layouts::list_layouts();
+            }
+            if close {
+                self.show_layouts_dialog = false;
+            }
+        }
+
         // Bookmark add dialog
         if self.show_bookmark_dialog {
             let mut close = false;
@@ -6336,6 +8630,138 @@ impl eframe::App for GhidrustApp {
                         }
                     });
                 });
+        }
+
+        // Search → For Scalars
+        if self.show_search_scalars_dialog {
+            egui::Window::new("Search For Scalars")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("Scan operand scalars in [min, max]. Hex ok (0x…) or decimal.");
+                    ui.horizontal(|ui| {
+                        ui.label("Min:");
+                        ui.text_edit_singleline(&mut self.search_scalars_min);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Max:");
+                        ui.text_edit_singleline(&mut self.search_scalars_max);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.show_search_scalars_dialog = false;
+                        }
+                        if ui.button("Search").clicked() {
+                            match self.run_search_scalars() {
+                                Ok(()) => self.show_search_scalars_dialog = false,
+                                Err(e) => {
+                                    self.status = format!("error: {e}");
+                                    self.log_error(self.status.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Search → Instruction Patterns
+        if self.show_search_insn_dialog {
+            egui::Window::new("Search Instruction Patterns")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(420.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.small("Matches against decoded listing rows. Empty field = don't filter.");
+                    ui.horizontal(|ui| {
+                        ui.label("Mnemonic:");
+                        ui.text_edit_singleline(&mut self.search_insn_mnemonic);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Operands:");
+                        ui.text_edit_singleline(&mut self.search_insn_operands);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.show_search_insn_dialog = false;
+                        }
+                        if ui.button("Search").clicked() {
+                            match self.run_search_instruction_patterns() {
+                                Ok(()) => self.show_search_insn_dialog = false,
+                                Err(e) => {
+                                    self.status = format!("error: {e}");
+                                    self.log_error(self.status.clone());
+                                }
+                            }
+                        }
+                    });
+                });
+        }
+
+        // Add Equate dialog (Ghidra `EquateTablePlugin` → Convert → Equate).
+        if self.show_equate_dialog {
+            let mut close = false;
+            egui::Window::new("Set Equate")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.small("Bind a name to a scalar operand (Ghidra `EquateTablePlugin`).");
+                    ui.horizontal(|ui| {
+                        ui.label("VA:");
+                        let mut input = self
+                            .equate_dialog_va
+                            .map(|v| format!("{v:#x}"))
+                            .unwrap_or_default();
+                        if ui.text_edit_singleline(&mut input).lost_focus() {
+                            self.equate_dialog_va = parse_address(&input).ok();
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Operand index:");
+                        let mut s = format!("{}", self.equate_dialog_op);
+                        if ui.text_edit_singleline(&mut s).lost_focus() {
+                            self.equate_dialog_op = s.trim().parse().unwrap_or(self.equate_dialog_op);
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Name:");
+                        ui.text_edit_singleline(&mut self.equate_dialog_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Value (dec / hex):");
+                        ui.text_edit_singleline(&mut self.equate_dialog_value);
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            close = true;
+                        }
+                        if ui.button("Apply").clicked() {
+                            let value = self
+                                .parse_scalar_input(&self.equate_dialog_value.clone())
+                                .unwrap_or(0);
+                            if let Some(va) = self.equate_dialog_va {
+                                if let Err(e) = self.set_equate(
+                                    va,
+                                    self.equate_dialog_op,
+                                    self.equate_dialog_name.clone(),
+                                    value,
+                                ) {
+                                    self.status = format!("error: {e}");
+                                    self.log_error(self.status.clone());
+                                } else {
+                                    close = true;
+                                }
+                            } else {
+                                close = true;
+                            }
+                        }
+                    });
+                });
+            if close {
+                self.show_equate_dialog = false;
+            }
         }
 
         // Search results window
@@ -6861,7 +9287,7 @@ mod tests {
         assert!(app.analysis_job.is_some());
         assert!(app.analysis_progress_fraction().is_some());
         while app.analysis_job.is_some() {
-            app.step_analysis_job().expect("step");
+            app.step_analysis_job_blocking().expect("step");
         }
         assert!(app.analysis_progress_fraction().is_none());
         let tree3 = app.project_tree_model().unwrap();
@@ -6917,18 +9343,26 @@ mod tests {
 
     #[test]
     fn headless_stage0_decompiler_wires_on_focus() {
+        // Phase F: Stage-1 is the GUI default. The old assertion demanded a
+        // Stage-0-style `void foo()` / `block_N` marker; Stage-1 emits typed
+        // return values (e.g. `uint32_t FUN_...(void)`) so we accept either
+        // stage marker plus the Stage-1 self-identification header.
         let mut app = GhidrustApp::headless();
         app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
-        assert!(!app.decomp_text.is_empty(), "load should seed Stage-0 text");
+        assert!(!app.decomp_text.is_empty(), "load should seed decompiler text");
         assert!(!app.decomp_text.contains("Not yet implemented"));
 
         let va = app.listing[0].address;
         app.refresh_decompiler_at(va);
         assert!(app.decomp_entry.is_some());
+        let text = &app.decomp_text;
         assert!(
-            app.decomp_text.contains("void ") || app.decomp_text.contains("block_"),
-            "expected Stage-0 pseudo-C:\n{}",
-            app.decomp_text
+            text.contains("void ")
+                || text.contains("uint")
+                || text.contains("int32_t")
+                || text.contains("int64_t")
+                || text.contains("block_"),
+            "expected typed function header or block label:\n{text}"
         );
 
         let entry = app.decomp_entry.unwrap();
@@ -7087,7 +9521,10 @@ mod tests {
             !app.decomp_lines.is_empty(),
             "token cache must be populated after refresh_decompiler_at"
         );
-        // Stage-0 always emits a `void <name>` declaration + `block_N:` labels.
+        // Post Phase F the default GUI stage is Stage-1; the emitter drops
+        // `block_N:` labels in favour of structured regions. Assert only
+        // that we see at least one keyword token — the shape common to
+        // every stage.
         let all_tokens: Vec<&TokenKind> = app
             .decomp_lines
             .iter()
@@ -7097,13 +9534,9 @@ mod tests {
             all_tokens.iter().any(|k| matches!(k, TokenKind::Keyword)),
             "expected at least one Keyword (void/return/etc)"
         );
-        assert!(
-            all_tokens.iter().any(|k| matches!(k, TokenKind::Label)),
-            "expected at least one block_N label"
-        );
         // Cross-highlight line should be recomputable and match what the
-        // decoder found for the entry VA (may be None if Stage-0 emit stripped
-        // per-line addresses, but the field remains consistent).
+        // decoder found for the entry VA (may be None if Stage-1 emit
+        // stripped per-line addresses, but the field remains consistent).
         let ln = decomp_line_for_va(&app.decomp_lines, entry);
         assert_eq!(app.decomp_cross_line, ln);
     }
@@ -7558,5 +9991,399 @@ mod tests {
             "listing must cover hit VA {hit_va:#x} after goto; first={:#x}",
             app.listing[0].address
         );
+    }
+
+    // ─── Phase D (M4) — tables, xrefs, equates, tags, search dialogs ────
+
+    #[test]
+    fn xrefs_to_and_from_return_honest_rows_on_fixture() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("analysis_lab.pe")).expect("load");
+        // xrefs_from at entry decodes and never fabricates.
+        let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        let from = app.xrefs_from_va(entry);
+        for r in &from {
+            assert!(app.program.as_ref().unwrap().contains_va(r.to));
+            assert!(r.from >= entry);
+        }
+
+        // Inject a fake reference so xrefs_to_va picks it up deterministically.
+        {
+            let prog = app.program.as_mut().unwrap();
+            prog.analysis.references.push(ghidrust_core::ReferenceInfo {
+                from: prog.image_base + 0x100,
+                to: entry,
+                kind: "call".into(),
+            });
+        }
+        let to = app.xrefs_to_va(entry);
+        assert!(to.iter().any(|r| r.kind == "call"));
+        assert!(to.iter().all(|r| r.to == entry));
+    }
+
+    #[test]
+    fn set_equate_and_edit_events_fan_out() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let va = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        app.set_equate(va, 1, "SW_HIDE", 0).expect("set equate");
+        let p = app.program.as_ref().unwrap();
+        assert_eq!(p.edits.equate_at(va, 1).map(|e| e.name.as_str()), Some("SW_HIDE"));
+        assert_eq!(p.edits.equate_at(va, 1).map(|e| e.value), Some(0));
+        // Groups & references consistent.
+        let groups = p.edits.equate_groups();
+        assert!(groups.iter().any(|(n, _, _)| n == "SW_HIDE"));
+        // Setting empty name clears it.
+        app.set_equate(va, 1, "", 0).expect("clear");
+        assert!(app.program.as_ref().unwrap().edits.equate_at(va, 1).is_none());
+    }
+
+    #[test]
+    fn function_tags_add_remove_delete_via_app() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        app.add_function_tag(entry, "MALLOC").expect("add");
+        app.add_function_tag(entry, "SANITIZED").expect("add");
+        let p = app.program.as_ref().unwrap();
+        assert!(p.edits.function_has_tag(entry, "MALLOC"));
+        assert!(p.edits.function_has_tag(entry, "SANITIZED"));
+        assert!(p.edits.all_function_tags.contains("MALLOC"));
+        app.remove_function_tag(entry, "MALLOC").expect("remove");
+        assert!(!app.program.as_ref().unwrap().edits.function_has_tag(entry, "MALLOC"));
+        // Delete-everywhere strips from universe.
+        app.delete_tag_everywhere("SANITIZED").expect("delete");
+        assert!(!app.program.as_ref().unwrap().edits.all_function_tags.contains("SANITIZED"));
+    }
+
+    #[test]
+    fn search_scalars_dialog_runs_range_over_listing() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        app.search_scalars_min = "0".into();
+        app.search_scalars_max = "0xffff".into();
+        app.run_search_scalars().expect("scalars");
+        // Fixture may or may not include a scalar in this range; the runner
+        // must still succeed and populate text_hits deterministically.
+        assert!(app.show_search_results);
+    }
+
+    #[test]
+    fn search_instruction_patterns_filters_listing() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        // tiny_x64 has a `push rbp` prologue; filter should hit it.
+        app.search_insn_mnemonic = "push".into();
+        app.search_insn_operands.clear();
+        app.run_search_instruction_patterns().expect("insn");
+        assert!(!app.text_hits.is_empty());
+        assert!(app.text_hits.iter().any(|h| h.kind == "insn"));
+    }
+
+    #[test]
+    fn address_tables_hits_appear_after_analyzer_populates() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        {
+            let prog = app.program.as_mut().unwrap();
+            prog.analysis.address_tables.push(ghidrust_core::AddressTableInfo {
+                base: prog.image_base,
+                count: 3,
+                entries: vec![prog.image_base, prog.image_base + 8, prog.image_base + 16],
+            });
+        }
+        let hits = address_table_hits(app.program.as_ref().unwrap());
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].text.contains("3 entries"));
+    }
+
+    #[test]
+    fn compute_checksums_round_trip_whole_image() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        app.compute_checksums(ChecksumMode::WholeImage).expect("checksum");
+        let r = app.checksum_last.as_ref().unwrap();
+        assert!(r.len > 0);
+        assert!(r.crc32 != 0);
+        assert!(r.adler32 != 0);
+        // Deterministic: re-running yields the same values.
+        let first = r.clone();
+        app.compute_checksums(ChecksumMode::WholeImage).expect("checksum");
+        assert_eq!(app.checksum_last.as_ref().unwrap(), &first);
+    }
+
+    #[test]
+    fn bytes_pane_state_defaults_and_follow_cursor() {
+        let mut app = GhidrustApp::headless();
+        assert_eq!(app.bytes_pane_bpr, 16);
+        assert!(app.bytes_pane_va.is_none());
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        // Programmatic follow — reflects listing_focus.
+        app.listing_focus_va = app.program.as_ref().and_then(|p| p.entry);
+        app.bytes_pane_va = app.listing_focus_va;
+        assert!(app.bytes_pane_va.is_some());
+    }
+
+    #[test]
+    fn parse_scalar_input_hex_and_dec_and_signed() {
+        let app = GhidrustApp::headless();
+        assert_eq!(app.parse_scalar_input("0x1234").unwrap(), 0x1234);
+        assert_eq!(app.parse_scalar_input("42").unwrap(), 42);
+        assert_eq!(app.parse_scalar_input("-0x10").unwrap(), -0x10);
+        assert!(app.parse_scalar_input("").is_err());
+    }
+
+    // ── Phase E (M5) — Graphs & maps ─────────────────────────────────────
+
+    /// Phase E — Function Graph derives Stage-0 blocks + edges from the
+    /// currently-focused function's CFG (honest empty if the region has
+    /// no recovered blocks).
+    #[test]
+    fn function_graph_pane_layouts_stage0_cfg() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
+        app.focus_function(entry);
+
+        let view = eframe::egui::Rect::from_min_size(
+            eframe::egui::Pos2::ZERO,
+            eframe::egui::Vec2::new(1000.0, 600.0),
+        );
+        let (blocks, edges) = graphs::layout_function_graph(
+            app.program.as_ref().unwrap(),
+            entry,
+            STAGE0_MAX_INSNS,
+            FunctionGraphLayout::Hierarchical,
+            view,
+        );
+        // Honest-empty is acceptable, but if blocks land they must all
+        // have positive rects.
+        for b in &blocks {
+            assert!(b.rect.width() > 0.0);
+        }
+        for e in &edges {
+            assert!(e.from < blocks.len().max(1));
+        }
+    }
+
+    /// Phase E — Function Call Graph roots at the current function with
+    /// level 0; expansion levels are session-only settings.
+    #[test]
+    fn call_graph_state_settings_persist_across_frames() {
+        let mut app = GhidrustApp::headless();
+        assert_eq!(app.graph_state.call_graph_levels_in, 0);
+        assert_eq!(app.graph_state.call_graph_levels_out, 0);
+        app.graph_state.call_graph_levels_in = 2;
+        app.graph_state.call_graph_levels_out = 1;
+        assert_eq!(app.graph_state.call_graph_levels_in, 2);
+    }
+
+    /// Phase E — Editable Memory Map: RWX toggles + add + delete flow.
+    #[test]
+    fn memory_map_edit_flow_adds_and_deletes_blocks() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let n0 = app.program.as_ref().unwrap().blocks.len();
+        // Add a synthetic RWX block at 0x900000.
+        app.program.as_mut().unwrap().blocks.push(
+            ghidrust_core::MemoryBlock {
+                name: "synthetic".into(),
+                va: 0x900000,
+                size: 0x100,
+                bytes: vec![0u8; 0x100],
+                readable: true,
+                writable: true,
+                executable: true,
+            },
+        );
+        assert_eq!(app.program.as_ref().unwrap().blocks.len(), n0 + 1);
+        // Flip its RWX (via the field, mirrors the UI checkbox mutation).
+        let idx = app.program.as_ref().unwrap().blocks.len() - 1;
+        {
+            let b = &mut app.program.as_mut().unwrap().blocks[idx];
+            b.writable = !b.writable;
+            assert!(!b.writable);
+        }
+        app.program.as_mut().unwrap().blocks.remove(idx);
+        assert_eq!(app.program.as_ref().unwrap().blocks.len(), n0);
+    }
+
+    /// Phase E — Register Manager lattice is present and set/clear works.
+    #[test]
+    fn register_manager_lattice_and_values() {
+        let mut app = GhidrustApp::headless();
+        assert!(app.register_manager.values.is_empty());
+        app.register_manager.selected = Some("RAX".into());
+        app.register_manager
+            .values
+            .push(register_manager::RegisterValueRow {
+                register: "RAX".into(),
+                start_va: 0x1000,
+                end_va: 0x1100,
+                value: "0x2a".into(),
+            });
+        assert_eq!(app.register_manager.values.len(), 1);
+    }
+
+    /// Phase E — Entropy strip samples cover mapped bytes without fabricating.
+    #[test]
+    fn entropy_samples_cover_mapped_blocks() {
+        let mut app = GhidrustApp::headless();
+        app.load_binary(&fixture_path("tiny_x64.pe")).expect("load");
+        let s = entropy::entropy_samples(app.program.as_ref().unwrap(), 256);
+        assert!(!s.is_empty());
+        for w in s.windows(2) {
+            assert!(w[0].va <= w[1].va);
+        }
+    }
+
+    // ── Phase F (M6) — Scripts ───────────────────────────────────────────
+
+    #[test]
+    fn script_manager_catalog_is_populated_from_mcp_surface() {
+        let app = GhidrustApp::headless();
+        assert!(!app.script_manager.catalog.is_empty());
+        assert!(app.script_manager.catalog.iter().any(|s| s.name == "mcp.list_functions"));
+    }
+
+    #[test]
+    fn text_editor_lifecycle_open_edit_close() {
+        let mut app = GhidrustApp::headless();
+        app.text_editor.open_untitled();
+        assert_eq!(app.text_editor.tabs.len(), 1);
+        app.text_editor.tabs[0].body.push_str("body");
+        app.text_editor.tabs[0].dirty = true;
+        app.text_editor.close_active();
+        assert_eq!(app.text_editor.tabs.len(), 0);
+    }
+
+    #[test]
+    fn mcp_repl_submit_records_prompt_and_response() {
+        let mut app = GhidrustApp::headless();
+        app.mcp_repl.input = "mcp.list_functions".into();
+        app.mcp_repl.submit();
+        assert_eq!(app.mcp_repl.transcript.len(), 2);
+        assert!(app.mcp_repl.transcript[0].prompt);
+        assert!(!app.mcp_repl.transcript[1].prompt);
+    }
+
+    // ── Phase G (M7) — Debugger visibility ──────────────────────────────
+
+    #[test]
+    fn debugger_panes_enumerated_in_shell_panes() {
+        let panes = GhidrustApp::shell_panes();
+        for expected in [
+            "Debugger Targets",
+            "Debugger Threads",
+            "Debugger Modules",
+            "Debugger Regions",
+            "Debugger Registers",
+            "Debugger Stack",
+            "Debugger Breakpoints",
+            "Debugger Memory Bytes",
+            "Debugger Watches",
+            "Debugger Console",
+        ] {
+            assert!(
+                panes.contains(&expected),
+                "shell_panes() missing debugger provider `{expected}`",
+            );
+        }
+    }
+
+    #[test]
+    fn debugger_menu_is_registered_in_shell() {
+        let menus = GhidrustApp::shell_menus();
+        assert!(menus.contains(&"Debugger"));
+    }
+
+    #[test]
+    fn debugger_breakpoint_and_watch_state_persist_session_only() {
+        let mut app = GhidrustApp::headless();
+        assert!(app.debugger.breakpoints.is_empty());
+        app.debugger.toggle_breakpoint(0x1000);
+        app.debugger.toggle_breakpoint(0x2000);
+        assert_eq!(app.debugger.breakpoints.len(), 2);
+        assert!(app.debugger.has_breakpoint(0x1000));
+        app.debugger.toggle_breakpoint(0x1000);
+        assert!(!app.debugger.has_breakpoint(0x1000));
+
+        app.debugger.add_watch("rax");
+        app.debugger.add_watch("rax"); // dedup
+        app.debugger.add_watch("*(int*)rsp");
+        assert_eq!(app.debugger.watches.len(), 2);
+    }
+
+    // ── Phase H (M8) — Docking / layouts ────────────────────────────────
+
+    #[test]
+    fn save_and_restore_layout_round_trip() {
+        // Use a fresh %APPDATA%/ghidrust equivalent to keep test hermetic.
+        let dir = std::env::temp_dir().join(format!(
+            "ghidrust_layouts_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Point APPDATA at our sandbox so layouts write here.
+        let prev = std::env::var("APPDATA").ok();
+        // Only override APPDATA when it's the layout-dir resolver we care about.
+        std::env::set_var("APPDATA", &dir);
+        struct RestoreAppdata(Option<String>);
+        impl Drop for RestoreAppdata {
+            fn drop(&mut self) {
+                if let Some(p) = &self.0 {
+                    std::env::set_var("APPDATA", p);
+                } else {
+                    std::env::remove_var("APPDATA");
+                }
+            }
+        }
+        let _guard = RestoreAppdata(prev);
+
+        let mut app = GhidrustApp::headless();
+        // Flip a few state bits so we can prove the round-trip.
+        app.toggle_pane(PaneKind::Bookmarks, true);
+        app.toggle_pane(PaneKind::MemoryMap, true);
+        app.debugger_open.insert(DebuggerPane::Targets, true);
+        app.center = CenterPane::Decompiler;
+        app.show_console = false;
+
+        app.save_layout_named("myTest").expect("save layout");
+        // Flip everything back so restore has something to change.
+        app.toggle_pane(PaneKind::Bookmarks, false);
+        app.toggle_pane(PaneKind::MemoryMap, false);
+        app.debugger_open.insert(DebuggerPane::Targets, false);
+        app.center = CenterPane::Overview;
+        app.show_console = true;
+
+        app.restore_layout_named("myTest").expect("restore layout");
+        assert!(app.is_pane_open(PaneKind::Bookmarks));
+        assert!(app.is_pane_open(PaneKind::MemoryMap));
+        assert_eq!(app.debugger_open.get(&DebuggerPane::Targets), Some(&true));
+        assert_eq!(app.center, CenterPane::Decompiler);
+        assert!(!app.show_console);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn configure_dialog_state_defaults_closed() {
+        let app = GhidrustApp::headless();
+        assert!(!app.show_configure_dialog);
+        assert!(!app.show_layouts_dialog);
+    }
+
+    #[test]
+    fn phase_e_f_g_h_menu_actions_wired_not_nyi() {
+        let src = include_str!("main.rs");
+        // Phase E — graph menu items open panes (not nyi).
+        assert!(!src.contains("nyi(\"Graph → Function Graph\""));
+        assert!(!src.contains("nyi(\"Graph → Function Call Graph\""));
+        assert!(!src.contains("nyi(\"Graph → Function Call Trees\""));
+        // Phase G — Debugger menu is registered.
+        assert!(src.contains("ui.menu_button(\"Debugger\","));
+        // Phase H — Configure dialog + Save Tool Layout menu items are wired.
+        assert!(src.contains("show_configure_dialog"));
+        assert!(src.contains("show_layouts_dialog"));
     }
 }

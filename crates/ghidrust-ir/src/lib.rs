@@ -111,6 +111,14 @@ pub enum OpCode {
     IntOr,
     /// `out = in0 * in1` (low half).
     IntMult,
+    /// `out = in0 / in1` (unsigned division).
+    IntDiv,
+    /// `out = in0 / in1` (signed division).
+    IntSDiv,
+    /// `out = in0 % in1` (unsigned remainder).
+    IntRem,
+    /// `out = in0 % in1` (signed remainder).
+    IntSRem,
     /// `out = in0 << in1` (logical left shift).
     IntLeft,
     /// `out = in0 >> in1` (logical right shift).
@@ -161,6 +169,24 @@ pub enum OpCode {
     Pop,
     /// No-op / hint. Preserved so structural passes see the instruction.
     Nop,
+    /// Architectural trap (`int3`, `hlt`, `ud2`) — modelled explicitly so
+    /// SSA/structuring can decide whether the block terminates. Consumers
+    /// treat this as an opaque side-effect with no def.
+    Trap,
+    /// `out = concat(in0, in1)` — Ghidra `PIECE`: joins two subwords into a
+    /// wider value. `in0` is the high half, `in1` is the low half, and
+    /// `out.size == in0.size + in1.size`.
+    Piece,
+    /// `out = in0 >> (in1 * 8)` truncated to `out.size` — Ghidra
+    /// `SUBPIECE`. `in1` names the byte offset from the LSB.
+    Subpiece,
+    /// `out = in0 + in1 * <element size>` — Ghidra `PTRADD`. Semantically
+    /// identical to `IntAdd` for byte arithmetic but preserves the "array
+    /// index" shape so type recovery / emit can print `p[i]`.
+    Ptradd,
+    /// `out = (T)in0` — Ghidra `CAST`. Bit-preserving reinterpretation
+    /// used when Stage-1 emit needs to insert an explicit `(uint32_t)`.
+    Cast,
     /// ISA op not yet lifted — mnemonic preserved in [`PcodeOp::note`].
     Unimplemented,
 }
@@ -346,6 +372,28 @@ mod tests {
             OpCode::BranchInd,
             OpCode::CallInd,
             OpCode::Nop,
+        ] {
+            let node = PcodeOp::new(op, None, vec![]);
+            assert_eq!(node.opcode, op);
+        }
+    }
+
+    #[test]
+    fn opcode_set_covers_phase_a_pcode_additions() {
+        // Phase A extensions from the P0 parity plan: division family,
+        // Trap for int3/hlt, and the Ghidra bit-manipulation ops
+        // (PIECE/SUBPIECE/PTRADD/CAST) that Stage-1 emit will need as
+        // lift coverage grows.
+        for op in [
+            OpCode::IntDiv,
+            OpCode::IntSDiv,
+            OpCode::IntRem,
+            OpCode::IntSRem,
+            OpCode::Trap,
+            OpCode::Piece,
+            OpCode::Subpiece,
+            OpCode::Ptradd,
+            OpCode::Cast,
         ] {
             let node = PcodeOp::new(op, None, vec![]);
             assert_eq!(node.opcode, op);

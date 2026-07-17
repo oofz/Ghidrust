@@ -418,6 +418,328 @@ fn format_operand(op: &SsaOperand) -> String {
     }
 }
 
+/// Constant fold pure arithmetic on `SsaOp` inputs.
+///
+/// Iterates until fixed point (bounded by a small max) rewriting ops whose
+/// inputs are both constants into a `Copy` from a fresh
+/// [`SsaOperand::Const`] with the folded value. Only wraps arithmetic that
+/// has a well-defined 64-bit two's-complement semantic (add/sub/xor/and/or,
+/// small shifts, negate, not, equality) — anything that would require
+/// full-width overflow reasoning (mul, sdiv) is left alone.
+///
+/// Returns the total number of ops rewritten.
+pub fn const_fold(func: &mut SsaFunction) -> usize {
+    let mut total = 0usize;
+    for _ in 0..8 {
+        let mut rewrote = 0usize;
+        for b in &mut func.blocks {
+            for op in &mut b.ops {
+                let Some(dst) = op.output else {
+                    continue;
+                };
+                let a_const = op.inputs.first().and_then(SsaOperand::as_const);
+                let b_const = op.inputs.get(1).and_then(SsaOperand::as_const);
+                let width = dst.size.max(1);
+                let mask = if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                let folded = match op.opcode {
+                    OpCode::IntAdd => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(a.wrapping_add(b) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntSub => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(a.wrapping_sub(b) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntXor => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some((a ^ b) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntAnd => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some((a & b) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntOr => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some((a | b) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntLeft => match (a_const, b_const) {
+                        (Some(a), Some(b)) if b < 64 => Some((a.wrapping_shl(b as u32)) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntRight => match (a_const, b_const) {
+                        (Some(a), Some(b)) if b < 64 => Some((a.wrapping_shr(b as u32)) & mask),
+                        _ => None,
+                    },
+                    OpCode::IntSRight => match (a_const, b_const) {
+                        (Some(a), Some(b)) if b < 64 => {
+                            Some((((a as i64).wrapping_shr(b as u32)) as u64) & mask)
+                        }
+                        _ => None,
+                    },
+                    OpCode::IntNegate => a_const.map(|a| (0u64.wrapping_sub(a)) & mask),
+                    OpCode::IntNot => a_const.map(|a| (!a) & mask),
+                    OpCode::IntEqual => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(if a == b { 1 } else { 0 }),
+                        _ => None,
+                    },
+                    OpCode::IntNotEqual => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(if a != b { 1 } else { 0 }),
+                        _ => None,
+                    },
+                    OpCode::IntLess => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(if a < b { 1 } else { 0 }),
+                        _ => None,
+                    },
+                    OpCode::IntLessEqual => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(if a <= b { 1 } else { 0 }),
+                        _ => None,
+                    },
+                    OpCode::IntSLess => match (a_const, b_const) {
+                        (Some(a), Some(b)) => Some(if (a as i64) < (b as i64) { 1 } else { 0 }),
+                        _ => None,
+                    },
+                    OpCode::IntSLessEqual => match (a_const, b_const) {
+                        (Some(a), Some(b)) => {
+                            Some(if (a as i64) <= (b as i64) { 1 } else { 0 })
+                        }
+                        _ => None,
+                    },
+                    OpCode::IntZExt | OpCode::IntSExt | OpCode::Copy | OpCode::Cast => {
+                        // Extension of a const is that const truncated /
+                        // sign-extended to the destination width.
+                        a_const.map(|a| match op.opcode {
+                            OpCode::IntSExt => {
+                                let src_size = op
+                                    .inputs
+                                    .first()
+                                    .map(|v| v.varnode().size)
+                                    .unwrap_or(width);
+                                if src_size >= 8 {
+                                    a & mask
+                                } else {
+                                    let bits = (src_size * 8) as u32;
+                                    let sign_bit = 1u64 << (bits - 1);
+                                    if a & sign_bit != 0 {
+                                        let ext = !((1u64 << bits) - 1);
+                                        (a | ext) & mask
+                                    } else {
+                                        a & mask
+                                    }
+                                }
+                            }
+                            _ => a & mask,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(v) = folded {
+                    op.opcode = OpCode::Copy;
+                    op.inputs = vec![SsaOperand::Const(Varnode {
+                        space: AddrSpace::Constant,
+                        offset: v,
+                        size: dst.size,
+                    })];
+                    rewrote += 1;
+                }
+            }
+        }
+        total += rewrote;
+        if rewrote == 0 {
+            break;
+        }
+        // Re-run copy propagation between folds so downstream ops see the
+        // new constants immediately.
+        copy_propagate(func);
+    }
+    total
+}
+
+/// Dead-code elimination: drop `SsaOp`s whose output is never used and
+/// whose opcode has no side effect. Phis with unused outputs are also
+/// dropped. Ops that touch memory / control flow (`Load`, `Store`, `Call`,
+/// `Push`, `Pop`, `Return`, branch family, `Trap`, `Nop`, `Unimplemented`)
+/// are always kept — DCE deliberately preserves any op that could observe
+/// or perturb program state.
+///
+/// Returns the number of ops (including phis) removed. May be called
+/// repeatedly until it returns zero.
+pub fn dead_code_eliminate(func: &mut SsaFunction) -> usize {
+    let mut total = 0usize;
+    for _ in 0..32 {
+        // Collect all values used anywhere.
+        let mut used: BTreeSet<SsaValue> = BTreeSet::new();
+        // Seed "return-value" registers as implicit uses so ABI-visible
+        // writes (e.g. `xor eax, eax` before `ret`) aren't discarded. On
+        // x86-64 SysV / Windows the integer return register is rax (offset
+        // 0); we also treat rdx (offset 2) as a potential high-half return
+        // to be safe. This matches Ghidra Decompiler's default liveness for
+        // integer functions — we don't yet track floating-point returns.
+        for b in &func.blocks {
+            for op in &b.ops {
+                if let Some(out) = op.output {
+                    if out.space == AddrSpace::Register && (out.offset == 0 || out.offset == 2) {
+                        used.insert(out);
+                    }
+                }
+            }
+            for phi in &b.phis {
+                if phi.out.space == AddrSpace::Register
+                    && (phi.out.offset == 0 || phi.out.offset == 2)
+                {
+                    used.insert(phi.out);
+                }
+            }
+        }
+        for b in &func.blocks {
+            for op in &b.ops {
+                mark_used(&op.inputs, &mut used);
+            }
+            for phi in &b.phis {
+                for (_, val) in &phi.incoming {
+                    if let Some(v) = val {
+                        used.insert(*v);
+                    }
+                }
+            }
+        }
+        let mut removed = 0usize;
+        for b in &mut func.blocks {
+            let before = b.ops.len();
+            b.ops.retain(|op| {
+                if !opcode_pure(op.opcode) {
+                    return true;
+                }
+                match op.output {
+                    Some(out) => used.contains(&out),
+                    None => true,
+                }
+            });
+            removed += before - b.ops.len();
+            let before_phi = b.phis.len();
+            b.phis.retain(|phi| used.contains(&phi.out));
+            removed += before_phi - b.phis.len();
+        }
+        total += removed;
+        if removed == 0 {
+            break;
+        }
+    }
+    total
+}
+
+fn mark_used(inputs: &[SsaOperand], used: &mut BTreeSet<SsaValue>) {
+    for inp in inputs {
+        if let SsaOperand::Value(v) = inp {
+            used.insert(*v);
+        }
+    }
+}
+
+/// True when the opcode has no observable side-effect beyond writing its
+/// SSA output. DCE is only safe to drop these when the output is dead.
+fn opcode_pure(op: OpCode) -> bool {
+    matches!(
+        op,
+        OpCode::Copy
+            | OpCode::IntAdd
+            | OpCode::IntSub
+            | OpCode::IntXor
+            | OpCode::IntAnd
+            | OpCode::IntOr
+            | OpCode::IntMult
+            | OpCode::IntDiv
+            | OpCode::IntSDiv
+            | OpCode::IntRem
+            | OpCode::IntSRem
+            | OpCode::IntLeft
+            | OpCode::IntRight
+            | OpCode::IntSRight
+            | OpCode::IntNegate
+            | OpCode::IntNot
+            | OpCode::IntEqual
+            | OpCode::IntNotEqual
+            | OpCode::IntLess
+            | OpCode::IntLessEqual
+            | OpCode::IntSLess
+            | OpCode::IntSLessEqual
+            | OpCode::IntSExt
+            | OpCode::IntZExt
+            | OpCode::BoolAnd
+            | OpCode::BoolOr
+            | OpCode::BoolNegate
+            | OpCode::Cast
+            | OpCode::Piece
+            | OpCode::Subpiece
+            | OpCode::Ptradd
+    )
+}
+
+/// Load / store propagation (conservative alias rules).
+///
+/// Recognises the specific idiom `Store addr, val` followed later in the
+/// same block by `Load addr` where `addr` is exactly the same SSA operand
+/// (including version). The subsequent load's output is rewritten to
+/// forward the stored value directly, which lets downstream copy-prop and
+/// DCE remove the redundant round-trip. Anything with even weak aliasing
+/// ambiguity (different address versions, another store between, a call in
+/// between, a different address space) is left untouched.
+///
+/// Returns the number of load ops rewritten. Loads that were replaced
+/// stay as `Copy` from the propagated value so `SsaFunction` invariants
+/// (per-value single-def in SSA) hold.
+pub fn load_store_propagate(func: &mut SsaFunction) -> usize {
+    let mut rewrote = 0usize;
+    for b in &mut func.blocks {
+        // Iterate index-by-index because we may mutate later ops.
+        for i in 0..b.ops.len() {
+            let (addr_key, stored_val) = match &b.ops[i] {
+                op if op.opcode == OpCode::Store => {
+                    let Some(addr) = op.inputs.first() else {
+                        continue;
+                    };
+                    let Some(val) = op.inputs.get(1) else {
+                        continue;
+                    };
+                    (addr.clone(), val.clone())
+                }
+                _ => continue,
+            };
+            // Walk forward until an alias-breaking op or the next definition
+            // of `addr` / a load of the same addr.
+            for j in (i + 1)..b.ops.len() {
+                let opcode_j = b.ops[j].opcode;
+                // Bail on anything that could redefine memory beneath us.
+                if matches!(
+                    opcode_j,
+                    OpCode::Store
+                        | OpCode::Call
+                        | OpCode::CallInd
+                        | OpCode::Return
+                        | OpCode::Push
+                        | OpCode::Pop
+                        | OpCode::Trap
+                ) {
+                    break;
+                }
+                if opcode_j == OpCode::Load {
+                    let Some(load_addr) = b.ops[j].inputs.first().cloned() else {
+                        break;
+                    };
+                    if load_addr == addr_key {
+                        // Rewrite the load's op stream to a Copy of the
+                        // stored value; leave the output def alone so SSA
+                        // continues to type-check.
+                        b.ops[j].opcode = OpCode::Copy;
+                        b.ops[j].inputs = vec![stored_val.clone()];
+                        rewrote += 1;
+                    }
+                }
+            }
+        }
+    }
+    rewrote
+}
+
 /// Copy-propagation: replace a chain of `Copy` ops with the ultimate source,
 /// when the source itself is a value / const (not another chain). Runs after
 /// [`build_ssa`] and mutates the function in place. Returns the number of
@@ -432,6 +754,13 @@ pub fn copy_propagate(func: &mut SsaFunction) -> usize {
         for op in &b.ops {
             if op.opcode == OpCode::Copy {
                 if let (Some(out), Some(src)) = (op.output, op.inputs.first()) {
+                    // Skip identity copies (`x = x`) that would introduce a
+                    // self-cycle in the source table.
+                    if let SsaOperand::Value(v) = src {
+                        if *v == out {
+                            continue;
+                        }
+                    }
                     sources.insert(out, src.clone());
                 }
             }
@@ -598,6 +927,131 @@ mod tests {
         let dump = dump_ssa(&func);
         assert!(dump.contains("φ("), "dump should show phi op: {dump}");
         assert!(dump.contains("reg0#"), "dump should show versioned rax: {dump}");
+    }
+
+    #[test]
+    fn const_fold_reduces_add_of_two_constants() {
+        // t0 = 0x100; t1 = 0x20; t2 = t0 + t1; return t2
+        let mut seq = IrSequence::new();
+        let t0 = Varnode::unique(0, 8);
+        let t1 = Varnode::unique(1, 8);
+        let t2 = Varnode::unique(2, 8);
+        seq.push_addressed(
+            0x0,
+            1,
+            PcodeOp::new(OpCode::Copy, Some(t0.clone()), vec![Varnode::constant(0x100, 8)]),
+        );
+        seq.push_addressed(
+            0x1,
+            1,
+            PcodeOp::new(OpCode::Copy, Some(t1.clone()), vec![Varnode::constant(0x20, 8)]),
+        );
+        seq.push_addressed(
+            0x2,
+            1,
+            PcodeOp::new(OpCode::IntAdd, Some(t2.clone()), vec![t0, t1]),
+        );
+        seq.push_addressed(0x3, 1, PcodeOp::new(OpCode::Return, None, vec![t2]));
+        let cfg = build_cfg(&seq, 0x0, 0x4);
+        let mut func = build_ssa(&cfg);
+        copy_propagate(&mut func);
+        let rewrote = const_fold(&mut func);
+        assert!(rewrote > 0, "const_fold should rewrite the add");
+        let ret = func.blocks[0]
+            .ops
+            .iter()
+            .find(|o| o.opcode == OpCode::Return)
+            .expect("return");
+        assert_eq!(ret.inputs[0].as_const(), Some(0x120));
+    }
+
+    #[test]
+    fn dce_drops_unused_pure_ops() {
+        // t0 = 1; t1 = 2; t2 = t0 + t1;   (t2 is never used → DCE drops all three)
+        // return   (no operands)
+        let mut seq = IrSequence::new();
+        let t0 = Varnode::unique(0, 8);
+        let t1 = Varnode::unique(1, 8);
+        let t2 = Varnode::unique(2, 8);
+        seq.push_addressed(
+            0x0,
+            1,
+            PcodeOp::new(OpCode::Copy, Some(t0.clone()), vec![Varnode::constant(1, 8)]),
+        );
+        seq.push_addressed(
+            0x1,
+            1,
+            PcodeOp::new(OpCode::Copy, Some(t1.clone()), vec![Varnode::constant(2, 8)]),
+        );
+        seq.push_addressed(
+            0x2,
+            1,
+            PcodeOp::new(OpCode::IntAdd, Some(t2), vec![t0, t1]),
+        );
+        seq.push_addressed(0x3, 1, PcodeOp::new(OpCode::Return, None, vec![]));
+        let cfg = build_cfg(&seq, 0x0, 0x4);
+        let mut func = build_ssa(&cfg);
+        let before = func.blocks[0].ops.len();
+        let removed = dead_code_eliminate(&mut func);
+        assert!(removed >= 3, "expected at least 3 dead ops removed; got {removed}");
+        assert!(func.blocks[0].ops.len() < before);
+        // Return must survive because it's a control-flow op.
+        assert!(func.blocks[0]
+            .ops
+            .iter()
+            .any(|o| o.opcode == OpCode::Return));
+    }
+
+    #[test]
+    fn load_store_propagate_forwards_stored_value() {
+        // *addr = t0; t1 = *addr; return t1
+        let mut seq = IrSequence::new();
+        let addr = Varnode::unique(9, 8);
+        let val = Varnode::unique(10, 8);
+        let dst = Varnode::unique(11, 8);
+        seq.push_addressed(
+            0x0,
+            1,
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(addr.clone()),
+                vec![Varnode::constant(0x1000, 8)],
+            ),
+        );
+        seq.push_addressed(
+            0x1,
+            1,
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(val.clone()),
+                vec![Varnode::constant(0xabcd, 8)],
+            ),
+        );
+        seq.push_addressed(
+            0x2,
+            1,
+            PcodeOp::new(OpCode::Store, None, vec![addr.clone(), val.clone()]),
+        );
+        seq.push_addressed(
+            0x3,
+            1,
+            PcodeOp::new(OpCode::Load, Some(dst.clone()), vec![addr]),
+        );
+        seq.push_addressed(0x4, 1, PcodeOp::new(OpCode::Return, None, vec![dst]));
+        let cfg = build_cfg(&seq, 0x0, 0x5);
+        let mut func = build_ssa(&cfg);
+        let rewrote = load_store_propagate(&mut func);
+        assert!(rewrote > 0, "load should have been forwarded");
+        // The Load turned into a Copy; run copy_propagate + const_fold to
+        // show the final return propagated the constant.
+        copy_propagate(&mut func);
+        let _ = const_fold(&mut func);
+        let ret = func.blocks[0]
+            .ops
+            .iter()
+            .find(|o| o.opcode == OpCode::Return)
+            .expect("return");
+        assert_eq!(ret.inputs[0].as_const(), Some(0xabcd));
     }
 
     #[test]

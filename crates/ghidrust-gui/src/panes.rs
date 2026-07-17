@@ -195,6 +195,14 @@ impl PaneKind {
                 | PaneKind::RelocationTable
                 | PaneKind::DisassembledView
                 | PaneKind::DefinedData
+                // Phase D (M4) — real backing added.
+                | PaneKind::Bytes
+                | PaneKind::SymbolReferences
+                | PaneKind::EquatesTable
+                | PaneKind::FunctionTags
+                | PaneKind::ExternalPrograms
+                | PaneKind::DataTypePreview
+                | PaneKind::ChecksumGenerator
         )
     }
 
@@ -310,23 +318,23 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
 pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
     match kind {
         PaneKind::Bookmarks => "Backend pending — Bookmarks model + margin markers land in Phase B (M2).",
-        PaneKind::Bytes => "Backend pending — Byte Viewer split hex/ASCII lands in Phase D (M4).",
-        PaneKind::ChecksumGenerator => "Backend pending — checksum dialog lands in Phase D (M4).",
+        PaneKind::Bytes => "",
+        PaneKind::ChecksumGenerator => "",
         PaneKind::CommentWindow => "Backend pending — comment model lands in Phase C (M3).",
         PaneKind::Console => "",
         PaneKind::DataTypeManager => "Backend pending — DTM tree (Built-In / Program / Archive) lands in Phase C (M3).",
-        PaneKind::DataTypePreview => "Backend pending — preview @ cursor lands in Phase D (M4).",
+        PaneKind::DataTypePreview => "",
         PaneKind::DecompiledView => "Stage-0 pseudo-C wired via ghidrust-decomp::decompile_at. Full tokens + rename land in Phase B/C.",
         PaneKind::DefinedData => "Backend pending — Program::data_items model lands in Phase D (M4).",
         PaneKind::DefinedStrings => "Uses ghidrust-core::analyzers::strings::run — session-only until Program::strings lands.",
         PaneKind::DisassembledView => "Backend pending — virtual disassembly + pcode preview lands in Phase D (M4).",
         PaneKind::Entropy => "Backend pending — GPU/CPU histogram lands in Phase E (M5).",
-        PaneKind::EquatesTable => "Backend pending — Equate model lands in Phase C/D.",
-        PaneKind::ExternalPrograms => "Backend pending — external program refs land in Phase D (M4).",
+        PaneKind::EquatesTable => "",
+        PaneKind::ExternalPrograms => "",
         PaneKind::FunctionCallGraph => "Backend pending — level-based directed graph lands in Phase E (M5).",
         PaneKind::FunctionCallTrees => "Backend pending — incoming/outgoing GTree pair lands in Phase E (M5).",
         PaneKind::FunctionGraph => "Backend pending — CFG vertex/edge layout lands in Phase E (M5).",
-        PaneKind::FunctionTags => "Backend pending — Function Tags model lands in Phase C/D.",
+        PaneKind::FunctionTags => "",
         PaneKind::FunctionsWindow => "Uses Program::analysis.functions.",
         PaneKind::Listing => "",
         PaneKind::MemoryMap => "Uses Program::blocks / Program::sections (read-only). Editable table lands in Phase E (M5).",
@@ -337,7 +345,7 @@ pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
         PaneKind::RegisterManager => "Backend pending — SLEIGH register lattice lands in Phase E (M5).",
         PaneKind::RelocationTable => "Uses Program::sections metadata; full PE/ELF reloc parse lands in Phase D (M4).",
         PaneKind::ScriptManager => "Backend pending — script catalog lands in Phase F (M6).",
-        PaneKind::SymbolReferences => "Backend pending — xrefs model lands in Phase D (M4).",
+        PaneKind::SymbolReferences => "",
         PaneKind::SymbolTable => "Uses Program::analysis.symbols + functions (flat table).",
         PaneKind::SymbolTree => "",
         PaneKind::TextEditor => "Backend pending — script editor lands in Phase F (M6).",

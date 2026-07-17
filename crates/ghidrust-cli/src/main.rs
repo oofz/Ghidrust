@@ -66,8 +66,8 @@ fn print_help() {
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
-           ghidrust decompile <path> [--addr HEX] [--count N] [--stage05|--stage1] [--json]\n\
-           ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--json]\n\
+           ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1 (default)] [--json]\n\
+           ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--stage1] [--parallel] [--json]\n\
            ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]\n\
            ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]\n\
            ghidrust re-bench <path> [--out FILE] [--json]  # CPU then GPU metrics (decomp+bulk)\n\
@@ -941,15 +941,19 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!(
-                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage05] [--json]"
+                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--json]"
             );
             return ExitCode::from(2);
         }
     };
     let mut addr: Option<u64> = None;
     let mut count: usize = 64;
+    // Phase F: Stage-1 is the product default. `--stage0` / `--stage05`
+    // opt out for oracle / regression comparisons; explicit `--stage1`
+    // is accepted for symmetry.
     let mut stage05 = false;
-    let mut stage1 = false;
+    let mut stage0 = false;
+    let mut stage1 = true;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -961,17 +965,27 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 count = args[i + 1].parse().unwrap_or(64);
                 i += 2;
             }
+            "--stage0" | "--stage-0" | "--legacy" => {
+                stage0 = true;
+                stage1 = false;
+                stage05 = false;
+                i += 1;
+            }
             "--stage05" | "--stage-0.5" | "--ir" => {
                 stage05 = true;
+                stage1 = false;
                 i += 1;
             }
             "--stage1" | "--stage-1" | "--ssa" => {
                 stage1 = true;
+                stage05 = false;
+                stage0 = false;
                 i += 1;
             }
             _ => i += 1,
         }
     }
+    let _ = stage0; // suppressed; retained for future gating
     match load_path(&path) {
         Ok(prog) => {
             let va = addr.unwrap_or_else(|| prog.entry.unwrap_or(prog.image_base));
@@ -1089,7 +1103,7 @@ fn cmd_decompile_bench(args: &[String], json: bool) -> ExitCode {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!(
-                "usage: ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--json]"
+                "usage: ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--stage1] [--parallel] [--json]"
             );
             return ExitCode::from(2);
         }
@@ -1097,6 +1111,12 @@ fn cmd_decompile_bench(args: &[String], json: bool) -> ExitCode {
     let mut max_functions: usize = 32;
     let mut count: usize = 128;
     let mut out_path: Option<PathBuf> = None;
+    // Phase F: `--stage1` opts into the Stage-1 bench (SSA + structure +
+    // types) with per-entry pseudo-C text captured. `--parallel` runs the
+    // per-entry Stage-1 pipeline across a rayon thread pool. Both default
+    // off to keep back-compat with the shipped decompile-bench numbers.
+    let mut stage1 = false;
+    let mut parallel = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1112,6 +1132,15 @@ fn cmd_decompile_bench(args: &[String], json: bool) -> ExitCode {
                 out_path = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--stage1" | "--stage-1" => {
+                stage1 = true;
+                i += 1;
+            }
+            "--parallel" | "--rayon" => {
+                parallel = true;
+                stage1 = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
@@ -1122,10 +1151,19 @@ fn cmd_decompile_bench(args: &[String], json: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Run default analyzers so `decompile-bench` picks up whatever functions
-    // the analyzer stack recovers; missing functions falls back to entry.
     let _ = ghidrust_core::run_analyzers(&mut prog, &[]);
-    let report = ghidrust_decomp::bench_program(&prog, max_functions, count);
+    let conv = if prog.format.to_ascii_lowercase().contains("pe") {
+        ghidrust_types::CallConv::Windows
+    } else {
+        ghidrust_types::CallConv::SystemV
+    };
+    let report = if stage1 && parallel {
+        ghidrust_decomp::bench_program_stage1_parallel(&prog, None, max_functions, count, conv)
+    } else if stage1 {
+        ghidrust_decomp::bench_program_stage1(&prog, None, max_functions, count, conv)
+    } else {
+        ghidrust_decomp::bench_program(&prog, max_functions, count)
+    };
     let output = if json { report.to_json() } else { report.to_text() };
     if let Some(path) = out_path {
         if let Err(e) = std::fs::write(&path, &output) {
@@ -1689,6 +1727,24 @@ fn tool_defs() -> Vec<ToolDef> {
             input_schema: json!({ "type": "object", "properties": {} }),
         },
         ToolDef {
+            name: "decompile",
+            description: "Decompile function to structured C. Defaults to Stage-1 (SSA + types + structure). Pass stage='stage0' or 'stage05' for oracle output.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string", "description": "Function entry VA in hex (default: program entry)" },
+                    "count": { "type": "integer", "description": "Max instructions to decode (default: 64)" },
+                    "stage": {
+                        "type": "string",
+                        "enum": ["stage0", "stage05", "stage1"],
+                        "description": "Emit stage. Default 'stage1' — full SSA + types + structure."
+                    }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
             name: "gpu_decompile",
             description: "GPU-resident multipass decompile of entry; returns dump metrics (PCIe/device when available)",
             input_schema: json!({
@@ -1860,6 +1916,82 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 "device": row.device,
             }))
             .unwrap())
+        }
+        "decompile" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let count = args.get("count").and_then(|c| c.as_u64()).unwrap_or(64) as usize;
+            let stage = args
+                .get("stage")
+                .and_then(|s| s.as_str())
+                .unwrap_or("stage1");
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let va = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
+                parse_u64(a)?
+            } else {
+                prog.entry.unwrap_or(prog.image_base)
+            };
+            let conv = if prog.format.to_ascii_lowercase().contains("pe") {
+                ghidrust_types::CallConv::Windows
+            } else {
+                ghidrust_types::CallConv::SystemV
+            };
+            match stage {
+                "stage0" | "stage-0" => {
+                    let d =
+                        ghidrust_decomp::decompile_at(&prog, va, count).map_err(|e| e.to_string())?;
+                    Ok(serde_json::to_string_pretty(&json!({
+                        "stage": "0",
+                        "name": d.name,
+                        "entry": format!("{:#x}", d.entry),
+                        "blocks": d.blocks.len(),
+                        "edges": d.edges.len(),
+                        "insns": d.insn_count,
+                        "pseudo_c": d.pseudo_c,
+                    }))
+                    .unwrap())
+                }
+                "stage05" | "stage-0.5" | "ir" => {
+                    let (d, cov) = ghidrust_decomp::decompile_ir_at(&prog, va, count)
+                        .map_err(|e| e.to_string())?;
+                    Ok(serde_json::to_string_pretty(&json!({
+                        "stage": "0.5",
+                        "name": d.name,
+                        "entry": format!("{:#x}", d.entry),
+                        "blocks": d.blocks.len(),
+                        "edges": d.edges.len(),
+                        "insns": d.insn_count,
+                        "lift_ratio": cov.ratio(),
+                        "pseudo_c": d.pseudo_c,
+                    }))
+                    .unwrap())
+                }
+                _ => {
+                    // Default (Phase F): Stage-1 full pipeline.
+                    let (d, s1) = ghidrust_decomp::decompile_stage1_at(&prog, va, count, conv)
+                        .map_err(|e| e.to_string())?;
+                    Ok(serde_json::to_string_pretty(&json!({
+                        "stage": "1",
+                        "name": d.name,
+                        "entry": format!("{:#x}", d.entry),
+                        "blocks": d.blocks.len(),
+                        "insns": d.insn_count,
+                        "loops": s1.structure.loops.len(),
+                        "phis": s1.ssa.phi_count(),
+                        "locals": s1.types.locals.len(),
+                        "params": s1.types.params.len(),
+                        "structs": s1.types.structs.len(),
+                        "lift_ratio": s1.coverage.ratio(),
+                        "goto_rate": s1.summary().goto_rate,
+                        "return_type": s1.types.signature.return_type.c_style(),
+                        "prototype": s1.types.signature.to_prototype(),
+                        "pseudo_c": d.pseudo_c,
+                    }))
+                    .unwrap())
+                }
+            }
         }
         "load" | "disassemble" | "rtti" | "analyze" => {
             let path = args

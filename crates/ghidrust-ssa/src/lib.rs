@@ -24,8 +24,8 @@
 pub mod ssa;
 
 pub use ssa::{
-    build_ssa, copy_propagate, dump_ssa, PhiNode, SsaBlock, SsaFunction, SsaOp, SsaOperand,
-    SsaValue,
+    build_ssa, const_fold, copy_propagate, dead_code_eliminate, dump_ssa, load_store_propagate,
+    PhiNode, SsaBlock, SsaFunction, SsaOp, SsaOperand, SsaValue,
 };
 
 use ghidrust_ir::{BasicBlock, IrSequence, OpCode, PcodeOp, Varnode};

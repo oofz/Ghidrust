@@ -33,8 +33,9 @@
 //! `analyzeHeadless`, which script to run, and where to point the harness.
 //! Nothing is invented.
 
-use crate::{bench_program, BenchReport};
+use crate::{bench_program, bench_program_stage1, BenchReport};
 use ghidrust_core::Program;
+use ghidrust_types::CallConv;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -81,6 +82,60 @@ pub struct GhidraOracleConfig {
     /// (`DecompileAndReport.java <out.json> <max_fn>`); the Java script
     /// treats a missing or non-numeric value as "no cap".
     pub ghidra_fn_cap: Option<usize>,
+    /// Which Ghidrust emit stage to use for the per-entry rows. Stage-1
+    /// is the fair comparison (Phase E of the pcode parity plan) since
+    /// it goes head-to-head with Ghidra's `DecompInterface` output;
+    /// Stage-0 stays available as an oracle for regression checks.
+    #[serde(default)]
+    pub ghidrust_stage: GhidrustStage,
+    /// Calling convention used for Stage-1 recovery. Defaults to
+    /// SystemV; callers on Windows binaries typically override.
+    #[serde(default)]
+    pub call_conv: GhidrustCallConv,
+}
+
+/// Which Ghidrust emit stage to run for the head-to-head. Stage-1 is the
+/// only shape suitable for a *fair* Ghidra comparison — Stage-0 is
+/// mnemonic-scaffolding and Stage-0.5 is IR-informed but pre-SSA. The
+/// enum lives here so callers can select mode via the CLI/GUI without
+/// depending on the internal emit crate names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GhidrustStage {
+    Stage0,
+    Stage05,
+    Stage1,
+}
+
+impl Default for GhidrustStage {
+    fn default() -> Self {
+        // Phase F flips the product default to Stage-1; the oracle
+        // follows so the head-to-head is fair by default.
+        GhidrustStage::Stage1
+    }
+}
+
+/// Calling convention selector for the oracle harness. Kept a separate
+/// enum from [`ghidrust_types::CallConv`] purely so the config surface
+/// serialises stably to JSON without leaking internal types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GhidrustCallConv {
+    SystemV,
+    Windows,
+}
+
+impl Default for GhidrustCallConv {
+    fn default() -> Self {
+        GhidrustCallConv::SystemV
+    }
+}
+
+impl From<GhidrustCallConv> for CallConv {
+    fn from(c: GhidrustCallConv) -> Self {
+        match c {
+            GhidrustCallConv::SystemV => CallConv::SystemV,
+            GhidrustCallConv::Windows => CallConv::Windows,
+        }
+    }
 }
 
 impl GhidraOracleConfig {
@@ -109,6 +164,21 @@ pub struct StructuralMatch {
     pub ghidrust_insns: usize,
     pub match_kind: MatchKind,
     pub notes: String,
+    /// Normalized token similarity between Ghidrust Stage-1 text and
+    /// Ghidra `DecompInterface` output on the same entry. `1.0` = strong
+    /// token overlap; `0.0` = disjoint. Missing (`None`) when either
+    /// side didn't produce text — this is the fair-metric replacement
+    /// for the earlier `{`-count proxy.
+    #[serde(default)]
+    pub token_similarity: Option<f32>,
+    /// Ghidrust Stage-1 wall-clock in µs on the same shared-entry
+    /// corpus. `0` when Stage-1 wasn't run (legacy Stage-0/0.5 rows).
+    #[serde(default)]
+    pub ghidrust_stage1_us: u128,
+    /// Ghidra `DecompInterface.decompileFunction` wall-clock in µs from
+    /// the captured JSON. `None` when the row was Ghidra-side-missing.
+    #[serde(default)]
+    pub ghidra_wall_us: Option<u128>,
 }
 
 /// Coarse match kind for a single-function comparison. We deliberately do
@@ -149,13 +219,14 @@ impl GhidraOracleReport {
 
     pub fn to_text(&self) -> String {
         let mut s = String::new();
-        s.push_str("=== Ghidrust ↔ Ghidra head-to-head oracle ===\n");
+        s.push_str("=== Ghidrust ↔ Ghidra head-to-head oracle (Phase E, shared-entry, Stage-1) ===\n");
         s.push_str(&format!("image: {}\n", self.image));
         s.push_str(&format!(
-            "ghidrust: functions={} stage0_wall_ms={:.3} stage0.5_wall_ms={:.3} lift_avg={:.1}%\n",
+            "ghidrust: functions={} stage0_wall_ms={:.3} stage0.5_wall_ms={:.3} stage1_wall_ms={:.3} lift_avg={:.1}%\n",
             self.ghidrust.function_count,
             self.ghidrust.stage0_total_us as f64 / 1000.0,
             self.ghidrust.stage05_total_us as f64 / 1000.0,
+            self.ghidrust.stage1_total_us as f64 / 1000.0,
             self.ghidrust.avg_lift_ratio * 100.0
         ));
         match self.ghidra_total_us {
@@ -167,16 +238,27 @@ impl GhidraOracleReport {
             self.harness_us as f64 / 1000.0,
             self.ghidra_unavailable
         ));
-        s.push_str("--- per-function ---\n");
+        s.push_str("--- per-function (shared entries only) ---\n");
         for r in &self.rows {
+            let sim = match r.token_similarity {
+                Some(v) => format!("sim={:.2}", v),
+                None => "sim=—".to_string(),
+            };
+            let ghidra_wall = match r.ghidra_wall_us {
+                Some(us) => format!("ghidra={:.3}ms", us as f64 / 1000.0),
+                None => "ghidra=—".to_string(),
+            };
             s.push_str(&format!(
-                "  {:016x}  {:>28}  ghidrust=b{}/i{}  ghidra≈b{}  {:?}  {}\n",
+                "  {:016x}  {:>28}  ghidrust=leaves{}/i{}  ghidra≈b{}  {:?}  {}  s1={:.3}ms {}  {}\n",
                 r.entry,
                 truncate(&r.function, 28),
                 r.ghidrust_blocks,
                 r.ghidrust_insns,
                 r.ghidra_blocks_estimated,
                 r.match_kind,
+                sim,
+                r.ghidrust_stage1_us as f64 / 1000.0,
+                ghidra_wall,
                 r.notes
             ));
         }
@@ -199,10 +281,130 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-/// Run a head-to-head comparison. When `cfg.ghidra_install_dir` is `None`
-/// this delegates to [`bench_program`] on the Ghidrust side and produces a
-/// report that only names the methodology on the Ghidra side (no
-/// fabricated numbers).
+/// Tokenize a chunk of C-ish source into identifiers, integer literals,
+/// and control-flow keywords. Whitespace, comments, and punctuation are
+/// dropped so the resulting bag is stable across Ghidrust / Ghidra
+/// formatting differences.
+fn tokenize_c(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    // Strip `//` comments and `/* */` blocks.
+    let mut cur = String::with_capacity(src.len());
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Line comment.
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        cur.push(bytes[i] as char);
+        i += 1;
+    }
+    let cleaned = cur;
+    let mut chars = cleaned.chars().peekable();
+    let mut buf = String::new();
+    while let Some(&c) = chars.peek() {
+        if c.is_alphanumeric() || c == '_' {
+            buf.clear();
+            while let Some(&d) = chars.peek() {
+                if d.is_alphanumeric() || d == '_' {
+                    buf.push(d);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !buf.is_empty() {
+                out.push(normalize_token(&buf));
+            }
+        } else {
+            chars.next();
+        }
+    }
+    out
+}
+
+/// Fold Ghidrust-only naming conventions (e.g. `rdi#3`, `local_1c`) and
+/// Ghidra sibling shapes (`param_1`, `iVar1`, `uVar2`) toward a common
+/// bucket so the similarity metric doesn't punish structurally equivalent
+/// outputs for cosmetic naming differences.
+fn normalize_token(tok: &str) -> String {
+    let t = tok.trim();
+    if t.starts_with("local_") || t.starts_with("stack_") || t.starts_with("var_") {
+        return "LOCAL".into();
+    }
+    if t.starts_with("param_") || t.starts_with("arg_") {
+        return "PARAM".into();
+    }
+    if (t.starts_with('i') || t.starts_with('u') || t.starts_with('l')
+        || t.starts_with('c') || t.starts_with('s'))
+        && t.ends_with(|c: char| c.is_ascii_digit())
+        && t.starts_with(|c: char| c.is_ascii_lowercase())
+        && t.contains("Var")
+    {
+        return "TMP".into();
+    }
+    if t.starts_with("FUN_") || t.starts_with("sub_") || t.starts_with("SUB_") {
+        return "CALL".into();
+    }
+    if t.starts_with("0x") {
+        return "CONST".into();
+    }
+    if t.chars().all(|c| c.is_ascii_digit()) {
+        return "CONST".into();
+    }
+    t.to_lowercase()
+}
+
+/// Jaccard similarity over the bag of normalized tokens: intersection
+/// divided by union. Returns `1.0` for identical bags, `0.0` for
+/// disjoint. Both texts must be non-empty; empty inputs return `None`
+/// upstream.
+pub fn token_similarity(a: &str, b: &str) -> f32 {
+    let ta = tokenize_c(a);
+    let tb = tokenize_c(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    use std::collections::HashSet;
+    let sa: HashSet<&str> = ta.iter().map(|s| s.as_str()).collect();
+    let sb: HashSet<&str> = tb.iter().map(|s| s.as_str()).collect();
+    let inter = sa.intersection(&sb).count() as f32;
+    let union = sa.union(&sb).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Run a head-to-head comparison.
+///
+/// **Phase E fairness rules** (from the P0 pcode-parity plan):
+///
+/// 1. **Shared entry list.** When a Ghidra capture is available the
+///    Ghidrust side re-runs on the intersection of Ghidra's decompiled
+///    entries with Ghidrust's analyzer output. No side gets to pick a
+///    corpus the other one didn't see.
+/// 2. **Stage-1 by default.** [`GhidrustStage::Stage1`] is the fair
+///    comparison stage; Stage-0/0.5 stay available for regression only.
+/// 3. **Token/AST similarity metric.** Rows report normalized-token
+///    Jaccard between Ghidrust and Ghidra output (see
+///    [`token_similarity`]) — not brace-count.
+/// 4. **Timings on shared entries only.** `ghidra_total_us` sums
+///    only entries that appear in the Ghidrust row set.
+/// 5. **Nothing is fabricated.** When Ghidra output is missing the row
+///    keeps `token_similarity = None` and never invents wall time.
 pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
     let t0 = Instant::now();
     let max_functions = if cfg.max_functions == 0 { 8 } else { cfg.max_functions };
@@ -211,11 +413,8 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
     } else {
         cfg.max_insns_per_fn
     };
-    let ghidrust = bench_program(prog, max_functions, max_insns);
 
-    // If the caller asked us to spawn Ghidra AND supplied a binary path,
-    // try to do so *before* we look at `captured_ghidra_decompiles` so a
-    // successful spawn seeds the captured list transparently.
+    // 1. Try to obtain a Ghidra capture (or accept the caller's).
     let spawn_note: Option<String> = None;
     let (effective_captured, spawn_note): (Option<Vec<CapturedGhidraDecompile>>, Option<String>) =
         if cfg.captured_ghidra_decompiles.is_some() {
@@ -229,50 +428,127 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
             (None, spawn_note)
         };
 
+    // 2. Build the shared entry list. When Ghidra output is available,
+    //    the shared set is the intersection of Ghidra entries and the
+    //    Ghidrust analyzer's function list (capped by `max_functions`).
+    //    When Ghidra is unavailable we fall back to the Ghidrust list
+    //    unchanged so the methodology-only run keeps producing rows.
+    let ghidrust_entries: Vec<u64> = prog
+        .analysis
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .collect();
+    let shared_entries: Vec<u64> = if let Some(cap) = &effective_captured {
+        let ghidra_set: std::collections::BTreeSet<u64> =
+            cap.iter().map(|c| c.entry).collect();
+        let mut inter: Vec<u64> = ghidrust_entries
+            .iter()
+            .copied()
+            .filter(|e| ghidra_set.contains(e))
+            .take(max_functions)
+            .collect();
+        if inter.is_empty() {
+            // No overlap — fall back to the Ghidrust list but mark rows as
+            // "no ghidra match" so nobody misreads the report.
+            inter = ghidrust_entries
+                .iter()
+                .copied()
+                .take(max_functions)
+                .collect();
+        }
+        inter
+    } else {
+        ghidrust_entries.iter().copied().take(max_functions).collect()
+    };
+
+    // 3. Ghidrust side: run the selected stage on the shared entry set.
+    let ghidrust = match cfg.ghidrust_stage {
+        GhidrustStage::Stage0 | GhidrustStage::Stage05 => {
+            // Stage-0.5 timings still populated via the legacy bench;
+            // Stage-1 columns stay zero. Kept behind a flag so regression
+            // runs can keep the old shape.
+            bench_program(prog, max_functions, max_insns)
+        }
+        GhidrustStage::Stage1 => bench_program_stage1(
+            prog,
+            Some(&shared_entries),
+            max_functions,
+            max_insns,
+            cfg.call_conv.into(),
+        ),
+    };
+
     let mut rows = Vec::with_capacity(ghidrust.per_function.len());
-    let (ghidra_total_us, ghidra_unavailable) = if let Some(cap) = &effective_captured
-    {
+    let (ghidra_total_us, ghidra_unavailable) = if let Some(cap) = &effective_captured {
         let mut sum = 0u128;
         let mut any_wall = false;
         for f in &ghidrust.per_function {
-            let m = cap
-                .iter()
-                .find(|c| c.entry == f.entry || c.name == f.name);
-            let (kind, blocks_est, note) = match m {
+            let m = cap.iter().find(|c| c.entry == f.entry || c.name == f.name);
+            let (kind, blocks_est, note, sim, wall) = match m {
                 Some(c) => {
                     if let Some(w) = c.wall_us {
                         sum += w;
                         any_wall = true;
                     }
                     let blocks = ghidra_blocks_estimate(&c.c_source);
+                    let sim = if !f.stage1_text.is_empty() && !c.c_source.is_empty() {
+                        Some(token_similarity(&f.stage1_text, &c.c_source))
+                    } else {
+                        None
+                    };
+                    let ghidrust_blocks_score = if cfg.ghidrust_stage == GhidrustStage::Stage1 {
+                        f.stage1_leaf_count.max(1)
+                    } else {
+                        stage05_block_estimate(f)
+                    };
                     let kind = if blocks == 0 && f.insn_count > 0 {
                         MatchKind::MissingGhidrust
                     } else if f.insn_count == 0 {
                         MatchKind::MissingGhidrust
-                    } else if (blocks as i64 - stage05_block_estimate(f) as i64).abs() <= 1 {
+                    } else if (blocks as i64 - ghidrust_blocks_score as i64).abs() <= 1 {
                         MatchKind::Similar
                     } else {
                         MatchKind::Divergent
                     };
-                    (kind, blocks, "captured".to_string())
+                    (
+                        kind,
+                        blocks,
+                        match sim {
+                            Some(s) => format!("captured, token_sim={:.2}", s),
+                            None => "captured".to_string(),
+                        },
+                        sim,
+                        c.wall_us,
+                    )
                 }
-                None => (MatchKind::MissingGhidra, 0, "no captured decompile".to_string()),
+                None => (
+                    MatchKind::MissingGhidra,
+                    0,
+                    "no captured decompile".to_string(),
+                    None,
+                    None,
+                ),
             };
             rows.push(StructuralMatch {
                 function: f.name.clone(),
                 entry: f.entry,
-                ghidrust_blocks: stage05_block_estimate(f),
+                ghidrust_blocks: if cfg.ghidrust_stage == GhidrustStage::Stage1 {
+                    f.stage1_leaf_count.max(1)
+                } else {
+                    stage05_block_estimate(f)
+                },
                 ghidra_blocks_estimated: blocks_est,
                 ghidrust_insns: f.insn_count,
                 match_kind: kind,
                 notes: note,
+                token_similarity: sim,
+                ghidrust_stage1_us: f.stage1_us,
+                ghidra_wall_us: wall,
             });
         }
         (if any_wall { Some(sum) } else { None }, false)
     } else if cfg.ghidra_install_dir.is_some() {
-        // Install dir was set but we couldn't get captured decompiles from
-        // spawn — attach the spawn note (or a "binary missing" fallback)
-        // so consumers can see exactly why. No timings are invented.
         let note_head = spawn_note
             .clone()
             .unwrap_or_else(|| "ghidra_install_dir set but binary_path missing".into());
@@ -280,27 +556,40 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
             rows.push(StructuralMatch {
                 function: f.name.clone(),
                 entry: f.entry,
-                ghidrust_blocks: stage05_block_estimate(f),
+                ghidrust_blocks: if cfg.ghidrust_stage == GhidrustStage::Stage1 {
+                    f.stage1_leaf_count.max(1)
+                } else {
+                    stage05_block_estimate(f)
+                },
                 ghidra_blocks_estimated: 0,
                 ghidrust_insns: f.insn_count,
                 match_kind: MatchKind::MissingGhidra,
                 notes: format!(
                     "{note_head} — see docs/GHIDRA_HEADTOHEAD.md § Runbook"
                 ),
+                token_similarity: None,
+                ghidrust_stage1_us: f.stage1_us,
+                ghidra_wall_us: None,
             });
         }
         (None, true)
     } else {
-        // Methodology-only mode.
         for f in &ghidrust.per_function {
             rows.push(StructuralMatch {
                 function: f.name.clone(),
                 entry: f.entry,
-                ghidrust_blocks: stage05_block_estimate(f),
+                ghidrust_blocks: if cfg.ghidrust_stage == GhidrustStage::Stage1 {
+                    f.stage1_leaf_count.max(1)
+                } else {
+                    stage05_block_estimate(f)
+                },
                 ghidra_blocks_estimated: 0,
                 ghidrust_insns: f.insn_count,
                 match_kind: MatchKind::MissingGhidra,
                 notes: "no ghidra_install_dir supplied — methodology-only run".into(),
+                token_similarity: None,
+                ghidrust_stage1_us: f.stage1_us,
+                ghidra_wall_us: None,
             });
         }
         (None, true)
@@ -317,6 +606,26 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
         methodology: methodology_text().to_string(),
         harness_us,
     }
+}
+
+/// Public helper: intersection of Ghidra-captured entries and the
+/// Ghidrust analyzer's function list, capped at `max_functions`. Used
+/// by [`compare`] and callers who need the shared entry set for their
+/// own analyses / tables.
+pub fn shared_entry_list(
+    prog: &Program,
+    captured: &[CapturedGhidraDecompile],
+    max_functions: usize,
+) -> Vec<u64> {
+    let ghidra_set: std::collections::BTreeSet<u64> =
+        captured.iter().map(|c| c.entry).collect();
+    prog.analysis
+        .functions
+        .iter()
+        .map(|f| f.entry)
+        .filter(|e| ghidra_set.contains(e))
+        .take(max_functions)
+        .collect()
 }
 
 fn stage05_block_estimate(f: &crate::FunctionBench) -> usize {
@@ -840,6 +1149,104 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn token_similarity_matches_identical_prototype_shapes() {
+        let a = "void foo(void) { int x = 0; return; }";
+        let b = "void foo(void) { int x = 0; return; }";
+        assert!(
+            (token_similarity(a, b) - 1.0).abs() < 1e-6,
+            "identical strings should yield sim=1.0"
+        );
+    }
+
+    #[test]
+    fn token_similarity_scores_partial_overlap() {
+        let a = "int foo(int x) { return x + 1; }";
+        let b = "int foo(int y) { return y + 1; }";
+        let sim = token_similarity(a, b);
+        assert!(
+            sim > 0.6 && sim < 1.0,
+            "expected 0.6 < sim < 1.0, got {sim}"
+        );
+    }
+
+    #[test]
+    fn token_similarity_disjoint_returns_low() {
+        let a = "void foo(void) { return; }";
+        let b = "int bar(int x, int y) { return x * y; }";
+        let sim = token_similarity(a, b);
+        assert!(sim < 0.4, "expected low similarity, got {sim}");
+    }
+
+    #[test]
+    fn tokenize_normalizes_local_and_param_names() {
+        let a = "int f(int param_1) { int local_1c = param_1; return local_1c; }";
+        let b = "int f(int arg_0) { int var_1 = arg_0; return var_1; }";
+        let sim = token_similarity(a, b);
+        assert!(
+            sim > 0.75,
+            "normalized locals/params should be treated as same, got {sim}"
+        );
+    }
+
+    #[test]
+    fn shared_entry_list_intersects_analyzer_and_capture() {
+        // The tiny fixture requires the Function Start analyzer to populate
+        // `prog.analysis.functions`. Without that pass the analyzer list
+        // is empty and the intersection is empty by construction — an
+        // honest outcome for the fair-comparison metric.
+        use ghidrust_core::run_analyzers;
+        let mut prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
+        let _ = run_analyzers(&mut prog, &["Function Start Search"]);
+        let entry = prog.entry.unwrap();
+        let captured = vec![
+            CapturedGhidraDecompile {
+                name: "entry".into(),
+                entry,
+                c_source: "void entry(void) { return; }".into(),
+                wall_us: Some(500),
+            },
+            CapturedGhidraDecompile {
+                name: "not_in_ghidrust".into(),
+                entry: 0xdeadbeef,
+                c_source: "void x(void) {}".into(),
+                wall_us: Some(500),
+            },
+        ];
+        let shared = shared_entry_list(&prog, &captured, 32);
+        // Analyzer should have found the entry. If it doesn't (the fixture
+        // couldn't produce one via prologue-scan), assert we correctly
+        // detected the miss rather than fabricating a match.
+        if prog.analysis.functions.iter().any(|f| f.entry == entry) {
+            assert!(shared.contains(&entry), "expected shared entry: {shared:?}");
+        }
+        assert!(!shared.contains(&0xdeadbeef), "capture-only entries filtered out");
+    }
+
+    #[test]
+    fn stage1_row_includes_token_similarity_when_capture_present() {
+        let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
+        let entry = prog.entry.unwrap();
+        let cfg = GhidraOracleConfig {
+            captured_ghidra_decompiles: Some(vec![CapturedGhidraDecompile {
+                name: format!("FUN_{entry:016x}"),
+                entry,
+                c_source: "void FUN_entry(void) { return; }".into(),
+                wall_us: Some(1234),
+            }]),
+            ghidrust_stage: GhidrustStage::Stage1,
+            ..Default::default()
+        };
+        let rep = compare(&prog, &cfg);
+        assert!(!rep.rows.is_empty(), "expected rows");
+        let matched = rep.rows.iter().find(|r| r.entry == entry).expect("row");
+        assert!(
+            matched.token_similarity.is_some(),
+            "Stage-1 row should carry token_similarity"
+        );
+        assert!(matched.ghidrust_stage1_us > 0, "Stage-1 wall must be captured");
     }
 
     #[test]

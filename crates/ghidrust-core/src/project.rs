@@ -707,6 +707,11 @@ mod tests {
         prog.edits
             .set_user_type("Widget", "struct Widget { int id; }");
         prog.edits.set_applied_type(va, "Widget");
+        // Phase D (M4) — equates and function tags must also round-trip.
+        prog.edits.set_equate(va, 1, "SW_HIDE", 0);
+        prog.edits.set_equate(va + 0x10, 1, "SW_HIDE", 0);
+        prog.edits.add_function_tag(va, "MALLOC");
+        prog.edits.add_function_tag(va, "SANITIZED");
 
         let listing = disassemble_range(&prog, va, 8).unwrap_or_default();
         proj.save_program_results(&entry.id, &prog, &listing, &["Function Start Search".into()])
@@ -743,6 +748,15 @@ mod tests {
             prog2.function_at(va).map(|f| f.name.as_str()),
             Some("my_main")
         );
+        // Phase D (M4) — equates and function tags survive save/load.
+        assert_eq!(
+            prog2.edits.equate_at(va, 1).map(|e| e.name.as_str()),
+            Some("SW_HIDE")
+        );
+        assert_eq!(prog2.edits.equate_references("SW_HIDE").len(), 2);
+        assert!(prog2.edits.function_has_tag(va, "MALLOC"));
+        assert!(prog2.edits.function_has_tag(va, "SANITIZED"));
+        assert!(prog2.edits.all_function_tags.contains("MALLOC"));
 
         let _ = fs::remove_dir_all(&dir);
     }

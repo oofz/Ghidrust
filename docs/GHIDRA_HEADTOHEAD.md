@@ -1,39 +1,49 @@
 # Ghidrust ↔ Ghidra head-to-head oracle
 
-**Status:** Phase C · **live spawn wired** · captured-input fallback · **no fabricated timings**.
+**Status:** Phase E · **shared-entry set** · **Stage-1 default** ·
+**token/AST similarity metric** · **no fabricated timings**.
 
 This document is the runbook for the `ghidrust ghidra-headtohead` subcommand
 and the underlying [`ghidrust_decomp::ghidra_oracle`] library API. It aligns
-with the [decompiler superiority roadmap](../../.cursor/plans/decompiler_superiority_roadmap.plan.md)
-— specifically **Phase C** ("Faster than Ghidra") which requires captured
-head-to-head numbers, never invented ones.
+with the decompiler pcode-parity plan
+(`.cursor/plans/decompiler_pcode_parity_9377412d.plan.md`) — specifically
+**Phase E** ("Fair Ghidra parity measurement"), which replaced the earlier
+brace-count proxy and stage-mismatched comparison with a shared-entry,
+Stage-1-vs-`DecompInterface`, normalized-token metric.
 
 `ghidra-headtohead --ghidra <DIR>` auto-spawns `analyzeHeadless` with an
 embedded `DecompileAndReport.java` post-script (see
 `crates/ghidrust-decomp/src/ghidra_oracle.rs`). Spawn failures leave the
-Ghidra column blank — no fabricated numbers. **Do not treat current
-ledger rows as a quality or speed win over Ghidra** until both sides
-share the same function-entry list and a real quality metric (see §5).
+Ghidra column blank — no fabricated numbers. **Every row that appears in
+a published table must be in the shared entry set** and must carry both
+a Stage-1 wall-time and a token-similarity score.
 
 ---
 
-## Design contract
+## Design contract (Phase E, current)
 
-1. **Same corpus, same machine.** Both sides decompile the exact bytes at
-   the exact function entries. Ghidrust decodes via its shipped `disasm`
-   path (`ghidrust-decode` + `ghidrust-lift`), Ghidra via its native
-   `analyzeHeadless` + `DecompInterface` API.
-2. **No invented Ghidra timings.** When Ghidra isn't available (no
+1. **Shared entry list.** When a Ghidra capture is available the Ghidrust
+   side re-runs on the intersection of Ghidra's captured entries and the
+   Ghidrust analyzer's function list. Neither side is allowed to pick a
+   corpus the other one hasn't decompiled — [`shared_entry_list`] and
+   [`bench_program_stage1`] enforce this from the library API.
+2. **Stage-1 by default.** `GhidrustStage::Stage1` is now the default
+   emit stage for the head-to-head. Stage-0 / Stage-0.5 remain available
+   as regression oracles but no published table may combine them with
+   Ghidra `DecompInterface` timings.
+3. **Token/AST similarity, not brace counts.** Rows now carry
+   `token_similarity ∈ [0, 1]` — a Jaccard over normalized C tokens
+   (identifiers, integer literals, control-flow keywords, with
+   local/param/temp names folded to canonical buckets). This is the
+   published quality metric, and it is `None` when either side is
+   missing output rather than fabricated.
+4. **No invented Ghidra timings.** When Ghidra isn't available (no
    `--ghidra` flag, no `--captured` JSON), the report is explicitly
    *methodology-only*: it enumerates every Ghidrust row but leaves the
-   Ghidra column blank with `unavailable=true`. The JSON schema for the
-   Ghidra half is nullable so downstream consumers can filter out
-   methodology-only rows.
-3. **Structural, not string-equal.** The comparison is [`StructuralMatch`]:
-   we align by function entry, count blocks (Ghidrust: from `bench_program`;
-   Ghidra: coarse `{`-brace count), and classify each row as
-   `Similar` / `Divergent` / `MissingGhidra` / `MissingGhidrust`. A future
-   phase adds AST-token diffs.
+   Ghidra column blank with `unavailable=true`.
+5. **Timings on shared entries only.** `ghidra_total_us` sums only
+   entries in the shared set; `ghidrust.stage1_total_us` mirrors the
+   same set so wall-time comparisons are apples-to-apples.
 
 ---
 
@@ -150,20 +160,21 @@ The report includes:
 
 ### 5. What this harness is (and is not) for
 
-**Useful for:** wiring a reproducible spawn/capture path, locking Ghidrust
-baselines (`--json` without Ghidra), and future *fair* comparisons once both
-sides decompile the **same entry addresses**.
+**Useful for:** publishable Ghidrust-vs-Ghidra tables on a shared entry
+set with the token-similarity metric, and locking Ghidrust-only baselines
+(`--json` without Ghidra).
 
-**Not useful for marketing “we beat Ghidra” today.** Early live runs showed
-large `MissingGhidra` counts because each tool took its own first *N*
-functions — different work sets, so summed timings are not comparable. The
-`Similar` label is only a coarse block-count proxy (`floor(ir_ops/8)` vs `{`
-count in Ghidra C), not “same C.” Those run tables were **removed** from this
-doc so we do not publish an inaccurate head-to-head.
+**Not useful for marketing "we beat Ghidra"** on any table where
+`token_similarity` is missing or where the row set is not the shared
+intersection. The oracle refuses to emit such tables in the default
+Stage-1 configuration; Stage-0 rows must be explicitly opted into and
+should carry a note stating they aren't for external comparison.
 
-**Fair comparison (future):** fix a shared address list (same entries both
-sides), measure Stage-1 vs Ghidra C on those entries, and compare quality with
-a real structural/AST metric — then publish tables under `docs/headtohead/`.
+**Publishable table shape (Phase E):** for each shared entry, one row
+with `entry`, `ghidrust_stage1_us`, `ghidra_wall_us`, `token_similarity`,
+`match_kind`. Aggregate: mean/median similarity, mean speed ratio,
+`goto_rate` on the Ghidrust Stage-1 side. All numbers come from the
+oracle output — no post-hoc massage.
 
 ### Why Ghidrust Stage-0 / 0.5 looks “impossibly fast”
 

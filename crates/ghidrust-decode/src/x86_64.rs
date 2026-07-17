@@ -133,6 +133,38 @@ fn sign_hex(v: i64) -> String {
     }
 }
 
+fn size_prefix(sz: u32) -> &'static str {
+    match sz {
+        1 => "byte ptr ",
+        2 => "word ptr ",
+        4 => "dword ptr ",
+        8 => "qword ptr ",
+        _ => "",
+    }
+}
+
+/// Wrapper around [`decode_modrm_mem`] that annotates the r/m side with an
+/// explicit width hint when it names memory. `reg_byte` still forces the
+/// register-side (mod == 3) to use the 1-byte name set; `mem_size` labels
+/// the memory access width (1/2/4/8) so downstream lift can pick the right
+/// load/store width without needing to reparse the mnemonic.
+fn decode_modrm_sized(
+    cur: &mut Cursor<'_>,
+    modrm: u8,
+    pfx: Prefix,
+    reg_byte: bool,
+    mem_size: u32,
+) -> Result<(u8, String)> {
+    let (reg, s) = decode_modrm_mem(cur, modrm, pfx, reg_byte)?;
+    if (modrm >> 6) != 3 {
+        let prefix = size_prefix(mem_size);
+        if !prefix.is_empty() && !s.contains(" ptr ") {
+            return Ok((reg, format!("{prefix}{s}")));
+        }
+    }
+    Ok((reg, s))
+}
+
 fn decode_modrm_mem(
     cur: &mut Cursor<'_>,
     modrm: u8,
@@ -480,8 +512,212 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             };
             ("test".into(), format!("{rm}, {reg_s}"))
         }
+        // TEST r/m8, r8
+        0x84 => {
+            let modrm = cur.get()?;
+            let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+            ("test".into(), format!("{rm}, {}", reg_name(reg, false, false, true)))
+        }
+        // TEST r/m, imm  (F6 /0, F7 /0)  — handled in F6/F7 groups below.
+        // XCHG r/m, r
+        0x87 => {
+            let modrm = cur.get()?;
+            let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+            let reg_s = if w64 {
+                reg_name(reg, true, false, false)
+            } else if op16 {
+                reg_name(reg, false, true, false)
+            } else {
+                reg_name(reg, false, false, false)
+            };
+            ("xchg".into(), format!("{rm}, {reg_s}"))
+        }
+        // XCHG r/m8, r8
+        0x86 => {
+            let modrm = cur.get()?;
+            let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+            ("xchg".into(), format!("{rm}, {}", reg_name(reg, false, false, true)))
+        }
+        // MOV r/m8, imm8 (C6 /0)
+        0xC6 => {
+            let modrm = cur.get()?;
+            let reg_field = (modrm >> 3) & 7;
+            if reg_field != 0 {
+                return Err(Error::Decode(format!("unhandled C6 /{reg_field}")));
+            }
+            let (_reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+            let imm = cur.take_imm(1)? as i8 as i64;
+            ("mov".into(), format!("{rm}, {imm:#x}"))
+        }
+        // MOVSXD r64, r/m32   (Windows compilers use this constantly).
+        0x63 => {
+            let modrm = cur.get()?;
+            let (reg, rm_raw) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+            // Source is r/m32; when mod=3 name it as a 32-bit register even
+            // if REX.W is set. Memory forms get a "dword ptr" hint.
+            let rm = if (modrm >> 6) == 3 {
+                let src = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+                reg_name(src, false, false, false).to_string()
+            } else if !rm_raw.contains(" ptr ") {
+                format!("{}{}", size_prefix(4), rm_raw)
+            } else {
+                rm_raw
+            };
+            let dst = if w64 {
+                reg_name(reg, true, false, false)
+            } else {
+                reg_name(reg, false, false, false)
+            };
+            let mnem = if w64 { "movsxd" } else { "mov" };
+            (mnem.into(), format!("{dst}, {rm}"))
+        }
+        // IMUL r, r/m, imm8
+        0x6B => {
+            let modrm = cur.get()?;
+            let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+            let imm = cur.take_imm(1)? as i8 as i64;
+            let dst = if w64 {
+                reg_name(reg, true, false, false)
+            } else if op16 {
+                reg_name(reg, false, true, false)
+            } else {
+                reg_name(reg, false, false, false)
+            };
+            ("imul".into(), format!("{dst}, {rm}, {imm:#x}"))
+        }
+        // IMUL r, r/m, imm32
+        0x69 => {
+            let modrm = cur.get()?;
+            let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+            let imm = if op16 {
+                cur.take_imm(2)? as i16 as i64
+            } else {
+                cur.take_imm(4)? as i32 as i64
+            };
+            let dst = if w64 {
+                reg_name(reg, true, false, false)
+            } else if op16 {
+                reg_name(reg, false, true, false)
+            } else {
+                reg_name(reg, false, false, false)
+            };
+            ("imul".into(), format!("{dst}, {rm}, {imm:#x}"))
+        }
+        // Group 2 shift r/m, 1 (D0/D1)  or  r/m, cl (D2/D3)
+        0xD0 | 0xD1 | 0xD2 | 0xD3 => {
+            let modrm = cur.get()?;
+            let reg_field = (modrm >> 3) & 7;
+            let mnem = match reg_field {
+                0 => "rol",
+                1 => "ror",
+                2 => "rcl",
+                3 => "rcr",
+                4 => "shl",
+                5 => "shr",
+                6 => "shl",
+                7 => "sar",
+                _ => "grp2",
+            };
+            let byte_op = op == 0xD0 || op == 0xD2;
+            let mem_size = if byte_op {
+                1
+            } else if w64 {
+                8
+            } else if op16 {
+                2
+            } else {
+                4
+            };
+            let (_reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, byte_op, mem_size)?;
+            let count = if op == 0xD0 || op == 0xD1 {
+                "1".to_string()
+            } else {
+                "cl".to_string()
+            };
+            (mnem.into(), format!("{rm}, {count}"))
+        }
+        // Group 2 shift r/m, imm8 (C0/C1)
+        0xC0 | 0xC1 => {
+            let modrm = cur.get()?;
+            let reg_field = (modrm >> 3) & 7;
+            let mnem = match reg_field {
+                0 => "rol",
+                1 => "ror",
+                2 => "rcl",
+                3 => "rcr",
+                4 => "shl",
+                5 => "shr",
+                6 => "shl",
+                7 => "sar",
+                _ => "grp2",
+            };
+            let byte_op = op == 0xC0;
+            let mem_size = if byte_op {
+                1
+            } else if w64 {
+                8
+            } else if op16 {
+                2
+            } else {
+                4
+            };
+            let (_reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, byte_op, mem_size)?;
+            let imm = cur.take_imm(1)? as u8 as i64;
+            (mnem.into(), format!("{rm}, {imm:#x}"))
+        }
+        // Group 3 F6/F7 — test/not/neg/mul/imul/div/idiv r/m
+        0xF6 | 0xF7 => {
+            let modrm = cur.get()?;
+            let reg_field = (modrm >> 3) & 7;
+            let byte_op = op == 0xF6;
+            let mem_size = if byte_op {
+                1
+            } else if w64 {
+                8
+            } else if op16 {
+                2
+            } else {
+                4
+            };
+            let (_reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, byte_op, mem_size)?;
+            match reg_field {
+                0 | 1 => {
+                    // test r/m, imm
+                    let imm = if byte_op {
+                        cur.take_imm(1)? as i8 as i64
+                    } else if op16 {
+                        cur.take_imm(2)? as i16 as i64
+                    } else {
+                        cur.take_imm(4)? as i32 as i64
+                    };
+                    ("test".into(), format!("{rm}, {imm:#x}"))
+                }
+                2 => ("not".into(), rm),
+                3 => ("neg".into(), rm),
+                4 => ("mul".into(), rm),
+                5 => ("imul".into(), rm),
+                6 => ("div".into(), rm),
+                7 => ("idiv".into(), rm),
+                _ => ("grp3".into(), rm),
+            }
+        }
         // NOP
         0x90 => ("nop".into(), String::new()),
+        // CBW / CWDE / CDQE
+        0x98 => {
+            if w64 {
+                ("cdqe".into(), String::new())
+            } else if op16 {
+                ("cbw".into(), String::new())
+            } else {
+                ("cwde".into(), String::new())
+            }
+        }
+        // PUSHF / POPF (rex.w doesn't matter — these push RFLAGS)
+        0x9C => ("pushfq".into(), String::new()),
+        0x9D => ("popfq".into(), String::new()),
+        // HLT
+        0xF4 => ("hlt".into(), String::new()),
         // RET
         0xC3 => ("ret".into(), String::new()),
         0xC2 => {
@@ -594,6 +830,140 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                         .wrapping_add(rel as u64);
                     (names[(op2 - 0x80) as usize].into(), format!("{target:#x}"))
                 }
+                // CMOVcc r, r/m
+                0x40..=0x4F => {
+                    let names = [
+                        "cmovo", "cmovno", "cmovb", "cmovae", "cmove", "cmovne", "cmovbe",
+                        "cmova", "cmovs", "cmovns", "cmovp", "cmovnp", "cmovl", "cmovge",
+                        "cmovle", "cmovg",
+                    ];
+                    let modrm = cur.get()?;
+                    let mem_size = if w64 { 8 } else if op16 { 2 } else { 4 };
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, mem_size)?;
+                    let dst = if w64 {
+                        reg_name(reg, true, false, false)
+                    } else if op16 {
+                        reg_name(reg, false, true, false)
+                    } else {
+                        reg_name(reg, false, false, false)
+                    };
+                    (names[(op2 - 0x40) as usize].into(), format!("{dst}, {rm}"))
+                }
+                // SETcc r/m8
+                0x90..=0x9F => {
+                    let names = [
+                        "seto", "setno", "setb", "setae", "sete", "setne", "setbe", "seta",
+                        "sets", "setns", "setp", "setnp", "setl", "setge", "setle", "setg",
+                    ];
+                    let modrm = cur.get()?;
+                    let (_r, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+                    (names[(op2 - 0x90) as usize].into(), rm)
+                }
+                // MOVZX r, r/m8
+                0xB6 => {
+                    let modrm = cur.get()?;
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+                    let dst = if w64 {
+                        reg_name(reg, true, false, false)
+                    } else if op16 {
+                        reg_name(reg, false, true, false)
+                    } else {
+                        reg_name(reg, false, false, false)
+                    };
+                    ("movzx".into(), format!("{dst}, {rm}"))
+                }
+                // MOVZX r, r/m16
+                0xB7 => {
+                    let modrm = cur.get()?;
+                    // r/m is 16-bit; when mod=3 that's a word reg.
+                    let (reg, rm_raw) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+                    let rm = if (modrm >> 6) == 3 {
+                        // Force word regnames on the source.
+                        let src = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+                        reg_name(src, false, true, false).to_string()
+                    } else if !rm_raw.contains(" ptr ") {
+                        format!("{}{}", size_prefix(2), rm_raw)
+                    } else {
+                        rm_raw
+                    };
+                    let dst = if w64 {
+                        reg_name(reg, true, false, false)
+                    } else if op16 {
+                        reg_name(reg, false, true, false)
+                    } else {
+                        reg_name(reg, false, false, false)
+                    };
+                    ("movzx".into(), format!("{dst}, {rm}"))
+                }
+                // MOVSX r, r/m8
+                0xBE => {
+                    let modrm = cur.get()?;
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+                    let dst = if w64 {
+                        reg_name(reg, true, false, false)
+                    } else if op16 {
+                        reg_name(reg, false, true, false)
+                    } else {
+                        reg_name(reg, false, false, false)
+                    };
+                    ("movsx".into(), format!("{dst}, {rm}"))
+                }
+                // MOVSX r, r/m16
+                0xBF => {
+                    let modrm = cur.get()?;
+                    let (reg, rm_raw) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+                    let rm = if (modrm >> 6) == 3 {
+                        let src = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+                        reg_name(src, false, true, false).to_string()
+                    } else if !rm_raw.contains(" ptr ") {
+                        format!("{}{}", size_prefix(2), rm_raw)
+                    } else {
+                        rm_raw
+                    };
+                    let dst = if w64 {
+                        reg_name(reg, true, false, false)
+                    } else if op16 {
+                        reg_name(reg, false, true, false)
+                    } else {
+                        reg_name(reg, false, false, false)
+                    };
+                    ("movsx".into(), format!("{dst}, {rm}"))
+                }
+                // IMUL r, r/m
+                0xAF => {
+                    let modrm = cur.get()?;
+                    let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
+                    let dst = if w64 {
+                        reg_name(reg, true, false, false)
+                    } else if op16 {
+                        reg_name(reg, false, true, false)
+                    } else {
+                        reg_name(reg, false, false, false)
+                    };
+                    ("imul".into(), format!("{dst}, {rm}"))
+                }
+                // BSWAP r32/r64
+                0xC8..=0xCF => {
+                    let r = (op2 - 0xC8) | if pfx.rex_b { 8 } else { 0 };
+                    let reg = if w64 {
+                        reg_name(r, true, false, false)
+                    } else {
+                        reg_name(r, false, false, false)
+                    };
+                    ("bswap".into(), reg.to_string())
+                }
+                // UD2
+                0x0B => ("ud2".into(), String::new()),
+                // ENDBR64 / ENDBR32 (F3 0F 1E FA / FB) — with F3 already consumed as `rep`.
+                0x1E if pfx.rep => {
+                    let modrm = cur.get()?;
+                    let m = match modrm {
+                        0xFA => "endbr64",
+                        0xFB => "endbr32",
+                        _ => "endbr",
+                    };
+                    (m.into(), String::new())
+                }
                 0x1F => {
                     // NOP r/m
                     let modrm = cur.get()?;
@@ -677,5 +1047,103 @@ mod tests {
         assert_eq!(i0.operands, "eax, eax");
         let i1 = decode_one(&b[2..], 2).unwrap();
         assert_eq!(i1.mnemonic, "ret");
+    }
+
+    #[test]
+    fn decode_cmovcc_register() {
+        // 48 0f 45 c8  cmovne rcx, rax
+        let i = decode_one(&[0x48, 0x0f, 0x45, 0xc8], 0).unwrap();
+        assert_eq!(i.mnemonic, "cmovne");
+        assert_eq!(i.operands, "rcx, rax");
+        assert_eq!(i.length, 4);
+    }
+
+    #[test]
+    fn decode_setcc_r8() {
+        // 0f 94 c0  sete al
+        let i = decode_one(&[0x0f, 0x94, 0xc0], 0).unwrap();
+        assert_eq!(i.mnemonic, "sete");
+        assert_eq!(i.operands, "al");
+    }
+
+    #[test]
+    fn decode_movzx_r32_r8() {
+        // 0f b6 c1  movzx eax, cl
+        let i = decode_one(&[0x0f, 0xb6, 0xc1], 0).unwrap();
+        assert_eq!(i.mnemonic, "movzx");
+        assert_eq!(i.operands, "eax, cl");
+    }
+
+    #[test]
+    fn decode_movsxd_r64_r32() {
+        // 48 63 c1  movsxd rax, ecx
+        let i = decode_one(&[0x48, 0x63, 0xc1], 0).unwrap();
+        assert_eq!(i.mnemonic, "movsxd");
+        assert_eq!(i.operands, "rax, ecx");
+    }
+
+    #[test]
+    fn decode_shr_by_cl_and_shl_imm() {
+        // c1 e0 03  shl eax, 3
+        let a = decode_one(&[0xc1, 0xe0, 0x03], 0).unwrap();
+        assert_eq!(a.mnemonic, "shl");
+        assert_eq!(a.operands, "eax, 0x3");
+        // d3 e8     shr eax, cl
+        let b = decode_one(&[0xd3, 0xe8], 0).unwrap();
+        assert_eq!(b.mnemonic, "shr");
+        assert_eq!(b.operands, "eax, cl");
+    }
+
+    #[test]
+    fn decode_group3_neg_and_not() {
+        // f7 d8  neg eax
+        let a = decode_one(&[0xf7, 0xd8], 0).unwrap();
+        assert_eq!(a.mnemonic, "neg");
+        assert_eq!(a.operands, "eax");
+        // f7 d0  not eax
+        let b = decode_one(&[0xf7, 0xd0], 0).unwrap();
+        assert_eq!(b.mnemonic, "not");
+    }
+
+    #[test]
+    fn decode_hlt_and_int3() {
+        assert_eq!(decode_one(&[0xf4], 0).unwrap().mnemonic, "hlt");
+        assert_eq!(decode_one(&[0xcc], 0).unwrap().mnemonic, "int3");
+    }
+
+    #[test]
+    fn decode_endbr64() {
+        // f3 0f 1e fa  endbr64
+        let i = decode_one(&[0xf3, 0x0f, 0x1e, 0xfa], 0).unwrap();
+        assert_eq!(i.mnemonic, "endbr64");
+    }
+
+    #[test]
+    fn decode_imul_with_imm() {
+        // 6b c0 03  imul eax, eax, 3
+        let i = decode_one(&[0x6b, 0xc0, 0x03], 0).unwrap();
+        assert_eq!(i.mnemonic, "imul");
+        assert_eq!(i.operands, "eax, eax, 0x3");
+    }
+
+    #[test]
+    fn decode_ud2_and_bswap() {
+        assert_eq!(decode_one(&[0x0f, 0x0b], 0).unwrap().mnemonic, "ud2");
+        // 0f c8  bswap eax
+        let b = decode_one(&[0x0f, 0xc8], 0).unwrap();
+        assert_eq!(b.mnemonic, "bswap");
+        assert_eq!(b.operands, "eax");
+    }
+
+    #[test]
+    fn decode_sib_with_scale_still_valid() {
+        // 8b 04 88   mov eax, [rax+rcx*4]
+        let i = decode_one(&[0x8b, 0x04, 0x88], 0).unwrap();
+        assert_eq!(i.mnemonic, "mov");
+        assert!(
+            i.operands.contains("rcx*4"),
+            "expected SIB scale 4, got '{}'",
+            i.operands
+        );
     }
 }

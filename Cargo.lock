@@ -1357,6 +1357,7 @@ dependencies = [
  "ghidrust-structure",
  "ghidrust-types",
  "pollster",
+ "rayon",
  "serde",
  "serde_json",
  "wgpu",
@@ -1372,6 +1373,8 @@ dependencies = [
  "ghidrust-decomp",
  "ghidrust-types",
  "rfd",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

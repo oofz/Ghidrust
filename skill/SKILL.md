@@ -60,21 +60,30 @@ Need full matrix bench?
 
 Need decompiled C?
   → Staged capability (be honest about which stage you have):
-     Stage-0    (default):  `decompile PATH` / `gpu-decompile PATH` → CFG→goto / mnemonic-style pseudo-C
-     Stage-0.5  (opt-in):   `decompile PATH --stage05` → IR-informed emit (xor a,a → a=0, augmented assign,
-                                push/pop, direct call, flag-driven jcc). Falls back to Stage-0 scaffolding for
-                                anything the lifter doesn't cover yet — never fabricated C.
-     Stage-1    (opt-in):   SSA + structure + types → structured if/while/do-while/return with typed locals
-                                (`local_<off>`), SysV/Windows params (`param_1`, `param_2`, …), and (new)
-                                `switch { case … }` regions sourced from the shipped Decompiler Switch
-                                Analysis analyzer plus compound `if (A && B)` / `if (A || B)` short-circuit
-                                predicates. GUI has a Decompiler pane stage picker; MCP/library callers use
+     Stage-1    (**default**, Phase F): SSA + structure + types → structured if/while/do-while/return
+                                with typed params (`param_1: uint32_t`, `param_2: struct s_1*`, …),
+                                recovered return type, `local_<off>` stack locals, `switch { case … }`
+                                from the shipped Decompiler Switch Analysis analyzer, compound
+                                `if (A && B)` / `if (A || B)` short-circuits, and `break;` /
+                                `continue;` inside natural loops (goto rate <0.15 on lab). Struct
+                                seeds render as `p->field_<off>`; array seeds as `p[i]`. CLI:
+                                `decompile PATH` (or explicit `--stage1`); GUI: Decompiler pane
+                                stage picker (Stage-1 preselected); MCP: `decompile` tool with
+                                `stage='stage1'` default; library:
                                 `ghidrust_decomp::decompile_stage1_at`. Falls back to Stage-0.5-shaped
-                                scaffolding when lift ratio <50% or the region is irreducible — no fabrication.
-     typed-C    (roadmap):  Hex-Rays-class quality (union/bitfield, EH, idiom-lift) — after Ghidra bar met.
+                                scaffolding when lift ratio <50% or the region is irreducible —
+                                no fabrication.
+     Stage-0    (oracle):  `decompile PATH --stage0` → CFG→goto / mnemonic-style pseudo-C.
+                                Kept as regression baseline; Phase E head-to-head uses this only
+                                for pre-Stage-1 checks, never for external comparison tables.
+     Stage-0.5  (oracle):  `decompile PATH --stage05` → IR-informed emit (xor a,a → a=0, augmented
+                                assign, push/pop, direct call, flag-driven jcc). Same fallback
+                                rules — Stage-0.5 is IR-informed but pre-SSA.
+     typed-C    (roadmap):  Hex-Rays-class quality (union/bitfield, EH, idiom-lift) — after Ghidra
+                                bar met.
   → Do not invent Hex-Rays-quality C; emit only what the current stage produces.
 
-Need Stage-0 vs Stage-0.5 wall-clock + lift-ratio numbers?
+Need Stage-0 vs Stage-0.5 vs Stage-1 wall-clock + lift-ratio numbers?
   → `decompile-bench PATH [--functions N] [--count N] [--out FILE] [--json]`
 
 Need Ghidra ↔ Ghidrust head-to-head?
@@ -160,10 +169,11 @@ Add `--json` for structured stdout.
 | List analyzers | `ghidrust analyzers` |
 | **Analyze** | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu]` |
 | Bulk bench | `ghidrust bulk-bench <path>` |
-| Decompile (CPU Stage-0 pseudo-C) | `ghidrust decompile <path>` |
-| Decompile (Stage-0.5 IR-informed) | `ghidrust decompile <path> --stage05` |
-| Decompile bench (Stage-0 vs Stage-0.5) | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` |
-| Ghidra head-to-head oracle | `ghidrust ghidra-headtohead <path> [--ghidra DIR] [--captured JSON] [--out F]` |
+| Decompile (Stage-1 default, SSA + structure + types) | `ghidrust decompile <path>` |
+| Decompile (Stage-0 CFG scaffolding, oracle) | `ghidrust decompile <path> --stage0` |
+| Decompile (Stage-0.5 IR-informed, oracle) | `ghidrust decompile <path> --stage05` |
+| Decompile bench (Stage-0 vs Stage-0.5 vs Stage-1) | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` |
+| Ghidra head-to-head (Phase E, shared-entry, Stage-1) | `ghidrust ghidra-headtohead <path> [--ghidra DIR] [--captured JSON] [--out F]` |
 | **GPU decompile** | `ghidrust gpu-decompile <path> [--out F] [--metrics F]` |
 | RE bench | `ghidrust re-bench <path>` |
 | Analyzer CPU/GPU matrix bench | `ghidrust analyzer-bench <path> [--large] [--out F]` |
@@ -275,10 +285,11 @@ the exact evidence (blocks / insns / ir_ops / lift ratio / GPU backend).
 
 | Method | CLI | What you get | Output shape |
 |---|---|---|---|
-| **Stage-0** (default) | `ghidrust decompile PATH [--addr HEX] [--count N]` | CFG → pseudo-C: `void FUN_<va>() { block_0: … goto/return; }`. Mnemonic-style scaffolding — no fabricated locals or types. | stdout `pseudo_c`; stderr `[name] stage=0 blocks=… edges=… insns=… lines=…`; `--json` ⇒ `Decompile { name, blocks[], edges[], insn_count, pseudo_c }`. |
-| **Stage-0.5 IR** | `ghidrust decompile PATH --stage05 [--addr HEX] [--count N]` | IR-informed emit from x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, augmented assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 for uncovered ops. Pseudo-C header line is `// Ghidrust Stage-0.5 IR emit — function …`. | stdout `pseudo_c`; stderr adds `ir_ops=… lift=…%`; `--json` ⇒ `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
-| **decompile-bench** | `ghidrust decompile-bench PATH [--functions N] [--count N] [--out F]` | Runs default analyzers, then benches Stage-0 vs Stage-0.5 across all discovered functions: totals `insns`, `ir_ops`, per-stage `µs`, avg `lift_ratio`. | Text (or JSON via `--json`); writes to `--out FILE` too. Eval sample: 6 fns, 33 insns, 48 IR ops, avg lift 0.96. |
-| **ghidra-headtohead** | `ghidrust ghidra-headtohead PATH [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out F]` | Optional oracle: run Ghidra headless (`--ghidra DIR`) or ingest captured JSON (`--captured …`) and diff Stage-0 / Stage-0.5 vs Ghidra decomp lines. | Text or JSON; without Ghidra, report still generates but oracle rows note unavailability. Not part of the eval sweep. |
+| **Stage-1** (**default**) | `ghidrust decompile PATH [--addr HEX] [--count N]` | Full SSA → structure → types → typed pseudo-C: recovered return type, `param_N: T` prototype, `local_<off>: T` stack locals, `struct s_<key> { field_<off>: T; }` seeds from load/store patterns, `switch { case … }` from Decompiler Switch Analysis, compound `&&`/`\|\|`, and `break;` / `continue;` inside natural loops (goto rate <0.15 on lab). | stdout `pseudo_c`; stderr `[name] stage=1 blocks=… phis=… loops=… locals=… params=… lift=…%`; `--json` ⇒ `{decompile, stage1: {loops, phis, locals, params, structs, lift_ratio, goto_rate, return_type, prototype, total_ops}}`. |
+| **Stage-0** (oracle) | `ghidrust decompile PATH --stage0 [--addr HEX] [--count N]` | CFG → pseudo-C: `void FUN_<va>() { block_0: … goto/return; }`. Mnemonic-style scaffolding — no fabricated locals or types. | stdout `pseudo_c`; stderr `[name] stage=0 blocks=… edges=… insns=… lines=…`; `--json` ⇒ `Decompile { name, blocks[], edges[], insn_count, pseudo_c }`. |
+| **Stage-0.5 IR** (oracle) | `ghidrust decompile PATH --stage05 [--addr HEX] [--count N]` | IR-informed emit from x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, augmented assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 for uncovered ops. | stdout `pseudo_c`; stderr adds `ir_ops=… lift=…%`; `--json` ⇒ `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
+| **decompile-bench** | `ghidrust decompile-bench PATH [--functions N] [--count N] [--out F]` | Runs default analyzers, then benches Stage-0 vs Stage-0.5 vs Stage-1 across all discovered functions: totals `insns`, `ir_ops`, per-stage `µs`, avg `lift_ratio`. | Text (or JSON via `--json`); writes to `--out FILE` too. |
+| **ghidra-headtohead** (Phase E) | `ghidrust ghidra-headtohead PATH [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out F]` | Fair oracle: shared-entry intersection between Ghidra `DecompInterface` output and Ghidrust analyzer function list; compares Stage-1 vs Ghidra with normalized-token similarity metric and per-entry Stage-1 wall-time. Without `--ghidra` / `--captured` the report is methodology-only. | Text or JSON; rows carry `token_similarity`, `ghidrust_stage1_us`, `ghidra_wall_us`. |
 | **gpu-decompile** | `ghidrust gpu-decompile PATH [--out F] [--metrics F]` | Full GPU-resident VRAM multipass decompile of entry: decode → leaders → blocks → emit; single final download; asserts `mid_pipeline_host_reads == 0` and matches CPU multipass oracle. | `.gdecomp` binary dump; stdout `pseudo_c`; `--json`/`--metrics` ⇒ `{gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit on equivalence break. |
 | **re-bench** | `ghidrust re-bench PATH [--out F]` | CPU decompile of entry + bulk RE on a padded haystack, once on CPU parallel and once on GPU/fallback. Asserts equal bulk hit counts. | Text (or JSON): `decompile_cpu {backend, ms, entry, name, blocks, edges, insns, lines, chars, pseudo_c_head}`, `bulk_cpu`, `bulk_gpu` (each: `{mode, backend, ms, hits, haystack_bytes}`), `note`. |
 

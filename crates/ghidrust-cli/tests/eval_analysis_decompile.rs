@@ -497,11 +497,13 @@ fn eval_one_analyzer(check: &AnalyzerCheck) -> EvalRow {
 fn eval_decompile_stage0(fixture: &str) -> EvalRow {
     let path = fixture_path(fixture);
     let path_s = path.to_string_lossy().into_owned();
+    // Stage-1 is the CLI default (Phase F); this row still exercises the
+    // Stage-0 oracle path via the explicit flag.
     let (ok, stdout, stderr, ms) =
-        run_ghidrust(&["decompile", &path_s, "--count", "128", "--json"]);
+        run_ghidrust(&["decompile", &path_s, "--count", "128", "--stage0", "--json"]);
     let mut row = EvalRow {
         kind: "decompile",
-        name: "Stage-0 (ghidrust decompile)".into(),
+        name: "Stage-0 (ghidrust decompile --stage0)".into(),
         fixture: fixture.into(),
         status: "FAIL",
         ran: true,

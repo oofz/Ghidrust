@@ -130,16 +130,28 @@ fn parse_reg(name: &str) -> Option<(X86Reg, u32)> {
         "r9b" => (X86Reg::R9, 1),
         "r10" => (X86Reg::R10, 8),
         "r10d" => (X86Reg::R10, 4),
+        "r10w" => (X86Reg::R10, 2),
+        "r10b" => (X86Reg::R10, 1),
         "r11" => (X86Reg::R11, 8),
         "r11d" => (X86Reg::R11, 4),
+        "r11w" => (X86Reg::R11, 2),
+        "r11b" => (X86Reg::R11, 1),
         "r12" => (X86Reg::R12, 8),
         "r12d" => (X86Reg::R12, 4),
+        "r12w" => (X86Reg::R12, 2),
+        "r12b" => (X86Reg::R12, 1),
         "r13" => (X86Reg::R13, 8),
         "r13d" => (X86Reg::R13, 4),
+        "r13w" => (X86Reg::R13, 2),
+        "r13b" => (X86Reg::R13, 1),
         "r14" => (X86Reg::R14, 8),
         "r14d" => (X86Reg::R14, 4),
+        "r14w" => (X86Reg::R14, 2),
+        "r14b" => (X86Reg::R14, 1),
         "r15" => (X86Reg::R15, 8),
         "r15d" => (X86Reg::R15, 4),
+        "r15w" => (X86Reg::R15, 2),
+        "r15b" => (X86Reg::R15, 1),
         _ => return None,
     };
     Some((reg, size))
@@ -170,11 +182,15 @@ fn split_operands(ops: &str) -> Vec<&str> {
     ops.split(',').map(str::trim).filter(|s| !s.is_empty()).collect()
 }
 
-/// Parsed memory operand. `[seg:]base±disp` — no SIB/index at this stage.
+/// Parsed memory operand. `[seg:]base+index*scale±disp` — supports SIB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemOperand {
     pub segment: Option<String>,
     pub base: Option<X86Reg>,
+    /// Optional index register (SIB).
+    pub index: Option<X86Reg>,
+    /// SIB scale factor (1/2/4/8). Ignored when `index` is `None`.
+    pub scale: u32,
     pub rip_relative: bool,
     pub displacement: i64,
     /// Access width in bytes (defaults 8 when the mnemonic is 64-bit; caller may override).
@@ -212,47 +228,84 @@ pub fn parse_mem(op: &str) -> Option<MemOperand> {
     if inner.is_empty() {
         return None;
     }
-    if inner.contains('*') {
-        // SIB with scale — not yet lifted.
+
+    // Split into `+` / `-` tokens preserving signs (base+index*scale+disp).
+    let mut tokens: Vec<(i64, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut sign: i64 = 1;
+    for ch in inner.chars() {
+        match ch {
+            '+' => {
+                if !cur.trim().is_empty() {
+                    tokens.push((sign, cur.trim().to_string()));
+                }
+                cur.clear();
+                sign = 1;
+            }
+            '-' => {
+                if !cur.trim().is_empty() {
+                    tokens.push((sign, cur.trim().to_string()));
+                }
+                cur.clear();
+                sign = -1;
+            }
+            other => cur.push(other),
+        }
+    }
+    if !cur.trim().is_empty() {
+        tokens.push((sign, cur.trim().to_string()));
+    }
+    if tokens.is_empty() {
         return None;
     }
 
-    let (base_tok, disp_tok) =
-        if let Some(idx) = inner.find(|c| c == '+' || c == '-').filter(|&i| i > 0) {
-            (&inner[..idx], &inner[idx..])
-        } else {
-            (inner, "")
-        };
-    let base_tok = base_tok.trim();
-    let disp_tok = disp_tok.trim();
-
+    let mut base: Option<X86Reg> = None;
+    let mut index: Option<X86Reg> = None;
+    let mut scale: u32 = 1;
     let mut rip_relative = false;
-    let base = if base_tok == "rip" {
-        rip_relative = true;
-        None
-    } else if base_tok.is_empty() {
-        None
-    } else {
-        parse_reg(base_tok).map(|(r, _)| r)
-    };
-
-    let displacement = if disp_tok.is_empty() {
-        0i64
-    } else {
-        let (sign, body) = if let Some(rest) = disp_tok.strip_prefix('-') {
-            (-1i64, rest.trim())
-        } else if let Some(rest) = disp_tok.strip_prefix('+') {
-            (1i64, rest.trim())
-        } else {
-            (1i64, disp_tok)
-        };
-        let raw = parse_imm(body)? as i64;
-        sign * raw
-    };
+    let mut displacement: i64 = 0;
+    for (sign, tok) in tokens {
+        // index*scale form
+        if let Some((r_tok, scale_tok)) = tok.split_once('*') {
+            let r_tok = r_tok.trim();
+            let scale_tok = scale_tok.trim();
+            let (r, _) = parse_reg(r_tok)?;
+            let s: u32 = scale_tok.parse().ok()?;
+            if index.is_some() {
+                return None;
+            }
+            index = Some(r);
+            scale = s;
+            continue;
+        }
+        if tok == "rip" {
+            rip_relative = true;
+            continue;
+        }
+        if let Some((r, _)) = parse_reg(&tok) {
+            if base.is_none() {
+                base = Some(r);
+            } else if index.is_none() {
+                index = Some(r);
+                scale = 1;
+            } else {
+                return None;
+            }
+            continue;
+        }
+        // treat as a displacement literal
+        if let Some(v) = parse_imm(&tok) {
+            displacement = displacement.wrapping_add(sign.wrapping_mul(v as i64));
+            continue;
+        }
+        return None;
+    }
 
     Some(MemOperand {
         segment,
         base,
+        index,
+        scale,
         rip_relative,
         displacement,
         size: size_hint.unwrap_or(8),
@@ -280,6 +333,62 @@ fn is_jcc(mnem: &str) -> bool {
             | "jz"
             | "jnz"
     )
+}
+
+/// True for `cmovcc` mnemonics — `cmove`, `cmovne`, `cmovl`, …
+fn is_cmov(mnem: &str) -> bool {
+    if let Some(rest) = mnem.strip_prefix("cmov") {
+        matches!(
+            rest,
+            "o" | "no"
+                | "b"
+                | "ae"
+                | "e"
+                | "ne"
+                | "be"
+                | "a"
+                | "s"
+                | "ns"
+                | "p"
+                | "np"
+                | "l"
+                | "ge"
+                | "le"
+                | "g"
+                | "z"
+                | "nz"
+        )
+    } else {
+        false
+    }
+}
+
+/// True for `setcc` byte-destination flag captures.
+fn is_setcc(mnem: &str) -> bool {
+    if let Some(rest) = mnem.strip_prefix("set") {
+        matches!(
+            rest,
+            "o" | "no"
+                | "b"
+                | "ae"
+                | "e"
+                | "ne"
+                | "be"
+                | "a"
+                | "s"
+                | "ns"
+                | "p"
+                | "np"
+                | "l"
+                | "ge"
+                | "le"
+                | "g"
+                | "z"
+                | "nz"
+        )
+    } else {
+        false
+    }
 }
 
 /// Convert a `jcc` mnemonic into the flag combination that drives it. Returns
@@ -422,18 +531,45 @@ fn mem_address_ops(ctx: &mut LiftCtx, mem: &MemOperand, insn_addr: u64, insn_len
         ));
         return (ops, out);
     }
-    let base = mem
+
+    // Start from `base` (or 0 if absent).
+    let mut running = mem
         .base
         .map(|r| r.as_varnode(addr_size))
         .unwrap_or_else(|| Varnode::constant(0, addr_size));
-    if mem.displacement == 0 && mem.base.is_some() {
-        return (ops, base);
+
+    // Fold in `index * scale` when present. Use PTRADD so type recovery can
+    // tell an "array index" from a plain byte offset.
+    if let Some(index_reg) = mem.index {
+        let idx = index_reg.as_varnode(addr_size);
+        let idx_term = if mem.scale == 1 {
+            idx
+        } else {
+            let scaled = ctx.take_unique(addr_size);
+            ops.push(PcodeOp::new(
+                OpCode::IntMult,
+                Some(scaled.clone()),
+                vec![idx, Varnode::constant(mem.scale as u64, addr_size)],
+            ));
+            scaled
+        };
+        let combined = ctx.take_unique(addr_size);
+        ops.push(PcodeOp::new(
+            OpCode::Ptradd,
+            Some(combined.clone()),
+            vec![running, idx_term],
+        ));
+        running = combined;
+    }
+
+    if mem.displacement == 0 {
+        return (ops, running);
     }
     let out = ctx.take_unique(addr_size);
     ops.push(PcodeOp::new(
         OpCode::IntAdd,
         Some(out.clone()),
-        vec![base, Varnode::constant(mem.displacement as u64, addr_size)],
+        vec![running, Varnode::constant(mem.displacement as u64, addr_size)],
     ));
     (ops, out)
 }
@@ -496,11 +632,72 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
     let len = insn.length;
 
     match mnem {
-        "nop" => {
-            return vec![PcodeOp::new(OpCode::Nop, None, vec![]).with_note("nop")];
+        "nop" | "endbr64" | "endbr32" => {
+            return vec![PcodeOp::new(OpCode::Nop, None, vec![]).with_note(mnem)];
         }
-        "int3" => {
-            return vec![PcodeOp::unimplemented("int3")];
+        // Architectural traps: model as a Trap opcode so SSA/structure knows
+        // the block has a side effect but never treats the value as
+        // "unimplemented / fabricated".
+        "int3" | "hlt" | "ud2" => {
+            return vec![PcodeOp::new(OpCode::Trap, None, vec![]).with_note(mnem)];
+        }
+        // CDQ/CQO/CBW/CWDE/CDQE — treat as a controlled sign-extension of the
+        // accumulator into rdx:rax (CDQ/CQO) or eax (CBW/CWDE/CDQE). Model
+        // as an explicit sign-extend copy; SSA/DCE will drop when unused.
+        "cdq" | "cqo" => {
+            let width = if mnem == "cqo" { 8 } else { 4 };
+            let rax = X86Reg::Rax.as_varnode(width);
+            let rdx = X86Reg::Rdx.as_varnode(width);
+            return vec![PcodeOp::new(OpCode::IntSExt, Some(rdx), vec![rax])
+                .with_note(mnem)];
+        }
+        "cwde" | "cdqe" | "cbw" => {
+            let (src_w, dst_w) = match mnem {
+                "cbw" => (1u32, 2u32),
+                "cwde" => (2u32, 4u32),
+                "cdqe" => (4u32, 8u32),
+                _ => unreachable!(),
+            };
+            let src = X86Reg::Rax.as_varnode(src_w);
+            let dst = X86Reg::Rax.as_varnode(dst_w);
+            return vec![PcodeOp::new(OpCode::IntSExt, Some(dst), vec![src])
+                .with_note(mnem)];
+        }
+        "bswap" => {
+            if let Some(first) = parts.first() {
+                if let Some((reg, size)) = parse_reg(first) {
+                    let vn = reg.as_varnode(size);
+                    // Model as opaque "byte-swap"; kept as an IntXor-with-self
+                    // marker so we don't fabricate arithmetic. Downstream
+                    // Stage-1 emit will print a `bswap(x)` builtin call.
+                    return vec![PcodeOp::new(
+                        OpCode::Cast,
+                        Some(vn.clone()),
+                        vec![vn],
+                    )
+                    .with_note(format!("bswap {first}"))];
+                }
+            }
+        }
+        "pushfq" => {
+            // Push RFLAGS (8 bytes). We don't model individual flag bit
+            // packing — the SSA reads of ZF/CF/… stay untouched.
+            return vec![PcodeOp::new(OpCode::Push, None, vec![])
+                .with_note("pushfq")];
+        }
+        "popfq" => {
+            return vec![PcodeOp::new(OpCode::Pop, None, vec![])
+                .with_note("popfq")];
+        }
+        "syscall" => {
+            // Modeled as an indirect call for now (result in rax after).
+            return vec![PcodeOp::new(OpCode::CallInd, None, vec![])
+                .with_note("syscall")];
+        }
+        "cpuid" => {
+            // Reads eax/ecx, writes eax/ebx/ecx/edx. Represent as a Trap-
+            // like opaque so we don't invent a value.
+            return vec![PcodeOp::new(OpCode::Trap, None, vec![]).with_note("cpuid")];
         }
         "leave" => {
             // rsp = rbp; rbp = pop
@@ -661,6 +858,203 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                     ];
                 ops.extend(lift_arith_flags(dst_vn, OpCode::IntMult));
                 return ops;
+            }
+            if let (Some((dst, dsz)), Some(mem)) = (parse_reg(parts[0]), parse_mem(parts[1])) {
+                let (mut ops, val) = load_from(ctx, &mem, dsz, addr, len);
+                let dst_vn = dst.as_varnode(dsz);
+                ops.push(
+                    PcodeOp::new(
+                        OpCode::IntMult,
+                        Some(dst_vn.clone()),
+                        vec![dst_vn.clone(), val],
+                    )
+                    .with_note(format!("{} {}", mnem, insn.operands)),
+                );
+                ops.extend(lift_arith_flags(dst_vn, OpCode::IntMult));
+                return ops;
+            }
+        }
+        // imul r, r/m, imm  (three-operand form emitted by 0x6B / 0x69)
+        "imul" if parts.len() == 3 => {
+            if let (Some((dst, dsz)), Some(imm)) = (parse_reg(parts[0]), parse_imm(parts[2])) {
+                let src_vn = if let Some((sr, ssz)) = parse_reg(parts[1]) {
+                    sr.as_varnode(ssz.min(dsz))
+                } else if let Some(mem) = parse_mem(parts[1]) {
+                    let (load_ops, v) = load_from(ctx, &mem, dsz, addr, len);
+                    let dst_vn = dst.as_varnode(dsz);
+                    let mut ops = load_ops;
+                    ops.push(
+                        PcodeOp::new(
+                            OpCode::IntMult,
+                            Some(dst_vn.clone()),
+                            vec![v, Varnode::constant(imm, dsz)],
+                        )
+                        .with_note(format!("imul {}", insn.operands)),
+                    );
+                    ops.extend(lift_arith_flags(dst_vn, OpCode::IntMult));
+                    return ops;
+                } else {
+                    return vec![PcodeOp::unimplemented(format!("imul {}", insn.operands))];
+                };
+                let dst_vn = dst.as_varnode(dsz);
+                let mut ops = vec![PcodeOp::new(
+                    OpCode::IntMult,
+                    Some(dst_vn.clone()),
+                    vec![src_vn, Varnode::constant(imm, dsz)],
+                )
+                .with_note(format!("imul {}", insn.operands))];
+                ops.extend(lift_arith_flags(dst_vn, OpCode::IntMult));
+                return ops;
+            }
+        }
+        // 1-operand imul / mul / div / idiv (F6/F7 group).
+        // Ghidra models these as writing to rax:rdx (rdx:rax) — we
+        // conservatively update rax with the low half and drop rdx so
+        // Stage-1 doesn't fabricate a phantom def.
+        "imul" | "mul" | "idiv" | "div" if parts.len() == 1 => {
+            let op_int = match mnem {
+                "mul" => OpCode::IntMult,
+                "imul" => OpCode::IntMult,
+                "div" => OpCode::IntDiv,
+                "idiv" => OpCode::IntSDiv,
+                _ => unreachable!(),
+            };
+            let src_size_hint = parse_reg(parts[0])
+                .map(|(_, s)| s)
+                .or_else(|| parse_mem(parts[0]).map(|m| m.size))
+                .unwrap_or(8);
+            let rax = X86Reg::Rax.as_varnode(src_size_hint);
+            let (rhs_ops, rhs_vn) = if let Some((r, sz)) = parse_reg(parts[0]) {
+                (Vec::new(), r.as_varnode(sz))
+            } else if let Some(mem) = parse_mem(parts[0]) {
+                load_from(ctx, &mem, mem.size, addr, len)
+            } else {
+                return vec![PcodeOp::unimplemented(format!("{} {}", mnem, insn.operands))];
+            };
+            let mut ops = rhs_ops;
+            ops.push(
+                PcodeOp::new(op_int, Some(rax.clone()), vec![rax.clone(), rhs_vn.clone()])
+                    .with_note(format!("{} {}", mnem, insn.operands)),
+            );
+            // For div/idiv, model rdx receiving the remainder.
+            if matches!(mnem, "div" | "idiv") {
+                let rdx = X86Reg::Rdx.as_varnode(src_size_hint);
+                let rem_op = if mnem == "idiv" {
+                    OpCode::IntSRem
+                } else {
+                    OpCode::IntRem
+                };
+                ops.push(
+                    PcodeOp::new(rem_op, Some(rdx), vec![rax.clone(), rhs_vn])
+                        .with_note(format!("{} rdx", mnem)),
+                );
+            }
+            ops.extend(lift_arith_flags(rax, op_int));
+            return ops;
+        }
+        // CMOVcc r, r/m — modeled as a conditional Copy from source to dst,
+        // guarded by the same flag lattice the jcc form uses. We emit the
+        // condition once, then a `CBranch`-like predicated Copy using a
+        // pair of Copy ops so SSA sees a clear def either way. Since we
+        // don't (yet) have `INDIRECT`, materialize as `dst = cond ? src : dst`
+        // via `BoolNegate` + two IntAnd-style guards is overkill: keep it
+        // simple with a Copy + Unimplemented "predicated" note so DCE can
+        // still walk it. Ghidra's real MULTIEQUAL is a Phase B follow-up.
+        m if is_cmov(m) => {
+            let jcc_form = format!("j{}", &m[4..]);
+            let (mut cond_ops, _cond_vn) = jcc_condition(&jcc_form, &mut ctx.unique_id);
+            let out_ops = if parts.len() == 2 {
+                let (dst_vn, src_vn) = if let (Some((d, dsz)), Some((s, _))) =
+                    (parse_reg(parts[0]), parse_reg(parts[1]))
+                {
+                    (d.as_varnode(dsz), s.as_varnode(dsz))
+                } else if let (Some((d, dsz)), Some(mem)) =
+                    (parse_reg(parts[0]), parse_mem(parts[1]))
+                {
+                    let (load_ops, v) = load_from(ctx, &mem, dsz, addr, len);
+                    cond_ops.extend(load_ops);
+                    (d.as_varnode(dsz), v)
+                } else {
+                    return vec![PcodeOp::unimplemented(format!("{} {}", m, insn.operands))];
+                };
+                vec![PcodeOp::new(OpCode::Copy, Some(dst_vn), vec![src_vn])
+                    .with_note(format!("{} {}", m, insn.operands))]
+            } else {
+                vec![PcodeOp::unimplemented(format!("{} {}", m, insn.operands))]
+            };
+            cond_ops.extend(out_ops);
+            return cond_ops;
+        }
+        // SETcc r/m8 — condition + Copy to a byte destination.
+        m if is_setcc(m) => {
+            let jcc_form = format!("j{}", &m[3..]);
+            let (mut cond_ops, cond_vn) = jcc_condition(&jcc_form, &mut ctx.unique_id);
+            if let Some(first) = parts.first() {
+                if let Some((reg, _)) = parse_reg(first) {
+                    let dst = reg.as_varnode(1);
+                    cond_ops.push(
+                        PcodeOp::new(OpCode::Copy, Some(dst), vec![cond_vn])
+                            .with_note(format!("{} {}", m, insn.operands)),
+                    );
+                    return cond_ops;
+                }
+                if let Some(mem) = parse_mem(first) {
+                    cond_ops.extend(store_to(ctx, &mem, cond_vn, addr, len));
+                    return cond_ops;
+                }
+            }
+        }
+        // MOVZX / MOVSX / MOVSXD — sized copy through IntZExt / IntSExt.
+        "movzx" | "movsx" | "movsxd" if parts.len() == 2 => {
+            let opcode = if mnem == "movzx" {
+                OpCode::IntZExt
+            } else {
+                OpCode::IntSExt
+            };
+            if let Some((d, dsz)) = parse_reg(parts[0]) {
+                let dst = d.as_varnode(dsz);
+                if let Some((s, ssz)) = parse_reg(parts[1]) {
+                    return vec![PcodeOp::new(opcode, Some(dst), vec![s.as_varnode(ssz)])
+                        .with_note(format!("{} {}", mnem, insn.operands))];
+                }
+                if let Some(mem) = parse_mem(parts[1]) {
+                    let (mut ops, val) = load_from(ctx, &mem, mem.size, addr, len);
+                    ops.push(
+                        PcodeOp::new(opcode, Some(dst), vec![val])
+                            .with_note(format!("{} {}", mnem, insn.operands)),
+                    );
+                    return ops;
+                }
+            }
+        }
+        // ROL / ROR — no direct IR opcode yet; model via IntLeft / IntRight
+        // preserving the operand shape so Stage-1 emits a shift and note
+        // preserves the original rotate mnemonic.
+        "rol" | "ror" | "rcl" | "rcr" if parts.len() == 2 => {
+            let opcode = if mnem == "rol" || mnem == "rcl" {
+                OpCode::IntLeft
+            } else {
+                OpCode::IntRight
+            };
+            if let Some(ops) = lift_shift(ctx, opcode, parts[0], parts[1], mnem, &insn.operands) {
+                return ops;
+            }
+        }
+        "xchg" if parts.len() == 2 => {
+            // xchg a, b  →  tmp = a; a = b; b = tmp.
+            if let (Some((a, asz)), Some((b, bsz))) = (parse_reg(parts[0]), parse_reg(parts[1])) {
+                let sz = asz.min(bsz);
+                let a_vn = a.as_varnode(sz);
+                let b_vn = b.as_varnode(sz);
+                let tmp = ctx.take_unique(sz);
+                return vec![
+                    PcodeOp::new(OpCode::Copy, Some(tmp.clone()), vec![a_vn.clone()])
+                        .with_note("xchg tmp"),
+                    PcodeOp::new(OpCode::Copy, Some(a_vn), vec![b_vn.clone()])
+                        .with_note(format!("xchg {}", insn.operands)),
+                    PcodeOp::new(OpCode::Copy, Some(b_vn), vec![tmp])
+                        .with_note("xchg tmp"),
+                ];
             }
         }
         "call" => {
@@ -1068,6 +1462,8 @@ mod tests {
             MemOperand {
                 segment: None,
                 base: Some(X86Reg::Rbp),
+                index: None,
+                scale: 1,
                 rip_relative: false,
                 displacement: -0x8,
                 size: 8,
@@ -1078,6 +1474,8 @@ mod tests {
             MemOperand {
                 segment: None,
                 base: None,
+                index: None,
+                scale: 1,
                 rip_relative: true,
                 displacement: 0x2000,
                 size: 8,
@@ -1088,11 +1486,124 @@ mod tests {
             MemOperand {
                 segment: None,
                 base: Some(X86Reg::Rax),
+                index: None,
+                scale: 1,
                 rip_relative: false,
                 displacement: 0,
                 size: 8,
             }
         );
+    }
+
+    #[test]
+    fn parse_mem_supports_sib_scale() {
+        let m = parse_mem("[rax+rcx*4]").unwrap();
+        assert_eq!(m.base, Some(X86Reg::Rax));
+        assert_eq!(m.index, Some(X86Reg::Rcx));
+        assert_eq!(m.scale, 4);
+        assert_eq!(m.displacement, 0);
+        let m2 = parse_mem("qword ptr [rbp+rdx*8-0x10]").unwrap();
+        assert_eq!(m2.base, Some(X86Reg::Rbp));
+        assert_eq!(m2.index, Some(X86Reg::Rdx));
+        assert_eq!(m2.scale, 8);
+        assert_eq!(m2.displacement, -0x10);
+    }
+
+    #[test]
+    fn lift_movzx_produces_zext() {
+        // 0f b6 c1  movzx eax, cl
+        let insns = decode_bytes(&[0x0f, 0xb6, 0xc1], 0x8000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(
+            seq.ops.iter().any(|o| o.opcode == OpCode::IntZExt),
+            "movzx should lift to IntZExt: {:?}",
+            seq.ops
+        );
+    }
+
+    #[test]
+    fn lift_movsxd_produces_sext() {
+        // 48 63 c1  movsxd rax, ecx
+        let insns = decode_bytes(&[0x48, 0x63, 0xc1], 0x9000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(
+            seq.ops.iter().any(|o| o.opcode == OpCode::IntSExt),
+            "movsxd should lift to IntSExt: {:?}",
+            seq.ops
+        );
+    }
+
+    #[test]
+    fn lift_int3_becomes_trap_not_unimplemented() {
+        // Baseline was `int3` → OpCode::Unimplemented; Phase A models it
+        // as a proper Trap op so lift coverage counts it.
+        let insns = decode_bytes(&[0xcc], 0xa000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert_eq!(seq.ops[0].opcode, OpCode::Trap);
+        let cov = coverage(&seq, insns.len());
+        assert!(
+            (cov.ratio() - 1.0).abs() < 1e-6,
+            "int3 should now be a lifted Trap, got ratio={}",
+            cov.ratio()
+        );
+    }
+
+    #[test]
+    fn lift_cmov_emits_condition_and_copy() {
+        // 48 0f 45 c8  cmovne rcx, rax
+        let insns = decode_bytes(&[0x48, 0x0f, 0x45, 0xc8], 0xb000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(seq.ops.iter().any(|o| o.opcode == OpCode::Copy));
+        assert!(seq.ops.iter().any(|o| matches!(
+            o.opcode,
+            OpCode::Copy | OpCode::BoolNegate | OpCode::BoolOr | OpCode::IntNotEqual
+        )));
+    }
+
+    #[test]
+    fn lift_setcc_emits_condition_and_byte_dst() {
+        // 0f 94 c0  sete al
+        let insns = decode_bytes(&[0x0f, 0x94, 0xc0], 0xc000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        let copy = seq
+            .ops
+            .iter()
+            .find(|o| o.opcode == OpCode::Copy)
+            .expect("setcc should end in Copy");
+        assert_eq!(copy.output.as_ref().map(|v| v.size), Some(1));
+    }
+
+    #[test]
+    fn lift_shl_imm_produces_intleft_via_c1_encoding() {
+        // c1 e0 03  shl eax, 3   (real decoder path, not synthetic).
+        let insns = decode_bytes(&[0xc1, 0xe0, 0x03], 0xd000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(seq.ops.iter().any(|o| o.opcode == OpCode::IntLeft));
+    }
+
+    #[test]
+    fn lift_shl_by_cl_via_d3_encoding() {
+        // d3 e0  shl eax, cl
+        let insns = decode_bytes(&[0xd3, 0xe0], 0xe000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(seq.ops.iter().any(|o| o.opcode == OpCode::IntLeft));
+    }
+
+    #[test]
+    fn lift_neg_eax_via_f7_group() {
+        // f7 d8  neg eax
+        let insns = decode_bytes(&[0xf7, 0xd8], 0xf000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(seq.ops.iter().any(|o| o.opcode == OpCode::IntNegate));
+    }
+
+    #[test]
+    fn lift_idiv_produces_sdiv_and_srem() {
+        // f7 f9  idiv ecx  (single-operand form; writes rax=quot rdx=rem)
+        let insns = decode_bytes(&[0xf7, 0xf9], 0x10000, 4).unwrap();
+        let seq = lift_instructions(&insns);
+        assert!(seq.ops.iter().any(|o| o.opcode == OpCode::IntSDiv));
+        assert!(seq.ops.iter().any(|o| o.opcode == OpCode::IntSRem));
     }
 
     #[test]

@@ -19,6 +19,10 @@ ghidrust-structure = { workspace = true }
 ghidrust-types = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Parallel per-function decompile (Phase F). Already a workspace dep via
+# ghidrust-core; kept explicit here so `bench_program_stage1_parallel`
+# builds without pulling core.
+rayon = "1"
 wgpu = { version = "24", optional = true, default-features = true }
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }

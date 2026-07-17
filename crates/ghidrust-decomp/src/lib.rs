@@ -23,10 +23,14 @@ pub mod gpu_decompile;
 pub mod ir_emit;
 pub mod stage1;
 
-pub use bench::{bench_functions, bench_program, BenchReport, FunctionBench};
+pub use bench::{
+    bench_functions, bench_program, bench_program_stage1, bench_program_stage1_parallel,
+    BenchReport, FunctionBench,
+};
 pub use ghidra_oracle::{
-    compare as ghidra_headtohead, spawn_ghidra_headless, CapturedGhidraDecompile,
-    GhidraOracleConfig, GhidraOracleReport, GhidraSpawnError, MatchKind, StructuralMatch,
+    compare as ghidra_headtohead, shared_entry_list, spawn_ghidra_headless, token_similarity,
+    CapturedGhidraDecompile, GhidraOracleConfig, GhidraOracleReport, GhidraSpawnError,
+    GhidrustCallConv, GhidrustStage, MatchKind, StructuralMatch,
 };
 pub use stage1::{emit_stage1, emit_stage1_with_hints, is_structured, Stage1Result, Stage1Summary};
 
@@ -52,6 +56,34 @@ pub fn structure_hints_from(prog: &Program) -> StructureHints {
             })
             .collect(),
     )
+}
+
+/// Convert a recovered [`Stage1Result`]'s [`ghidrust_types::FunctionSignature`]
+/// into the shape `ghidrust_core::ProgramEdits` expects for
+/// `commit_params` / `commit_return_type`. Returns
+/// `(return_type_c, parameters_c, locals_c)` — each already rendered as a
+/// C declaration string ("`uint32_t param_1`", "`struct s_1* param_2`", …).
+///
+/// Meant to be called from the GUI's `Decompiler → Commit Params/Return`
+/// action so the recovered types round-trip into user edits without the
+/// GUI having to know the Ghidrust type lattice.
+pub fn stage1_commit_strings(
+    stage1: &Stage1Result,
+) -> (String, Vec<String>, Vec<String>) {
+    let ret = stage1.types.signature.return_type.c_style();
+    let params: Vec<String> = stage1
+        .types
+        .params
+        .iter()
+        .map(|p| format!("{} {}", p.ty.c_style(), p.name))
+        .collect();
+    let locals: Vec<String> = stage1
+        .types
+        .locals
+        .iter()
+        .map(|l| format!("{} {}", l.ty.c_style(), l.name))
+        .collect();
+    (ret, params, locals)
 }
 
 pub use gpu_decompile::{
@@ -595,6 +627,70 @@ mod tests {
         assert!(d.pseudo_c.contains("Stage-0.5"));
         assert!(d.pseudo_c.contains("eax = 0;"));
         assert!(d.pseudo_c.contains("return;"));
+    }
+
+    /// Phase A gate: median lift ratio across the fixture corpus must be
+    /// ≥ 98%. This test enumerates every function the analyzer recovered
+    /// in the shipped fixtures (analysis_lab.pe, tiny_x64.pe, tiny_x64.elf)
+    /// and averages the per-function `LiftCoverage.ratio()`.
+    #[test]
+    fn fixture_corpus_lift_ratio_meets_phase_a_gate() {
+        use ghidrust_core::run_analyzers;
+        use ghidrust_lift::{coverage as lift_coverage, lift_instructions};
+        let fixtures = [
+            "analysis_lab.pe",
+            "tiny_x64.pe",
+            "tiny_x64.elf",
+        ];
+        let mut total_ratio = 0f32;
+        let mut samples = 0usize;
+        let mut per_fixture: Vec<(String, f32, usize)> = Vec::new();
+        for fx in fixtures {
+            let mut prog = load_path(fixture_path(fx))
+                .unwrap_or_else(|e| panic!("load {fx}: {e}"));
+            let _ = run_analyzers(&mut prog, &["Function Start Search"]);
+            let mut entries: Vec<u64> = prog
+                .analysis
+                .functions
+                .iter()
+                .map(|f| f.entry)
+                .collect();
+            if entries.is_empty() {
+                if let Some(e) = prog.entry {
+                    entries.push(e);
+                }
+            }
+            let mut fx_total = 0f32;
+            let mut fx_n = 0usize;
+            for va in entries {
+                let insns = match disassemble_range(&prog, va, 128) {
+                    Ok(v) if !v.is_empty() => v,
+                    _ => continue,
+                };
+                let seq = lift_instructions(&insns);
+                let cov = lift_coverage(&seq, insns.len());
+                if cov.total_ops == 0 {
+                    continue;
+                }
+                fx_total += cov.ratio();
+                fx_n += 1;
+                total_ratio += cov.ratio();
+                samples += 1;
+            }
+            let avg = if fx_n > 0 { fx_total / fx_n as f32 } else { 0.0 };
+            per_fixture.push((fx.to_string(), avg, fx_n));
+        }
+        assert!(samples > 0, "fixture corpus produced no lift samples");
+        let avg = total_ratio / samples as f32;
+        eprintln!("--- fixture corpus lift ratios ---");
+        for (fx, r, n) in &per_fixture {
+            eprintln!("  {fx:<20}  avg={:.3}  functions={}", r, n);
+        }
+        eprintln!("  overall               avg={:.3}  samples={}", avg, samples);
+        assert!(
+            avg >= 0.98,
+            "Phase A gate: fixture-corpus average lift ratio {avg:.3} < 0.98"
+        );
     }
 
     #[test]

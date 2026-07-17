@@ -14,13 +14,16 @@ use ghidrust_decode::Instruction;
 use ghidrust_ir::{AddrSpace, IrSequence, OpCode};
 use ghidrust_lift::{coverage as lift_coverage, flag_off, lift_instructions, LiftCoverage};
 use ghidrust_ssa::{
-    build_cfg_with_leaders, build_ssa, copy_propagate, SsaBlock, SsaFunction, SsaOp, SsaOperand,
+    build_cfg_with_leaders, build_ssa, const_fold, copy_propagate, dead_code_eliminate,
+    load_store_propagate, SsaBlock, SsaFunction, SsaOp, SsaOperand,
 };
 use ghidrust_structure::{
     structure_function_with_hints, NaturalLoop, Region, ShortCircuitClause, ShortCircuitKind,
     StructureHints, StructureReport, SwitchCase,
 };
-use ghidrust_types::{recover, CallConv, ParamList, RustType, StackLocal, TypeRecovery};
+use ghidrust_types::{
+    recover_with_name, CallConv, ParamList, RustType, StackLocal, TypeRecovery,
+};
 
 /// Everything Stage-1 produces alongside the C text: SSA, structure, types
 /// so callers (bench, GUI, MCP) can display the intermediate views without
@@ -75,10 +78,17 @@ pub fn emit_stage1_with_hints(
         .collect();
     let cfg = build_cfg_with_leaders(&seq, entry, region_end, &extra_leaders);
     let mut ssa = build_ssa(&cfg);
-    // Cheap dataflow pass; Stage-1 emit reads propagated operands directly.
-    let _rewrites = copy_propagate(&mut ssa);
+    // Phase B dataflow: propagate copies, forward memory round-trips
+    // (store→load), fold constant arithmetic, drop dead pure ops. Order
+    // matters — const_fold expects copies already threaded, and DCE
+    // shouldn't run until we know which values still have a live use.
+    let _ = copy_propagate(&mut ssa);
+    let _ = load_store_propagate(&mut ssa);
+    let _ = copy_propagate(&mut ssa);
+    let _ = const_fold(&mut ssa);
+    let _ = dead_code_eliminate(&mut ssa);
     let structure = structure_function_with_hints(&cfg, &ssa, hints);
-    let types = recover(&ssa, conv);
+    let types = recover_with_name(&ssa, conv, name);
     let coverage = lift_coverage(&seq, insns.len());
 
     let text = render_function(name, entry, blocks, &ssa, &structure, &types, coverage);
@@ -114,8 +124,9 @@ fn render_function(
         cov.ratio() * 100.0
     ));
 
-    // Function signature.
-    out.push_str(&format!("void {name}("));
+    // Function signature — driven by recovered return type + params.
+    let ret_c = types.signature.return_type.c_style();
+    out.push_str(&format!("{ret_c} {name}("));
     if types.params.is_empty() {
         out.push_str("void");
     } else {
@@ -127,6 +138,30 @@ fn render_function(
         }
     }
     out.push_str(") {\n");
+
+    // Recovered structs — emitted as forward declarations so the pointer
+    // types have a definition to reference.
+    if !types.structs.is_empty() {
+        for (_key, s) in &types.structs {
+            out.push_str(&format!(
+                "    /* struct {} — recovered fields: {} */\n",
+                s.tag,
+                s.fields.len()
+            ));
+            out.push_str(&format!("    struct {} {{\n", s.tag));
+            for (off, f) in &s.fields {
+                out.push_str(&format!(
+                    "        {} field_{:x}; /* @{:#x} width={} */\n",
+                    f.ty.c_style(),
+                    off,
+                    off,
+                    f.width
+                ));
+            }
+            out.push_str("    };\n");
+        }
+        out.push('\n');
+    }
 
     // Local declarations.
     for l in types.locals.iter() {
@@ -172,6 +207,12 @@ fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) 
         }
         Region::Goto(b) => {
             out.push_str(&format!("{}goto block_{};\n", indent(ind), b));
+        }
+        Region::Break => {
+            out.push_str(&format!("{}break;\n", indent(ind)));
+        }
+        Region::Continue => {
+            out.push_str(&format!("{}continue;\n", indent(ind)));
         }
         Region::Seq(rs) => {
             for r in rs {
@@ -329,15 +370,28 @@ fn render_block_body(
     let Some(block) = ctx.ssa.block(b) else {
         return;
     };
-    if !block.phis.is_empty() {
-        for phi in &block.phis {
-            out.push_str(&indent(ind));
-            out.push_str(&format!(
-                "/* {} = φ({} predecessors) */\n",
-                format_value_named(phi.out, ctx.types),
-                phi.incoming.len()
-            ));
+    // Phi nodes are emitted only when they carry a real def (version > 0).
+    // Trivial live-in passthroughs get elided so Stage-1 doesn't clutter
+    // every join with a phi header comment.
+    for phi in &block.phis {
+        if phi.out.version == 0 {
+            continue;
         }
+        // Skip phis whose incoming values all match the phi's own key —
+        // those are just "same variable coming from every predecessor" and
+        // Stage-1's typed variables handle the naming already.
+        let all_trivial = phi
+            .incoming
+            .iter()
+            .all(|(_, v)| v.map(|inc| inc.key() == phi.out.key()).unwrap_or(true));
+        if all_trivial {
+            continue;
+        }
+        out.push_str(&indent(ind));
+        out.push_str(&format!(
+            "/* phi: {} */\n",
+            format_value_named(phi.out, ctx.types)
+        ));
     }
     let last_idx = block.ops.len().saturating_sub(1);
     for (i, op) in block.ops.iter().enumerate() {
@@ -437,11 +491,100 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
         OpCode::IntAnd => binop("&", op, ctx),
         OpCode::IntOr => binop("|", op, ctx),
         OpCode::IntMult => binop("*", op, ctx),
+        OpCode::IntDiv => binop("/", op, ctx),
+        OpCode::IntSDiv => binop("/", op, ctx),
+        OpCode::IntRem => binop("%", op, ctx),
+        OpCode::IntSRem => binop("%", op, ctx),
         OpCode::IntLeft => binop("<<", op, ctx),
         OpCode::IntRight => binop(">>", op, ctx),
         OpCode::IntSRight => binop(">>>", op, ctx),
         OpCode::IntNegate => unop("-", op, ctx),
         OpCode::IntNot => unop("~", op, ctx),
+        OpCode::IntSExt => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            Some(format!(
+                "{} = (int{}_t){};",
+                format_value_named(dst, ctx.types),
+                dst.size * 8,
+                format_operand(a, ctx.types)
+            ))
+        }
+        OpCode::IntZExt => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            Some(format!(
+                "{} = (uint{}_t){};",
+                format_value_named(dst, ctx.types),
+                dst.size * 8,
+                format_operand(a, ctx.types)
+            ))
+        }
+        OpCode::Cast => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            // Prefer the recovered destination type over the raw pcode
+            // width so `(struct s_1*)` / `(int32_t)` renders when known.
+            let dst_ty = ctx.types.types.get(dst.space, dst.offset);
+            let cast_ty = if dst_ty == RustType::Bottom {
+                format!("uint{}_t", dst.size * 8)
+            } else {
+                dst_ty.c_style()
+            };
+            Some(format!(
+                "{} = ({cast_ty}){};",
+                format_value_named(dst, ctx.types),
+                format_operand(a, ctx.types)
+            ))
+        }
+        OpCode::Ptradd => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            let b = op.inputs.get(1)?;
+            Some(format!(
+                "{} = {} + {};",
+                format_value_named(dst, ctx.types),
+                format_operand(a, ctx.types),
+                format_operand(b, ctx.types)
+            ))
+        }
+        OpCode::Piece => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            let b = op.inputs.get(1)?;
+            Some(format!(
+                "{} = ({} << {}) | {};",
+                format_value_named(dst, ctx.types),
+                format_operand(a, ctx.types),
+                op.inputs
+                    .first()
+                    .map(|v| v.varnode().size * 8)
+                    .unwrap_or(0),
+                format_operand(b, ctx.types)
+            ))
+        }
+        OpCode::Subpiece => {
+            let dst = op.output?;
+            let a = op.inputs.first()?;
+            let shift = op
+                .inputs
+                .get(1)
+                .and_then(|v| match v {
+                    SsaOperand::Const(c) => Some(c.offset),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            Some(format!(
+                "{} = ({}) >> {};",
+                format_value_named(dst, ctx.types),
+                format_operand(a, ctx.types),
+                shift * 8
+            ))
+        }
+        OpCode::Trap => Some(format!(
+            "/* trap: {} */",
+            op.note.as_deref().unwrap_or("trap")
+        )),
         OpCode::IntEqual => binop("==", op, ctx),
         OpCode::IntNotEqual => binop("!=", op, ctx),
         OpCode::IntLess => binop("<", op, ctx),
@@ -454,18 +597,18 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
         OpCode::Load => {
             let dst = op.output?;
             let addr = op.inputs.first()?;
+            let deref = format_deref(addr, ctx);
             Some(format!(
-                "{} = *({});",
-                format_value_named(dst, ctx.types),
-                format_operand(addr, ctx.types)
+                "{} = {deref};",
+                format_value_named(dst, ctx.types)
             ))
         }
         OpCode::Store => {
             let addr = op.inputs.first()?;
             let val = op.inputs.get(1)?;
+            let deref = format_deref(addr, ctx);
             Some(format!(
-                "*({}) = {};",
-                format_operand(addr, ctx.types),
+                "{deref} = {};",
                 format_operand(val, ctx.types)
             ))
         }
@@ -505,6 +648,58 @@ fn unop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
         format_value_named(dst, ctx.types),
         format_operand(a, ctx.types)
     ))
+}
+
+/// Render a pointer dereference. When the pointer base has a recovered
+/// [`RustType::StructPtr`] and the address is `base + K` for a known
+/// field offset, render as `base->field_<hex>` — the same shape Ghidra's
+/// PrintC uses when a struct DataType is committed. Falls back to plain
+/// `*(addr)` when the shape isn't recognized.
+fn format_deref(addr: &SsaOperand, ctx: &RenderCtx) -> String {
+    if let SsaOperand::Value(v) = addr {
+        // Try `base + K` decomposition using the SSA def graph.
+        if let Some((base, offset)) = decompose_ssa_addr(v, ctx.ssa) {
+            let base_ty = ctx.types.types.get(base.space, base.offset);
+            if let RustType::StructPtr { key } = &base_ty {
+                if let Some(seed) = ctx.types.structs.get(key) {
+                    if seed.fields.contains_key(&offset) {
+                        return format!(
+                            "{}->field_{:x}",
+                            format_value_named(base, ctx.types),
+                            offset
+                        );
+                    }
+                }
+            }
+            if let RustType::ArrayPtr { elem_width, .. } = base_ty {
+                if elem_width > 0 && offset % elem_width as u64 == 0 {
+                    let idx = offset / elem_width as u64;
+                    return format!(
+                        "{}[{idx}]",
+                        format_value_named(base, ctx.types)
+                    );
+                }
+            }
+        }
+    }
+    format!("*({})", format_operand(addr, &ctx.types))
+}
+
+fn decompose_ssa_addr(
+    v: &ghidrust_ssa::SsaValue,
+    ssa: &SsaFunction,
+) -> Option<(ghidrust_ssa::SsaValue, u64)> {
+    for b in &ssa.blocks {
+        for op in &b.ops {
+            let Some(out) = op.output else { continue };
+            if out == *v && matches!(op.opcode, OpCode::IntAdd | OpCode::Ptradd) {
+                let base = op.inputs.first().and_then(SsaOperand::as_value)?;
+                let offset = op.inputs.get(1).and_then(SsaOperand::as_const).unwrap_or(0);
+                return Some((base, offset));
+            }
+        }
+    }
+    None
 }
 
 fn emit_branch_target(v: &SsaOperand) -> String {
@@ -636,6 +831,12 @@ pub struct Stage1Summary {
     pub locals: usize,
     pub params: usize,
     pub lift_ratio: f32,
+    /// Fraction of structured leaves that are unstructured `goto`s. The
+    /// Phase D target is <0.15 on the lab corpus.
+    pub goto_rate: f32,
+    /// Recovered struct seed count — a proxy for how much struct/array
+    /// shape Stage-1 was able to lift from load/store patterns.
+    pub structs: usize,
 }
 
 impl Stage1Result {
@@ -647,6 +848,8 @@ impl Stage1Result {
             locals: self.types.locals.len(),
             params: self.types.params.len(),
             lift_ratio: self.coverage.ratio(),
+            goto_rate: ghidrust_structure::goto_rate(&self.structure.region),
+            structs: self.types.structs.len(),
         }
     }
 }
@@ -700,10 +903,16 @@ mod tests {
     #[test]
     fn stage1_prologue_emits_return_and_function_header() {
         // push rbp; mov rbp,rsp; xor eax,eax; pop rbp; ret
+        // The `xor eax,eax` before ret is a `return 0` idiom — recovered
+        // return type is uint32_t, not void.
         let bytes = [0x55, 0x48, 0x89, 0xe5, 0x31, 0xc0, 0x5d, 0xc3];
         let rep = stage1_bytes(&bytes, 0x1000, "prologue");
         let text = &rep.pseudo_c;
-        assert!(text.contains("void prologue"), "header missing:\n{text}");
+        assert!(text.contains("prologue"), "header missing:\n{text}");
+        assert!(
+            text.contains("uint32_t prologue") || text.contains("uint64_t prologue"),
+            "recovered int return type expected:\n{text}"
+        );
         assert!(text.contains("return;"), "return missing:\n{text}");
         assert!(text.contains("Stage-1"), "must self-identify as Stage-1:\n{text}");
         // eax = 0 idiom lowered
@@ -852,10 +1061,98 @@ mod tests {
     }
 
     #[test]
+    fn stage1_pipeline_folds_and_dces_dead_arithmetic() {
+        // Phase B gate: t0 = 0x100; t1 = 0x20; rax = t0 + t1; ret
+        // — Stage-1 should render `rax = 0x120;` (const-folded), then keep
+        // the assignment because rax is a return-value register (DCE seed).
+        // 48 c7 c0 00 01 00 00   mov rax, 0x100
+        // 48 c7 c1 20 00 00 00   mov rcx, 0x20
+        // 48 01 c8               add rax, rcx
+        // c3                     ret
+        let bytes = [
+            0x48, 0xc7, 0xc0, 0x00, 0x01, 0x00, 0x00, // mov rax, 0x100
+            0x48, 0xc7, 0xc1, 0x20, 0x00, 0x00, 0x00, // mov rcx, 0x20
+            0x48, 0x01, 0xc8, // add rax, rcx
+            0xc3, // ret
+        ];
+        let rep = stage1_bytes(&bytes, 0x5000, "add_two_consts");
+        assert!(
+            rep.pseudo_c.contains("0x120"),
+            "const_fold + copy_prop should render 0x120:\n{}",
+            rep.pseudo_c
+        );
+    }
+
+    #[test]
+    fn stage1_pipeline_drops_dead_pure_arithmetic() {
+        // ecx = 0; ret  — rcx is not a return register, DCE should drop it.
+        // 31 c9  xor ecx, ecx
+        // c3     ret
+        let rep = stage1_bytes(&[0x31, 0xc9, 0xc3], 0x6000, "dead_ecx");
+        // The bare `ret` should be present.
+        assert!(rep.pseudo_c.contains("return;"));
+        // rcx should not appear in a live assignment (`ecx#N = 0;`) —
+        // DCE dropped it. It may still surface in a comment note.
+        let live_assign = rep
+            .pseudo_c
+            .lines()
+            .any(|l| l.contains("ecx") && l.trim().starts_with("ecx"));
+        assert!(
+            !live_assign,
+            "unused ecx write should be DCE-dropped, saw:\n{}",
+            rep.pseudo_c
+        );
+    }
+
+    #[test]
+    fn stage1_recovers_return_type_from_rax_write() {
+        // mov rax, rdi ; ret  → return type recovered as uint64_t
+        let bytes = [0x48, 0x89, 0xf8, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x7000, "id64");
+        let text = &rep.pseudo_c;
+        assert!(
+            text.contains("uint64_t id64") || text.contains("uint32_t id64"),
+            "expected typed return, saw:\n{text}"
+        );
+        assert_ne!(
+            rep.types.signature.return_type,
+            ghidrust_types::RustType::Void,
+            "RAX write must produce non-void return"
+        );
+    }
+
+    #[test]
+    fn stage1_diamond_has_low_goto_rate() {
+        let bytes = [0x39, 0xc1, 0x74, 0x02, 0x31, 0xc0, 0xc3, 0x31, 0xc9, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x2000, "diamond_goto");
+        let s = rep.summary();
+        assert!(
+            s.goto_rate < 0.15,
+            "Phase D gate: diamond goto_rate {} < 0.15 expected, output:\n{}",
+            s.goto_rate,
+            rep.pseudo_c
+        );
+    }
+
+    #[test]
+    fn stage1_signature_carries_recovered_prototype() {
+        // 48 89 f8       mov rax, rdi
+        // 48 01 f0       add rax, rsi
+        // c3             ret
+        let bytes = [0x48, 0x89, 0xf8, 0x48, 0x01, 0xf0, 0xc3];
+        let rep = stage1_bytes(&bytes, 0x8000, "adder");
+        let sig = &rep.types.signature;
+        assert_eq!(sig.name, "adder");
+        assert!(!sig.params.is_empty(), "should recover rdi/rsi params");
+        let proto = sig.to_prototype();
+        assert!(proto.contains("adder("), "prototype: {proto}");
+    }
+
+    #[test]
     fn stage1_falls_back_when_lift_ratio_too_low() {
         use ghidrust_decode::Instruction;
-        // hlt is not lifted → Stage-1 emits `unimplemented` markers instead
-        // of fabricating C.
+        // `hlt` now lifts to a `Trap` op — Stage-1 preserves that as a
+        // trap comment so the output stays honest without fabricating C.
         let insn = Instruction {
             address: 0x4000,
             bytes: vec![0xf4],
@@ -866,10 +1163,27 @@ mod tests {
         let d = decompile_instructions("halted", 0x4000, &[insn.clone()]);
         let rep = emit_stage1(&d.name, d.entry, &d.blocks, &[insn], CallConv::SystemV);
         assert!(
-            rep.pseudo_c.contains("unimplemented"),
-            "unlifted op should be preserved as comment:\n{}",
+            rep.pseudo_c.contains("trap: hlt") || rep.pseudo_c.contains("unimplemented"),
+            "hlt should render as a Trap or Unimplemented comment:\n{}",
             rep.pseudo_c
         );
         assert!(!is_structured(&rep), "hlt should not count as structured");
+
+        // A genuinely-unlifted mnemonic still surfaces via
+        // `OpCode::Unimplemented` so we never invent C.
+        let unknown = Instruction {
+            address: 0x4010,
+            bytes: vec![0xff, 0xff],
+            mnemonic: "wibble".into(),
+            operands: String::new(),
+            length: 2,
+        };
+        let d2 = decompile_instructions("wibbler", 0x4010, &[unknown.clone()]);
+        let rep2 = emit_stage1(&d2.name, d2.entry, &d2.blocks, &[unknown], CallConv::SystemV);
+        assert!(
+            rep2.pseudo_c.contains("unimplemented"),
+            "genuinely unlifted opcode should stay Unimplemented:\n{}",
+            rep2.pseudo_c
+        );
     }
 }

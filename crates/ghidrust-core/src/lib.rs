@@ -12,6 +12,7 @@ pub mod program;
 pub mod project;
 pub mod rtti;
 pub mod theme;
+pub mod xrefs;
 
 pub use analyzers::{
     analyzer_catalog, run_analyzers, run_analyzers_opts, scan_ascii_strings, AnalysisRunReport,
@@ -32,7 +33,8 @@ pub use gpu_analyzers::{
 };
 pub use disasm::{decode_one, disassemble_at, disassemble_range, Instruction};
 pub use edits::{
-    CommentKind, FunctionSignatureEdit, ProgramEditTotals, ProgramEdits, RetypeEdit, BUILTIN_TYPES,
+    CommentKind, EquateEdit, FunctionSignatureEdit, ProgramEditTotals, ProgramEdits, RetypeEdit,
+    BUILTIN_TYPES,
 };
 pub use error::{Error, Result};
 pub use program::{
@@ -46,6 +48,7 @@ pub use project::{
 };
 pub use rtti::{recover_rtti, RttiClass, RttiReport};
 pub use theme::{m3_tokens, ThemeMode, M3Tokens};
+pub use xrefs::{operand_addresses, xrefs_from, xrefs_to, XRef};
 
 use std::path::{Path, PathBuf};
 

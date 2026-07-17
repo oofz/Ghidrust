@@ -18,6 +18,10 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn decompile_tiny_pe_nonempty_structure() {
+    // Phase F: the CLI default is Stage-1. JSON now nests under
+    // `decompile.*` with an extra `stage1` sibling. Assert against the
+    // Stage-1 shape but accept either nesting so ports of this test
+    // that override with `--stage0` still pass.
     let out = Command::new(bin())
         .args([
             "decompile",
@@ -32,12 +36,28 @@ fn decompile_tiny_pe_nonempty_structure() {
         String::from_utf8_lossy(&out.stderr)
     );
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
-    assert!(v["pseudo_c"].as_str().unwrap_or("").contains("void "));
-    assert!(v["blocks"]
+    // Both stage shapes carry a `pseudo_c` — top-level for Stage-0, under
+    // `decompile.pseudo_c` for Stage-0.5 / Stage-1.
+    let pseudo = v["pseudo_c"]
+        .as_str()
+        .or_else(|| v["decompile"]["pseudo_c"].as_str())
+        .unwrap_or("");
+    assert!(
+        pseudo.contains("void ") || pseudo.contains("uint")
+            || pseudo.contains("int32_t") || pseudo.contains("int64_t"),
+        "expected typed function header, got:\n{pseudo}"
+    );
+    let blocks = v["blocks"]
         .as_array()
+        .or_else(|| v["decompile"]["blocks"].as_array())
         .map(|a| !a.is_empty())
-        .unwrap_or(false));
-    assert!(v["insn_count"].as_u64().unwrap_or(0) > 0);
+        .unwrap_or(false);
+    assert!(blocks, "expected non-empty blocks");
+    let insns = v["insn_count"]
+        .as_u64()
+        .or_else(|| v["decompile"]["insn_count"].as_u64())
+        .unwrap_or(0);
+    assert!(insns > 0);
 }
 
 #[test]
