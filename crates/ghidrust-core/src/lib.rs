@@ -7,6 +7,7 @@ pub mod gpu_analyzers;
 pub mod disasm;
 pub mod elf;
 pub mod error;
+pub mod imports;
 pub mod pe;
 pub mod program;
 pub mod project;
@@ -15,8 +16,9 @@ pub mod theme;
 pub mod xrefs;
 
 pub use analyzers::{
-    analyzer_catalog, run_analyzers, run_analyzers_opts, scan_ascii_strings, AnalysisRunReport,
-    AnalyzerInfo, AnalyzerOutput, AnalyzerStatus, FoundString, ANALYZER_NAMES,
+    analyzer_catalog, collect_strings, run_analyzers, run_analyzers_opts, scan_ascii_strings,
+    scan_utf16le_strings, AnalysisRunReport, AnalyzerInfo, AnalyzerOutput, AnalyzerStatus,
+    FoundString, ANALYZER_NAMES,
 };
 pub use bulk_scan::{
     plan_dispatch_workgroup_chunks, preferred_bulk_mode, scan_ascii_strings_bulk,
@@ -31,7 +33,10 @@ pub use gpu_analyzers::{
     merge_seeds_into_program, pad_large, seeds_equal, strategy_matrix, AnalyzerBenchRow,
     GpuStrategyClass,
 };
-pub use disasm::{decode_one, disassemble_at, disassemble_range, Instruction};
+pub use disasm::{
+    decode_one, disassemble_at, disassemble_range, disassemble_range_opts, Instruction,
+};
+pub use imports::{filter_imports, load_imports, parse_pe_imports};
 pub use edits::{
     CommentKind, EquateEdit, FunctionSignatureEdit, ProgramEditTotals, ProgramEdits, RetypeEdit,
     BUILTIN_TYPES,
@@ -39,8 +44,8 @@ pub use edits::{
 pub use error::{Error, Result};
 pub use program::{
     AddressTableInfo, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo,
-    MediaHit, MemoryBlock, Program, ReferenceInfo, ResourceInfo, SectionInfo, SwitchInfo,
-    SymbolInfo,
+    ImportEntry, MediaHit, MemoryBlock, Program, ReferenceInfo, ResourceInfo, SectionInfo,
+    SwitchInfo, SymbolInfo,
 };
 pub use project::{
     AnalysisSummary, Project, ProjectFileEntry, ProjectMeta, ProjectTreeModel, ProjectTreeRow,
@@ -48,7 +53,10 @@ pub use project::{
 };
 pub use rtti::{recover_rtti, RttiClass, RttiReport};
 pub use theme::{m3_tokens, ThemeMode, M3Tokens};
-pub use xrefs::{operand_addresses, xrefs_from, xrefs_to, XRef};
+pub use xrefs::{
+    instruction_targets, operand_addresses, rip_relative_targets, xrefs_from, xrefs_to,
+    xrefs_to_import, xrefs_to_string_filter, XRef,
+};
 
 use std::path::{Path, PathBuf};
 

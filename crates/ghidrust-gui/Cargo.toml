@@ -14,6 +14,10 @@ ghidrust-core = { workspace = true, features = ["gpu"] }
 # CPU Stage-0 (CFG → pseudo-C); do not call GPU decompile APIs from the GUI.
 ghidrust-decomp = { path = "../ghidrust-decomp" }
 ghidrust-types = { workspace = true }
+# Grok Build agent bridge (Option C — ACP sidecar). Ships default-on; the
+# runtime child (`grok`) is user-installed via the pane's one-click Install
+# button, so this dep only adds ~120 KB of Rust code, no binary vendoring.
+ghidrust-agent = { workspace = true }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
 rfd = "0.15"

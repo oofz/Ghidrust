@@ -53,6 +53,7 @@ impl GpuStrategyClass {
 pub fn gpu_strategy_for(name: &str) -> GpuStrategyClass {
     match name {
         "ASCII Strings" => GpuStrategyClass::PrintableRun,
+        "Unicode Strings" => GpuStrategyClass::CstrMulti,
         "Aggressive Instruction Finder" => GpuStrategyClass::CodeDensity,
         "Call Convention ID" => GpuStrategyClass::PrologueAbi,
         "Call-Fixup Installer" => GpuStrategyClass::CstrMulti,
@@ -106,6 +107,7 @@ pub struct GpuAnalyzerRun {
 
 fn needles_for(name: &str) -> Vec<&'static [u8]> {
     match name {
+        "Unicode Strings" => Vec::new(), // host UTF-16LE scan is authoritative
         "Call-Fixup Installer" => vec![b"__security_check_cookie", b"security_cookie"],
         "Demangler Microsoft" => vec![b".?AV", b".?AU", b"??_"],
         "Non-Returning Functions - Discovered" => {
@@ -499,10 +501,14 @@ pub fn run_gpu_for_analyzer(
     if strategy == GpuStrategyClass::CstrMulti {
         let mut all_hits = Vec::new();
         let mut timing = GpuPhaseTiming::default();
-        let mut backend = String::new();
+        let mut backend = String::from("cpu_empty_needles");
         let mut device = String::new();
         let mut note = String::from("multi-needle: ");
-        for n in needles_for(name) {
+        let needles = needles_for(name);
+        if needles.is_empty() {
+            note.push_str("(none)");
+        }
+        for n in needles {
             let r = run_kernel(&hay, KernelKind::Cstr, Some(n), image_base, image_end);
             all_hits.extend(r.hits.iter().copied());
             timing.pcie_upload_ms += r.timing.pcie_upload_ms;

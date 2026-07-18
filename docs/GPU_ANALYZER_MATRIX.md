@@ -8,6 +8,7 @@ CPU remains the correctness oracle. Timing always splits **PCIe** (upload+downlo
 | Analyzer | Strategy class | GPU method (novel kernel / multipass) |
 |----------|----------------|----------------------------------------|
 | ASCII Strings | `printable_run` | Parallel printable-byte mark + host run compact |
+| Unicode Strings | `cstr_multi` | Host UTF-16LE scan; GPU seed uses multi-needle cstr family |
 | Aggressive Instruction Finder | `code_density` | Non-int3 / code-like density windows over exec image |
 | Call Convention ID | `prologue_abi` | Scan push/mov/sub-rsp / ret patterns → ABI hint seeds |
 | Call-Fixup Installer | `cstr_multi` | Multi-needle cstr for security_cookie / known fixups |

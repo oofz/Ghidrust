@@ -15,6 +15,11 @@ use eframe::egui::{self, Color32, RichText, Ui};
 /// exact strings Ghidra uses so the Window menu is a drop-in mental map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PaneKind {
+    /// Ghidrust addition (not present in Ghidra): the Grok Build agent
+    /// console. Rendered as the primary tab in the bottom dock (next to the
+    /// plain `Console`) so RE users can chat with an agent that already
+    /// speaks the full Ghidrust MCP tool surface.
+    AgentConsole,
     Bookmarks,
     Bytes,
     ChecksumGenerator,
@@ -63,6 +68,8 @@ impl PaneKind {
         PaneKind::Overview,
         PaneKind::Listing,
         PaneKind::DecompiledView,
+        // Ghidrust-specific (bottom dock primary tab).
+        PaneKind::AgentConsole,
         // Alphabetical from here (Ghidra Window menu order)
         PaneKind::Bookmarks,
         PaneKind::Bytes,
@@ -94,6 +101,7 @@ impl PaneKind {
     /// Ghidra display title (Window menu label / provider `TITLE`).
     pub const fn title(self) -> &'static str {
         match self {
+            PaneKind::AgentConsole => "Grok",
             PaneKind::Bookmarks => "Bookmarks",
             PaneKind::Bytes => "Bytes",
             PaneKind::ChecksumGenerator => "Checksum Generator",
@@ -140,6 +148,7 @@ impl PaneKind {
     /// Ghidra plugin owner (for empty-state hint text).
     pub const fn plugin(self) -> &'static str {
         match self {
+            PaneKind::AgentConsole => "GhidrustAgentConsole",
             PaneKind::Bookmarks => "BookmarkPlugin",
             PaneKind::Bytes => "ByteViewerPlugin",
             PaneKind::ChecksumGenerator => "ComputeChecksumsPlugin",
@@ -203,12 +212,15 @@ impl PaneKind {
                 | PaneKind::ExternalPrograms
                 | PaneKind::DataTypePreview
                 | PaneKind::ChecksumGenerator
+                // Grok agent console (ghidrust-agent crate).
+                | PaneKind::AgentConsole
         )
     }
 
     /// Optional stable id used for egui window ids (must be unique).
     pub const fn egui_id(self) -> &'static str {
         match self {
+            PaneKind::AgentConsole => "pane_agent_console",
             PaneKind::Bookmarks => "pane_bookmarks",
             PaneKind::Bytes => "pane_bytes",
             PaneKind::ChecksumGenerator => "pane_checksum",
@@ -317,6 +329,7 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
 /// One-liner hint pointing at which analyzer/model would fill this pane.
 pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
     match kind {
+        PaneKind::AgentConsole => "",
         PaneKind::Bookmarks => "Backend pending — Bookmarks model + margin markers land in Phase B (M2).",
         PaneKind::Bytes => "",
         PaneKind::ChecksumGenerator => "",

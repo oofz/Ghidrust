@@ -39,6 +39,18 @@ pub struct FunctionInfo {
     pub stack_locals: Vec<String>,
 }
 
+/// One PE import / IAT slot (ELF imports may be added later).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportEntry {
+    pub dll: String,
+    pub name: Option<String>,
+    pub ordinal: Option<u16>,
+    /// VA of the IAT slot (pointer that calls resolve through).
+    pub iat_va: u64,
+    /// VA of the matching ILT slot when present.
+    pub ilt_va: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SymbolInfo {
     pub va: u64,
@@ -130,6 +142,9 @@ pub struct Program {
     pub file_bytes: Vec<u8>,
     pub rtti: RttiReport,
     pub analysis: AnalysisState,
+    /// PE import directory entries (IAT VAs + names). Empty for ELF until wired.
+    #[serde(default)]
+    pub imports: Vec<ImportEntry>,
     /// User-facing edits (renames, comments, retypes, function signatures, user types).
     /// Stored side-car so analyzer output remains "honest / never fabricated".
     #[serde(default)]
@@ -148,6 +163,7 @@ impl Program {
             file_bytes: Vec::new(),
             rtti: RttiReport::default(),
             analysis: AnalysisState::default(),
+            imports: Vec::new(),
             edits: ProgramEdits::default(),
         }
     }
@@ -201,5 +217,15 @@ impl Program {
 
     pub fn function_at_mut(&mut self, entry: u64) -> Option<&mut FunctionInfo> {
         self.analysis.functions.iter_mut().find(|f| f.entry == entry)
+    }
+
+    /// Tightest analyzed function whose `[entry, end)` contains `va`.
+    /// Prefers the greatest `entry` ≤ `va` among covering intervals.
+    pub fn function_containing(&self, va: u64) -> Option<&FunctionInfo> {
+        self.analysis
+            .functions
+            .iter()
+            .filter(|f| va >= f.entry && va < f.end.max(f.entry.saturating_add(1)))
+            .max_by_key(|f| f.entry)
     }
 }

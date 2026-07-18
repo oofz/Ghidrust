@@ -25,11 +25,12 @@ use crate::program::Program;
 use crate::rtti::{recover_rtti, RttiReport};
 use serde::Serialize;
 
-pub use strings::{scan_ascii_strings, FoundString};
+pub use strings::{collect_strings, scan_ascii_strings, scan_utf16le_strings, FoundString};
 
 /// Exact labels from the Ghidra Auto Analysis screenshot (order preserved).
 pub const ANALYZER_NAMES: &[&str] = &[
     "ASCII Strings",
+    "Unicode Strings",
     "Aggressive Instruction Finder",
     "Call Convention ID",
     "Call-Fixup Installer",
@@ -120,6 +121,7 @@ pub fn analyzer_catalog() -> Vec<AnalyzerInfo> {
             default_enabled: matches!(
                 *name,
                 "ASCII Strings"
+                    | "Unicode Strings"
                     | "WindowsPE x86 PE RTTI Analyzer"
                     | "Function Start Search"
                     | "Create Address Tables"
@@ -204,6 +206,7 @@ pub fn run_analyzers_opts(
 fn run_one(prog: &mut Program, name: &str) -> Result<AnalyzerOutput> {
     match name {
         "ASCII Strings" => strings::run(prog),
+        "Unicode Strings" => strings::run_unicode(prog),
         "Aggressive Instruction Finder" => aggressive::run(prog),
         "Call Convention ID" => call_convention::run(prog),
         "Call-Fixup Installer" => call_fixup::run(prog),
@@ -251,7 +254,7 @@ mod tests {
     #[test]
     fn catalog_all_implemented() {
         let cat = analyzer_catalog();
-        assert_eq!(cat.len(), 20);
+        assert_eq!(cat.len(), 21);
         assert!(cat
             .iter()
             .all(|c| c.status == AnalyzerStatus::Implemented));

@@ -235,7 +235,11 @@ fn decode_modrm_mem(
     } else if mod_ == 0 && rm_enc == 5 {
         // RIP-relative
         let disp = cur.take_imm(4)? as i32 as i64;
-        parts = format!("[rip+{}]", sign_hex(disp));
+        parts = if disp < 0 {
+            format!("[rip{}]", sign_hex(disp))
+        } else {
+            format!("[rip+{}]", sign_hex(disp))
+        };
     } else {
         let base = REGS64[rm as usize];
         match mod_ {

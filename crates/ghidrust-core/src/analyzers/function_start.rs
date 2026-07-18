@@ -122,18 +122,31 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
 fn grow_function(prog: &Program, entry: u64) -> u64 {
     let mut va = entry;
     let mut end = entry;
-    for _ in 0..64 {
+    let mut skipped = 0u32;
+    // Grow generously so mid-body VAs fall inside [entry, end).
+    for _ in 0..4096 {
         let Some(bytes) = prog.read_va(va, 15) else {
             break;
         };
-        let Ok(insn) = decode_one(&bytes, va) else {
-            break;
-        };
-        end = va + insn.length as u64;
-        if insn.mnemonic == "ret" || insn.mnemonic == "int3" {
-            break;
+        match decode_one(&bytes, va) {
+            Ok(insn) => {
+                skipped = 0;
+                end = va + insn.length as u64;
+                if insn.mnemonic == "ret" {
+                    break;
+                }
+                va = end;
+            }
+            Err(_) => {
+                // Skip bad bytes to keep extent continuous across decode holes.
+                skipped += 1;
+                if skipped > 16 {
+                    break;
+                }
+                va = va.wrapping_add(1);
+                end = end.max(va);
+            }
         }
-        va = end;
     }
     end.max(entry + 1)
 }

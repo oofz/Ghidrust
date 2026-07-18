@@ -1,6 +1,7 @@
 //! Ghidrust CodeBrowser shell — Material 3 Dark/Light, Ghidra-like menus/panes.
 //! Icons: Google Material 3 geometry (see `icons.rs`); no emoji in the UI.
 
+mod agent_pane;
 mod debugger;
 mod decomp_tokens;
 mod entropy;
@@ -352,6 +353,11 @@ pub struct GhidrustApp {
     layouts_cached: Vec<String>,
     /// Current layout name (empty = unnamed / default).
     current_layout_name: String,
+    // ── Grok Build agent console (Option C: ACP sidecar) ───────────────
+    /// Per-window Grok pane state (session, transcript, install prompts, mode).
+    /// One project per window means one session at a time; audit + MCP config
+    /// are written to `<project>/.grok/` on session start.
+    grok_pane: agent_pane::GrokPaneState,
 }
 
 /// Phase D (M4) — Checksum Generator report (Ghidra `ComputeChecksumsPlugin`).
@@ -796,6 +802,7 @@ impl GhidrustApp {
             layouts_new_name: String::new(),
             layouts_cached: Vec::new(),
             current_layout_name: String::new(),
+            grok_pane: agent_pane::GrokPaneState::new(),
         }
     }
 
@@ -2753,6 +2760,366 @@ impl GhidrustApp {
         self.status = m.clone();
         self.nyi_note = Some(m.clone());
         self.log(m);
+    }
+
+    /// Render the bottom-dock tabbed panel — `Grok` (primary) + `Console`.
+    ///
+    /// The old plain `Console` panel is preserved verbatim under the second
+    /// tab; the Grok tab hosts the agent chat + tool-call cards + install
+    /// prompt.
+    fn render_bottom_dock(&mut self, ui: &mut egui::Ui) {
+        use agent_pane::BottomTab;
+        ui.horizontal(|ui| {
+            let grok_selected = self.grok_pane.tab == BottomTab::Grok;
+            let console_selected = self.grok_pane.tab == BottomTab::Console;
+            if ui.selectable_label(grok_selected, "Grok").clicked() {
+                self.grok_pane.tab = BottomTab::Grok;
+            }
+            if ui.selectable_label(console_selected, "Console").clicked() {
+                self.grok_pane.tab = BottomTab::Console;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match self.grok_pane.tab {
+                    BottomTab::Grok => {
+                        if ui.small_button("Clear chat").clicked() {
+                            self.grok_pane.transcript.clear();
+                        }
+                    }
+                    BottomTab::Console => {
+                        if ui.small_button("Clear").clicked() {
+                            self.console.clear();
+                            self.console_severity.clear();
+                        }
+                    }
+                }
+            });
+        });
+        ui.separator();
+        match self.grok_pane.tab {
+            BottomTab::Grok => self.render_grok_tab(ui),
+            BottomTab::Console => self.render_console_tab(ui),
+        }
+    }
+
+    fn render_console_tab(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical()
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                let n = self.console.len();
+                for i in 0..n {
+                    let sev = self
+                        .console_severity
+                        .get(i)
+                        .copied()
+                        .unwrap_or(ConsoleSeverity::Info);
+                    let color = match sev {
+                        ConsoleSeverity::Info => ui.visuals().text_color(),
+                        ConsoleSeverity::Warn => Color32::from_rgb(0xFB, 0xC0, 0x2D),
+                        ConsoleSeverity::Error => Color32::from_rgb(0xE5, 0x39, 0x35),
+                    };
+                    let prefix = match sev {
+                        ConsoleSeverity::Info => "  ",
+                        ConsoleSeverity::Warn => "! ",
+                        ConsoleSeverity::Error => "× ",
+                    };
+                    ui.label(
+                        egui::RichText::new(format!("{prefix}{}", self.console[i]))
+                            .monospace()
+                            .color(color),
+                    );
+                }
+            });
+    }
+
+    fn render_grok_tab(&mut self, ui: &mut egui::Ui) {
+        let t = m3_tokens(self.theme);
+        let primary = Color32::from_rgb(t.primary[0], t.primary[1], t.primary[2]);
+        let muted = Color32::from_rgb(
+            t.on_surface_variant[0],
+            t.on_surface_variant[1],
+            t.on_surface_variant[2],
+        );
+
+        // Session header.
+        ui.horizontal_wrapped(|ui| {
+            let mode_label = self.grok_pane.mode.label();
+            ui.label(egui::RichText::new(format!("Grok · {mode_label}")).color(primary).strong());
+            if let Some(sess) = &self.grok_pane.session {
+                ui.small(
+                    egui::RichText::new(format!(
+                        "transport={} · model={}",
+                        sess.transport_kind().label(),
+                        sess.model().unwrap_or("(user default)")
+                    ))
+                    .color(muted),
+                );
+            } else if let Some(bin) = &self.grok_pane.grok_bin {
+                ui.small(
+                    egui::RichText::new(format!("grok bin: {}", bin.display())).color(muted),
+                );
+            } else {
+                ui.small(
+                    egui::RichText::new("grok binary not found on PATH")
+                        .color(Color32::from_rgb(0xFB, 0xC0, 0x2D)),
+                );
+            }
+
+            // Mode picker.
+            ui.separator();
+            let mut mode = self.grok_pane.mode;
+            egui::ComboBox::new("grok_mode_combo", "mode")
+                .selected_text(mode.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut mode, ghidrust_agent::AgentMode::Airgap, "airgap");
+                    ui.selectable_value(
+                        &mut mode,
+                        ghidrust_agent::AgentMode::ReadOnly,
+                        "read-only",
+                    );
+                    ui.selectable_value(&mut mode, ghidrust_agent::AgentMode::Full, "full");
+                });
+            if mode != self.grok_pane.mode {
+                self.grok_pane.mode = mode;
+                self.log(format!("Grok mode → {}", mode.label()));
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.grok_pane.session.is_some() {
+                    if ui.button("Stop").clicked() {
+                        self.grok_pane.session = None;
+                        self.log("Grok session stopped.");
+                    }
+                } else {
+                    if ui.button("Start Session").clicked() {
+                        self.start_grok_session_from_ui();
+                    }
+                    if self.grok_pane.grok_bin.is_none() {
+                        if ui.button("Install Grok Build…").clicked() {
+                            let status = agent_pane::spawn_install_grok();
+                            self.log(status.clone());
+                            self.grok_pane.install_status = Some(status);
+                        }
+                    }
+                    if ui.button("Re-scan for grok").clicked() {
+                        self.grok_pane.refresh_grok_binary();
+                        let msg = match &self.grok_pane.grok_bin {
+                            Some(p) => format!("Found grok at {}", p.display()),
+                            None => "grok not found on PATH — install first".into(),
+                        };
+                        self.log(msg);
+                    }
+                }
+            });
+        });
+
+        // Value proposition + honest banner when no session is live.
+        if self.grok_pane.session.is_none() && self.grok_pane.transcript.is_empty() {
+            ui.small(
+                egui::RichText::new(
+                    "Direct RE control via semantic search and chat — lower barrier to entry \
+                     to reverse engineering. Grok speaks the full Ghidrust MCP tool surface \
+                     (analyze, decompile Stage-0/0.5/1, xrefs, imports, strings, RTTI). \
+                     Read-only mode is safe by default; switch to Full for renames + comments.",
+                )
+                .color(muted),
+            );
+        }
+        if let Some(err) = &self.grok_pane.last_error {
+            ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
+        }
+        if let Some(status) = &self.grok_pane.install_status {
+            ui.small(egui::RichText::new(status).color(muted));
+        }
+
+        ui.separator();
+
+        // Transcript.
+        let mut pending_approvals: Vec<(String, bool)> = Vec::new();
+        egui::ScrollArea::vertical()
+            .id_salt("grok_transcript")
+            .stick_to_bottom(true)
+            .min_scrolled_height(120.0)
+            .show(ui, |ui| {
+                let transcript_len = self.grok_pane.transcript.len();
+                for i in 0..transcript_len {
+                    let entry = &mut self.grok_pane.transcript[i];
+                    let mut pseudo_c_render =
+                        |ui: &mut egui::Ui, body: &str| render_pseudo_c_inline(ui, body);
+                    let mut on_approval = |id: &str, ok: bool| {
+                        pending_approvals.push((id.to_string(), ok));
+                    };
+                    agent_pane::render_transcript_entry(
+                        ui,
+                        entry,
+                        &mut pseudo_c_render,
+                        &mut on_approval,
+                        muted,
+                        primary,
+                    );
+                    ui.add_space(2.0);
+                }
+                if transcript_len == 0 && self.grok_pane.session.is_some() {
+                    ui.small(
+                        egui::RichText::new("Session started. Type a prompt below and press Ctrl+Enter.")
+                            .color(muted),
+                    );
+                }
+            });
+        for (id, ok) in pending_approvals {
+            self.log(format!("Grok approval · {id} · {}", if ok { "approve" } else { "deny" }));
+            // The ACP transport doesn't yet accept approval verdicts back —
+            // when it does, forward via `session.send_approval(id, ok)`.
+            // For now the transcript reflects the user's decision locally.
+        }
+
+        ui.separator();
+
+        // Input row.
+        ui.horizontal(|ui| {
+            let sink = egui::TextEdit::multiline(&mut self.grok_pane.input)
+                .desired_rows(2)
+                .desired_width(ui.available_width() - 96.0)
+                .hint_text(if self.grok_pane.session.is_some() {
+                    "Ask about the current binary — Ctrl+Enter to send"
+                } else {
+                    "Start a session to chat with Grok"
+                });
+            let resp = ui.add(sink);
+            let ctrl_enter =
+                resp.has_focus() && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
+            let clicked = ui.button("Send").clicked();
+            if (ctrl_enter || clicked)
+                && !self.grok_pane.input.trim().is_empty()
+                && self.grok_pane.session.is_some()
+            {
+                self.dispatch_grok_prompt();
+            }
+        });
+    }
+
+    /// Build the current program-facts snapshot for the Grok pane.
+    fn grok_program_facts(&self) -> ghidrust_agent::ProgramFacts {
+        let mut f = ghidrust_agent::ProgramFacts::default();
+        if let Some(proj) = &self.project {
+            f.project_name = Some(proj.meta.name.clone());
+            f.project_root = Some(proj.root.display().to_string());
+        }
+        if let Some(prog) = &self.program {
+            f.program = Some(prog.name.clone());
+            f.format = Some(prog.format.clone());
+            f.arch = Some("x86_64".into());
+            f.image_base = Some(format!("{:#x}", prog.image_base));
+            f.entry_va = prog.entry.map(|v| format!("{v:#x}"));
+            f.functions = Some(prog.analysis.functions.len());
+            f.strings = Some(self.strings.len());
+            for s in &prog.sections {
+                f.sections.push(ghidrust_agent::SectionFact {
+                    name: s.name.clone(),
+                    va: format!("{:#x}", s.va),
+                    size: s.virtual_size as u64,
+                });
+            }
+        }
+        f.analyzers_run = self.last_analyzers_run.clone();
+        if let Some(va) = self.listing_focus_va {
+            let name = self
+                .program
+                .as_ref()
+                .and_then(|p| p.display_function_name_at(va));
+            f.current_selection = Some(ghidrust_agent::SelectionFact {
+                va: format!("{va:#x}"),
+                name,
+            });
+        }
+        f
+    }
+
+    fn start_grok_session_from_ui(&mut self) {
+        self.grok_pane.last_error = None;
+        let Some(bin) = self.grok_pane.grok_bin.clone() else {
+            let msg = "grok binary not installed — click 'Install Grok Build…' first";
+            self.grok_pane.last_error = Some(msg.into());
+            self.log_warn(msg);
+            return;
+        };
+        // Per user spec: one grok per project. Prefer the open project root;
+        // fall back to the current working directory when running ad-hoc.
+        let project_root: std::path::PathBuf = match &self.project {
+            Some(p) => p.root.clone(),
+            None => std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        };
+        let ghidrust_bin = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.join(if cfg!(windows) { "ghidrust.exe" } else { "ghidrust" })))
+            .or_else(|| Some(std::path::PathBuf::from(if cfg!(windows) { "ghidrust.exe" } else { "ghidrust" })))
+            .unwrap();
+        // Skill body: prefer the workspace `skill/SKILL.md` if we're running
+        // from a repo, else pass an empty body (system_prompt still emits the
+        // honesty rules).
+        let (skill_body, skill_source) = load_skill_body();
+
+        let facts = self.grok_program_facts();
+        match agent_pane::start_session(
+            &bin,
+            &project_root,
+            &ghidrust_bin,
+            skill_source.as_deref(),
+            self.grok_pane.mode,
+            facts,
+            &skill_body,
+        ) {
+            Ok(session) => {
+                self.log(format!(
+                    "Grok session started · project={} · transport={} · mode={}",
+                    project_root.display(),
+                    session.transport_kind().label(),
+                    session.mode().label()
+                ));
+                self.grok_pane.session = Some(session);
+                self.grok_pane.transcript.push(agent_pane::TranscriptEntry::Info {
+                    text: format!(
+                        "Session started for project {} — ghidrust MCP wired at .grok/mcp.json.",
+                        project_root.display()
+                    ),
+                });
+            }
+            Err(e) => {
+                self.grok_pane.last_error = Some(e.clone());
+                self.log_error(format!("Grok session failed: {e}"));
+            }
+        }
+    }
+
+    fn dispatch_grok_prompt(&mut self) {
+        let prompt = std::mem::take(&mut self.grok_pane.input).trim().to_string();
+        if prompt.is_empty() {
+            return;
+        }
+        let facts = self.grok_program_facts();
+        let context = serde_json::to_string_pretty(&facts).unwrap_or_default();
+        let facts_key = context.clone();
+        // Only re-inject facts when they actually changed since the last turn —
+        // keeps token cost down and matches SKILL.md's "no fabricated context" rule.
+        let context_to_send =
+            if self.grok_pane.last_facts_snapshot.as_deref() == Some(&facts_key) {
+                String::new()
+            } else {
+                self.grok_pane.last_facts_snapshot = Some(facts_key);
+                format!("Live program facts JSON:\n```json\n{context}\n```")
+            };
+        self.grok_pane
+            .transcript
+            .push(agent_pane::TranscriptEntry::User { text: prompt.clone() });
+        if let Some(sess) = self.grok_pane.session.as_mut() {
+            if let Err(e) = sess.send_prompt(&prompt, &context_to_send) {
+                self.grok_pane
+                    .transcript
+                    .push(agent_pane::TranscriptEntry::Error {
+                        text: format!("send failed: {e}"),
+                    });
+            }
+        }
     }
 
     /// Menu / pane identifiers present in the shell (for structural tests).
@@ -7552,47 +7919,18 @@ impl eframe::App for GhidrustApp {
             }
         });
 
+        // Bottom dock: tabbed (Grok primary + Console). The plain analyzer /
+        // script log is never hidden — it just moves under the "Console" tab.
+        // Grok is the default active tab so an RE opens the app and starts
+        // typing to the agent immediately.
         if self.show_console {
+            // Pull streamed events into the transcript before we render.
+            self.grok_pane.poll();
             egui::TopBottomPanel::bottom("console")
                 .resizable(true)
-                .default_height(120.0)
+                .default_height(180.0)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.heading("Console");
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("Clear").clicked() {
-                                self.console.clear();
-                                self.console_severity.clear();
-                            }
-                        });
-                    });
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            let n = self.console.len();
-                            for i in 0..n {
-                                let sev = self
-                                    .console_severity
-                                    .get(i)
-                                    .copied()
-                                    .unwrap_or(ConsoleSeverity::Info);
-                                let color = match sev {
-                                    ConsoleSeverity::Info => ui.visuals().text_color(),
-                                    ConsoleSeverity::Warn => Color32::from_rgb(0xFB, 0xC0, 0x2D),
-                                    ConsoleSeverity::Error => Color32::from_rgb(0xE5, 0x39, 0x35),
-                                };
-                                let prefix = match sev {
-                                    ConsoleSeverity::Info => "  ",
-                                    ConsoleSeverity::Warn => "! ",
-                                    ConsoleSeverity::Error => "× ",
-                                };
-                                ui.label(
-                                    egui::RichText::new(format!("{prefix}{}", self.console[i]))
-                                        .monospace()
-                                        .color(color),
-                                );
-                            }
-                        });
+                    self.render_bottom_dock(ui);
                 });
         }
 

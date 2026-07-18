@@ -1,0 +1,2 @@
+Synthetic undecodable hole (0x06) between prologue and xor/ret.
+Used by disasm --skip-bad continuity tests (raw bytes, not a PE).

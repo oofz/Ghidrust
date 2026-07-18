@@ -693,11 +693,11 @@ pub fn scan_ascii_strings_bulk(
                 let value =
                     String::from_utf8_lossy(&block.bytes[h.offset..h.offset + h.length]).into_owned();
                 if value.chars().any(|c| c.is_ascii_alphabetic()) {
-                    out.push(FoundString {
-                        va: block.va + h.offset as u64,
+                    out.push(FoundString::ascii(
+                        block.va + h.offset as u64,
                         value,
-                        length: h.length,
-                    });
+                        h.length,
+                    ));
                 }
             }
         }

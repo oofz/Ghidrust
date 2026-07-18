@@ -113,6 +113,11 @@ pub fn load_pe(data: &[u8], name: impl Into<String>) -> Result<Program> {
         });
     }
 
+    // Best-effort import directory (empty on parse failure — never fabricate).
+    if let Ok(imports) = crate::imports::parse_pe_imports(data, image_base) {
+        prog.imports = imports;
+    }
+
     Ok(prog)
 }
 

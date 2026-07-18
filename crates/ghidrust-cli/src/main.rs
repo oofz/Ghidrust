@@ -1,10 +1,11 @@
 //! Ghidrust CLI + stdio MCP/agent tool surface over ghidrust-core.
 
 use ghidrust_core::{
-    analyzer_catalog, analyze_path, disassemble_range, load_path, recover_rtti,
-    scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel,
-    scan_printable_runs_seq, time_bulk_printable, AnalysisBundle, BulkScanMode, Program, Project,
-    ANALYZER_NAMES,
+    analyzer_catalog, analyze_path, collect_strings, disassemble_range, disassemble_range_opts,
+    filter_imports, load_path, recover_rtti, run_analyzers, scan_ascii_strings_bulk,
+    scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel, scan_printable_runs_seq,
+    time_bulk_printable, xrefs_from, xrefs_to, xrefs_to_import, xrefs_to_string_filter,
+    AnalysisBundle, BulkScanMode, Program, Project, ANALYZER_NAMES,
 };
 use ghidrust_decomp::decompile_entry;
 use serde::Serialize;
@@ -34,6 +35,10 @@ fn main() -> ExitCode {
         "rtti" => cmd_rtti(&args[1..], json_mode),
         "analyzers" => cmd_analyzers(json_mode),
         "analyze" => cmd_analyze(&args[1..], json_mode),
+        "strings" => cmd_strings(&args[1..], json_mode),
+        "xrefs" => cmd_xrefs(&args[1..], json_mode),
+        "imports" => cmd_imports(&args[1..], json_mode),
+        "function-at" => cmd_function_at(&args[1..], json_mode),
         "bulk-bench" => cmd_bulk_bench(&args[1..], json_mode),
         "decompile" => cmd_decompile(&args[1..], json_mode),
         "decompile-bench" => cmd_decompile_bench(&args[1..], json_mode),
@@ -61,12 +66,16 @@ fn print_help() {
         "ghidrust — AI-native reverse-engineering (CodeBrowser headless)\n\n\
          Usage:\n\
            ghidrust load <path> [--json]\n\
-           ghidrust disasm <path> [--addr <hex>] [--count N] [--json]\n\
+           ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--json]\n\
+           ghidrust strings <path> [--encoding ascii|utf16|all] [--filter SUB] [--min N] [--json]\n\
+           ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--json]\n\
+           ghidrust imports <path> [--dll NAME] [--name NAME] [--json]\n\
+           ghidrust function-at <path> --addr HEX [--json]\n\
            ghidrust rtti <path> [--json]\n\
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
-           ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1 (default)] [--json]\n\
+           ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--verbose] [--json]\n\
            ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--stage1] [--parallel] [--json]\n\
            ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]\n\
            ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]\n\
@@ -389,6 +398,16 @@ fn emit_load(prog: &Program, json: bool) {
     }
 }
 
+fn emit_json<T: Serialize>(value: &T) {
+    // UTF-8 without BOM — suitable for piping / PowerShell ConvertFrom-Json.
+    let mut out = io::stdout().lock();
+    if let Err(e) = serde_json::to_writer_pretty(&mut out, value) {
+        eprintln!("json write error: {e}");
+        return;
+    }
+    let _ = writeln!(out);
+}
+
 fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
     let path = match path_arg(args) {
         Ok(p) => p,
@@ -399,6 +418,7 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
     };
     let mut addr: Option<u64> = None;
     let mut count: usize = 16;
+    let mut skip_bad = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -410,16 +430,20 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
                 count = args[i + 1].parse().unwrap_or(16);
                 i += 2;
             }
+            "--skip-bad" => {
+                skip_bad = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
     match load_path(&path) {
         Ok(prog) => {
             let start = addr.or(prog.entry).unwrap_or(prog.image_base);
-            match disassemble_range(&prog, start, count) {
+            match disassemble_range_opts(&prog, start, count, skip_bad) {
                 Ok(listing) => {
                     if json {
-                        println!("{}", serde_json::to_string_pretty(&listing).unwrap());
+                        emit_json(&listing);
                     } else {
                         for insn in &listing {
                             println!("{}", insn.text());
@@ -433,6 +457,260 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
                 }
             }
         }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_strings(args: &[String], json: bool) -> ExitCode {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut encoding = "all".to_string();
+    let mut filter: Option<String> = None;
+    let mut min_len: usize = 4;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--encoding" if i + 1 < args.len() => {
+                encoding = args[i + 1].clone();
+                i += 2;
+            }
+            "--filter" | "--contains" if i + 1 < args.len() => {
+                filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--min" if i + 1 < args.len() => {
+                min_len = args[i + 1].parse().unwrap_or(4);
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    match load_path(&path).and_then(|prog| {
+        collect_strings(&prog, &encoding, min_len, filter.as_deref())
+            .map(|s| (prog, s))
+    }) {
+        Ok((_prog, strings)) => {
+            if json {
+                emit_json(&strings);
+            } else {
+                for s in &strings {
+                    println!("{:#x}\t{}\t{}", s.va, s.encoding, s.value);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut to: Option<u64> = None;
+    let mut from: Option<u64> = None;
+    let mut string_filter: Option<String> = None;
+    let mut import_name: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--to" if i + 1 < args.len() => {
+                to = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            "--from" if i + 1 < args.len() => {
+                from = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            "--string" if i + 1 < args.len() => {
+                string_filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--import" if i + 1 < args.len() => {
+                import_name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let modes = [to.is_some(), from.is_some(), string_filter.is_some(), import_name.is_some()]
+        .iter()
+        .filter(|&&b| b)
+        .count();
+    if modes != 1 {
+        eprintln!(
+            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--json]"
+        );
+        return ExitCode::from(2);
+    }
+    match load_path(&path) {
+        Ok(prog) => {
+            let refs = if let Some(t) = to {
+                xrefs_to(&prog, t, None)
+            } else if let Some(f) = from {
+                xrefs_from(&prog, f, 256)
+            } else if let Some(s) = string_filter {
+                xrefs_to_string_filter(&prog, &s)
+            } else {
+                xrefs_to_import(&prog, import_name.as_deref().unwrap())
+            };
+            if json {
+                let rows: Vec<_> = refs
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "from": format!("{:#x}", r.from),
+                            "to": format!("{:#x}", r.to),
+                            "kind": r.kind,
+                            "preview": r.preview,
+                        })
+                    })
+                    .collect();
+                emit_json(&rows);
+            } else {
+                for r in &refs {
+                    println!("{:#x} -> {:#x}  [{}]  {}", r.from, r.to, r.kind, r.preview);
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_imports(args: &[String], json: bool) -> ExitCode {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut dll: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dll" if i + 1 < args.len() => {
+                dll = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--name" if i + 1 < args.len() => {
+                name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    match load_path(&path) {
+        Ok(prog) => {
+            let filtered: Vec<_> = filter_imports(&prog.imports, dll.as_deref(), name.as_deref())
+                .into_iter()
+                .cloned()
+                .collect();
+            if json {
+                emit_json(&filtered);
+            } else {
+                for e in &filtered {
+                    let sym = e
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("ord_{}", e.ordinal.unwrap_or(0)));
+                    println!(
+                        "{:#x}\t{}!{}",
+                        e.iat_va, e.dll, sym
+                    );
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_function_at(args: &[String], json: bool) -> ExitCode {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut addr: Option<u64> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--addr" if i + 1 < args.len() => {
+                addr = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(va) = addr else {
+        eprintln!("usage: ghidrust function-at <path> --addr HEX [--json]");
+        return ExitCode::from(2);
+    };
+    match load_path(&path).and_then(|mut prog| {
+        if prog.analysis.functions.is_empty() {
+            let _ = run_analyzers(&mut prog, &["Function Start Search"])?;
+        }
+        Ok(prog)
+    }) {
+        Ok(prog) => match prog.function_containing(va) {
+            Some(f) => {
+                if json {
+                    emit_json(&json!({
+                        "addr": format!("{va:#x}"),
+                        "entry": format!("{:#x}", f.entry),
+                        "end": format!("{:#x}", f.end),
+                        "name": f.name,
+                        "calling_convention": f.calling_convention,
+                        "noreturn": f.noreturn,
+                        "parameters": f.parameters,
+                    }));
+                } else {
+                    println!(
+                        "{:#x} in {} [{:#x}, {:#x})",
+                        va, f.name, f.entry, f.end
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            None => {
+                if json {
+                    emit_json(&json!({
+                        "addr": format!("{va:#x}"),
+                        "function": null,
+                    }));
+                    ExitCode::SUCCESS
+                } else {
+                    eprintln!("no function contains {va:#x}");
+                    ExitCode::FAILURE
+                }
+            }
+        },
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -941,7 +1219,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!(
-                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--json]"
+                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--verbose] [--json]"
             );
             return ExitCode::from(2);
         }
@@ -954,6 +1232,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
     let mut stage05 = false;
     let mut stage0 = false;
     let mut stage1 = true;
+    let mut verbose = false;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -980,6 +1259,10 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 stage1 = true;
                 stage05 = false;
                 stage0 = false;
+                i += 1;
+            }
+            "--verbose" | "-v" => {
+                verbose = true;
                 i += 1;
             }
             _ => i += 1,
@@ -1010,19 +1293,21 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                                     "total_ops": s1.coverage.total_ops,
                                 }
                             });
-                            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+                            emit_json(&obj);
                         } else {
                             print!("{}", d.pseudo_c);
-                            eprintln!(
-                                "[{}] stage=1 blocks={} phis={} loops={} locals={} params={} lift={:.1}%",
-                                d.name,
-                                d.blocks.len(),
-                                s1.ssa.phi_count(),
-                                s1.structure.loops.len(),
-                                s1.types.locals.len(),
-                                s1.types.params.len(),
-                                s1.coverage.ratio() * 100.0
-                            );
+                            if verbose {
+                                eprintln!(
+                                    "[{}] stage=1 blocks={} phis={} loops={} locals={} params={} lift={:.1}%",
+                                    d.name,
+                                    d.blocks.len(),
+                                    s1.ssa.phi_count(),
+                                    s1.structure.loops.len(),
+                                    s1.types.locals.len(),
+                                    s1.types.params.len(),
+                                    s1.coverage.ratio() * 100.0
+                                );
+                            }
                         }
                         return ExitCode::SUCCESS;
                     }
@@ -1045,19 +1330,21 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                                     "ratio": cov.ratio(),
                                 }
                             });
-                            println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+                            emit_json(&obj);
                         } else {
                             print!("{}", d.pseudo_c);
-                            eprintln!(
-                                "[{}] stage=0.5 blocks={} edges={} insns={} ir_ops={} lift={:.1}% lines={}",
-                                d.name,
-                                d.blocks.len(),
-                                d.edges.len(),
-                                d.insn_count,
-                                cov.total_ops,
-                                cov.ratio() * 100.0,
-                                d.line_count()
-                            );
+                            if verbose {
+                                eprintln!(
+                                    "[{}] stage=0.5 blocks={} edges={} insns={} ir_ops={} lift={:.1}% lines={}",
+                                    d.name,
+                                    d.blocks.len(),
+                                    d.edges.len(),
+                                    d.insn_count,
+                                    cov.total_ops,
+                                    cov.ratio() * 100.0,
+                                    d.line_count()
+                                );
+                            }
                         }
                         ExitCode::SUCCESS
                     }
@@ -1070,17 +1357,19 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 match ghidrust_decomp::decompile_at(&prog, va, count) {
                     Ok(d) => {
                         if json {
-                            println!("{}", serde_json::to_string_pretty(&d).unwrap());
+                            emit_json(&d);
                         } else {
                             print!("{}", d.pseudo_c);
-                            eprintln!(
-                                "[{}] stage=0 blocks={} edges={} insns={} lines={}",
-                                d.name,
-                                d.blocks.len(),
-                                d.edges.len(),
-                                d.insn_count,
-                                d.line_count()
-                            );
+                            if verbose {
+                                eprintln!(
+                                    "[{}] stage=0 blocks={} edges={} insns={} lines={}",
+                                    d.name,
+                                    d.blocks.len(),
+                                    d.edges.len(),
+                                    d.insn_count,
+                                    d.line_count()
+                                );
+                            }
                         }
                         ExitCode::SUCCESS
                     }
@@ -1649,6 +1938,21 @@ fn fmt_opt_va(v: Option<u64>) -> String {
     v.map(|x| format!("{x:#x}")).unwrap_or_else(|| "-".into())
 }
 
+fn refs_json(refs: &[ghidrust_core::XRef]) -> Value {
+    Value::Array(
+        refs.iter()
+            .map(|r| {
+                json!({
+                    "from": format!("{:#x}", r.from),
+                    "to": format!("{:#x}", r.to),
+                    "kind": r.kind,
+                    "preview": r.preview,
+                })
+            })
+            .collect(),
+    )
+}
+
 fn parse_u64(s: &str) -> Result<u64, String> {
     let t = s.trim().trim_start_matches("0x").trim_start_matches("0X");
     u64::from_str_radix(t, 16)
@@ -1765,6 +2069,120 @@ fn tool_defs() -> Vec<ToolDef> {
                 "required": ["path"]
             }),
         },
+        ToolDef {
+            name: "list_strings",
+            description: "Scan ASCII and/or UTF-16LE strings; optional filter substring/glob",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["ascii", "utf16", "all"] },
+                    "filter": { "type": "string" },
+                    "min": { "type": "integer" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "search_strings",
+            description: "Alias of list_strings (filter-oriented)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["ascii", "utf16", "all"] },
+                    "filter": { "type": "string" },
+                    "min": { "type": "integer" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "get_xrefs_to",
+            description: "Cross-references to a VA (includes RIP-relative LEA/call/jmp)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "get_xrefs_from",
+            description: "Cross-references from a VA (disassemble forward)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string" },
+                    "count": { "type": "integer" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "get_string_xrefs",
+            description: "Find strings by filter, then xrefs to each string VA",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "filter": { "type": "string" }
+                },
+                "required": ["path", "filter"]
+            }),
+        },
+        ToolDef {
+            name: "list_imports",
+            description: "List PE import / IAT slots (optional dll/name filter)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "dll": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "get_import_xrefs",
+            description: "Code sites that reference an import IAT slot (e.g. ShellExecuteW)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["path", "name"]
+            }),
+        },
+        ToolDef {
+            name: "function_at",
+            description: "Containing function for a VA (runs Function Start Search if needed)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "get_function_by_address",
+            description: "Alias of function_at",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
     ]
 }
 
@@ -1855,6 +2273,122 @@ fn call_tool(params: &Value) -> Result<String, String> {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match name {
+        "list_strings" | "search_strings" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let encoding = args
+                .get("encoding")
+                .and_then(|e| e.as_str())
+                .unwrap_or("all");
+            let filter = args.get("filter").and_then(|f| f.as_str());
+            let min_len = args.get("min").and_then(|m| m.as_u64()).unwrap_or(4) as usize;
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let strings = collect_strings(&prog, encoding, min_len, filter).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&strings).unwrap())
+        }
+        "get_xrefs_to" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let va = parse_u64(addr)?;
+            let refs = xrefs_to(&prog, va, None);
+            Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
+        }
+        "get_xrefs_from" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let count = args.get("count").and_then(|c| c.as_u64()).unwrap_or(256) as usize;
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let va = parse_u64(addr)?;
+            let refs = xrefs_from(&prog, va, count);
+            Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
+        }
+        "get_string_xrefs" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let filter = args
+                .get("filter")
+                .and_then(|f| f.as_str())
+                .ok_or_else(|| "missing arguments.filter".to_string())?;
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let refs = xrefs_to_string_filter(&prog, filter);
+            Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
+        }
+        "list_imports" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let dll = args.get("dll").and_then(|d| d.as_str());
+            let name_f = args.get("name").and_then(|n| n.as_str());
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let filtered: Vec<_> = filter_imports(&prog.imports, dll, name_f)
+                .into_iter()
+                .cloned()
+                .collect();
+            Ok(serde_json::to_string_pretty(&filtered).unwrap())
+        }
+        "get_import_xrefs" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let iname = args
+                .get("name")
+                .and_then(|n| n.as_str())
+                .ok_or_else(|| "missing arguments.name".to_string())?;
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let refs = xrefs_to_import(&prog, iname);
+            Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
+        }
+        "function_at" | "get_function_by_address" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let mut prog = load_path(path).map_err(|e| e.to_string())?;
+            if prog.analysis.functions.is_empty() {
+                let _ = run_analyzers(&mut prog, &["Function Start Search"]).map_err(|e| e.to_string())?;
+            }
+            let va = parse_u64(addr)?;
+            match prog.function_containing(va) {
+                Some(f) => Ok(serde_json::to_string_pretty(&json!({
+                    "addr": format!("{va:#x}"),
+                    "entry": format!("{:#x}", f.entry),
+                    "end": format!("{:#x}", f.end),
+                    "name": f.name,
+                    "calling_convention": f.calling_convention,
+                    "noreturn": f.noreturn,
+                    "parameters": f.parameters,
+                }))
+                .unwrap()),
+                None => Ok(serde_json::to_string_pretty(&json!({
+                    "addr": format!("{va:#x}"),
+                    "function": null,
+                }))
+                .unwrap()),
+            }
+        }
         "list_analyzers" => {
             let cat = analyzer_catalog();
             Ok(serde_json::to_string_pretty(&cat).unwrap())

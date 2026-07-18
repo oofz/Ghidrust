@@ -115,6 +115,19 @@ fn oracle_ascii_strings(v: &Value) -> (bool, String, Value) {
     )
 }
 
+fn oracle_unicode_strings(v: &Value) -> (bool, String, Value) {
+    let s = v["strings"].as_array().cloned().unwrap_or_default();
+    let has_wide = s.iter().any(|x| {
+        x["value"].as_str().unwrap_or("").contains("WideLabString")
+            && x["encoding"].as_str().unwrap_or("") == "utf16le"
+    });
+    (
+        has_wide,
+        format!("{} utf16 strings; WideLabString={}", s.len(), has_wide),
+        json!({ "count": s.len(), "has_wide_lab": has_wide }),
+    )
+}
+
 fn oracle_function_start(v: &Value) -> (bool, String, Value) {
     let fns = v["functions"].as_array().cloned().unwrap_or_default();
     let hex = |x: &Value| x["entry"].as_u64().unwrap_or(0);
@@ -393,6 +406,7 @@ fn oracle_resources(v: &Value) -> (bool, String, Value) {
 fn analyzer_checks() -> Vec<AnalyzerCheck> {
     vec![
         AnalyzerCheck { name: "ASCII Strings", fixture: "analysis_lab.pe", prereqs: &[], target_is_last: false, oracle: oracle_ascii_strings },
+        AnalyzerCheck { name: "Unicode Strings", fixture: "analysis_lab.pe", prereqs: &[], target_is_last: false, oracle: oracle_unicode_strings },
         AnalyzerCheck { name: "Aggressive Instruction Finder", fixture: "analysis_lab.pe", prereqs: &[], target_is_last: false, oracle: oracle_aggressive },
         AnalyzerCheck { name: "Call Convention ID", fixture: "analysis_lab.pe", prereqs: &["Function Start Search"], target_is_last: true, oracle: oracle_call_convention },
         AnalyzerCheck { name: "Call-Fixup Installer", fixture: "analysis_lab.pe", prereqs: &[], target_is_last: false, oracle: oracle_call_fixup },

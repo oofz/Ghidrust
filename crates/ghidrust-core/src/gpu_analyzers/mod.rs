@@ -201,7 +201,7 @@ pub fn bench_analyzer(prog: &Program, name: &str, large_min: Option<usize>) -> A
     }
 }
 
-/// Bench all 20 analyzers (+ optional large pad).
+/// Bench all registered analyzers (+ optional large pad).
 pub fn bench_all_analyzers(prog: &Program, large_min: Option<usize>) -> Vec<AnalyzerBenchRow> {
     ANALYZER_NAMES
         .iter()
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn matrix_covers_all_twenty_analyzers() {
         let m = strategy_matrix();
-        assert_eq!(m.len(), 20);
+        assert_eq!(m.len(), ANALYZER_NAMES.len());
         for &name in ANALYZER_NAMES {
             assert!(
                 m.iter().any(|(n, _)| *n == name),

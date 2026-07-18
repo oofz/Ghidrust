@@ -150,6 +150,10 @@ ghidrust project analyze PROJ_DIR --file ID \
 | `list_analyzers` | — |
 | `list_gpu_strategies` | — (name → strategy matrix) |
 | `analyze` | `path`, optional `analyzers[]`, optional **`gpu`: bool** |
+| `list_strings` / `search_strings` | `path`, optional `encoding`/`filter`/`min` |
+| `get_xrefs_to` / `get_xrefs_from` / `get_string_xrefs` | RIP-aware xrefs |
+| `list_imports` / `get_import_xrefs` | PE IAT + call-sites |
+| `function_at` / `get_function_by_address` | containing function for a VA |
 | `gpu_decompile` | `path`, optional `out` |
 | `rtti_gpu_bench` | `path` |
 | `load` / `disassemble` / `rtti` | as before |
@@ -164,12 +168,16 @@ Add `--json` for structured stdout.
 |---------|---------|
 | Help | `ghidrust help` |
 | Load | `ghidrust load <path>` |
-| Disasm | `ghidrust disasm <path> [--addr HEX] [--count N]` |
+| Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad]` |
+| Strings | `ghidrust strings <path> [--encoding ascii\|utf16\|all] [--filter SUB]` |
+| Xrefs | `ghidrust xrefs <path> (--to HEX \| --from HEX \| --string F \| --import N)` |
+| Imports | `ghidrust imports <path> [--dll\|--name]` |
+| Function-at | `ghidrust function-at <path> --addr HEX` |
 | RTTI only | `ghidrust rtti <path>` |
 | List analyzers | `ghidrust analyzers` |
 | **Analyze** | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu]` |
 | Bulk bench | `ghidrust bulk-bench <path>` |
-| Decompile (Stage-1 default, SSA + structure + types) | `ghidrust decompile <path>` |
+| Decompile (Stage-1 default; metrics only with `--verbose`) | `ghidrust decompile <path> [--verbose]` |
 | Decompile (Stage-0 CFG scaffolding, oracle) | `ghidrust decompile <path> --stage0` |
 | Decompile (Stage-0.5 IR-informed, oracle) | `ghidrust decompile <path> --stage05` |
 | Decompile bench (Stage-0 vs Stage-0.5 vs Stage-1) | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` |
@@ -187,6 +195,10 @@ Add `--json` for structured stdout.
 ```bash
 # Quick triage
 ghidrust load PATH --json
+ghidrust strings PATH --encoding all --filter SomeName --json
+ghidrust xrefs PATH --string SomeName --json
+ghidrust function-at PATH --addr 0x140001234 --json
+ghidrust imports PATH --json
 ghidrust analyze PATH --analyzer "ASCII Strings" --analyzer "Function Start Search" --json
 
 # GPU RTTI seed path on one analyzer
@@ -206,13 +218,14 @@ ghidrust gpu-decompile PATH --metrics gdec.json
 
 ---
 
-## GPU strategy matrix (all 20 + decompile)
+## GPU strategy matrix (all analyzers + decompile)
 
 See `docs/GPU_ANALYZER_MATRIX.md`. Every Auto Analysis name has a dedicated strategy class (not one printable kernel rebranded). Examples:
 
 | Analyzer | Strategy |
 |----------|----------|
 | ASCII Strings | `printable_run` |
+| Unicode Strings | `cstr_multi` (host UTF-16LE authoritative) |
 | Function Start Search | `prologue_seed` |
 | WindowsPE x86 PE RTTI Analyzer | `rtti_scan` |
 | Embedded Media | `magic_media` |
@@ -237,7 +250,7 @@ Timing model: **pcie_upload / device_ms / pcie_download** split. On large binari
 
 ---
 
-## Auto Analysis — exhaustive catalog (20)
+## Auto Analysis — exhaustive catalog (21)
 
 Exact names, honest outputs. Use the `Name` column verbatim in
 `--analyzer "…"` / `--analyzers "a,b"`. Every row is a **PASS** in the shipped
@@ -251,7 +264,8 @@ Output column names the field on `AnalyzerOutput` you get in `--json`
 
 | # | Name | What it does | Output field(s) | Message |
 |---|---|---|---|---|
-| 1 | `ASCII Strings` | Bulk ≥4-char printable scan (Sequential / ParallelCpu / GpuOrFallback backend). | `strings: [{va, value, length}]` | `found N ASCII string(s) [BulkScanMode…]` |
+| 1 | `ASCII Strings` | Bulk ≥4-char printable scan (Sequential / ParallelCpu / GpuOrFallback backend). | `strings: [{va, value, length, encoding}]` | `found N ASCII string(s) [BulkScanMode…]` |
+| 1b | `Unicode Strings` | UTF-16LE printable runs across mapped blocks. | `strings: [{va, value, length, encoding: utf16le}]` | `found N UTF-16LE string(s)` |
 | 2 | `Aggressive Instruction Finder` | Fills real code gaps only; adds new `FunctionInfo` + a `DiscoveredRange`. No fabrication if the fixture has no gap. | `recovered_ranges: [{start, end}]` (+ `functions[]`) | `found N recovered code range(s)` |
 | 3 | `Call Convention ID` | Tags each function with Win64/cdecl/stdcall/thiscall. | `conventions: [[va, name], …]` (+ `functions[*].calling_convention`) | `identified N calling convention(s)` |
 | 4 | `Call-Fixup Installer` | Security-cookie / thunk stub detection. | `call_fixups: [{fixup_name, call_va}]` | `installed N call fixup(s)` |
@@ -272,7 +286,7 @@ Output column names the field on `AnalyzerOutput` you get in `--json`
 | 19 | `Windows x86 Propagate External Parameters` | Known Win32 API prototypes attached to import call sites. | `external_params: [[va, prototype], …]` | `applied N external parameter prototype(s)` |
 | 20 | `WindowsResourceReference` | `.rsrc` records (`VERSION`, `RT_ICON`, …). | `resources: [{name, va}]` | `parsed N resource record(s)` |
 
-**Defaults** (empty selection): `ASCII Strings`, `WindowsPE x86 PE RTTI Analyzer`, `Function Start Search`, `Create Address Tables`, `Embedded Media`, `Demangler Microsoft`.
+**Defaults** (empty selection): `ASCII Strings`, `Unicode Strings`, `WindowsPE x86 PE RTTI Analyzer`, `Function Start Search`, `Create Address Tables`, `Embedded Media`, `Demangler Microsoft`.
 
 With `--gpu`: same CPU output plus a `| gpu_enrich hits_merged=… backend=…` suffix on the human message. Not a replacement for `gpu-decompile`.
 
@@ -297,7 +311,7 @@ Related GPU / matrix benches (shipped, callable, **not** part of the eval sweep)
 
 | Method | CLI | Purpose |
 |---|---|---|
-| `analyzer-bench` | `ghidrust analyzer-bench PATH [--large] [--out F] [--json]` | All 20 analyzers + a GPU-decompile row: CPU wall-time vs `pcie_upload / device_ms / pcie_download` split, per-analyzer `equal` correctness flag. |
+| `analyzer-bench` | `ghidrust analyzer-bench PATH [--large] [--out F] [--json]` | All analyzers + a GPU-decompile row: CPU wall-time vs `pcie_upload / device_ms / pcie_download` split, per-analyzer `equal` correctness flag. |
 | `analyzer-bench-matrix` | `ghidrust analyzer-bench-matrix` | Static analyzer → GPU-strategy matrix (e.g. `ASCII Strings → printable_run`, `WindowsPE x86 PE RTTI Analyzer → rtti_scan`). |
 | `bulk-bench` | `ghidrust bulk-bench PATH [--json]` | Seq / parallel-CPU / GPU-or-fallback bulk-string timings. |
 | `rtti-gpu-bench` | `ghidrust rtti-gpu-bench PATH [--out F] [--json]` | CPU `recover_rtti` vs GPU `rtti_scan` seed with PCIe / device split. |

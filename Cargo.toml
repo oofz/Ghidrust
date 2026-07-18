@@ -11,6 +11,7 @@ members = [
     "crates/ghidrust-decomp",
     "crates/ghidrust-cli",
     "crates/ghidrust-gui",
+    "crates/ghidrust-agent",
 ]
 default-members = ["crates/ghidrust-cli"]
 
@@ -29,3 +30,4 @@ ghidrust-types = { path = "crates/ghidrust-types" }
 ghidrust-structure = { path = "crates/ghidrust-structure" }
 ghidrust-core = { path = "crates/ghidrust-core" }
 ghidrust-decomp = { path = "crates/ghidrust-decomp" }
+ghidrust-agent = { path = "crates/ghidrust-agent" }
