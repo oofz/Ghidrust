@@ -1,14 +1,16 @@
 ---
 name: ghidrust
 description: >
-  Use Ghidrust (Rust RE toolkit: PE/ELF load, x86-64 disasm, Auto Analysis, projects,
-  CLI/MCP, egui GUI, GPU analyzer kernels + multipass decompile) to reverse-engineer
-  binaries without Ghidra. Exhaustive feature catalog with when-to-use guidance.
+  Use Ghidrust (Rust RE toolkit: PE/ELF/blob load, x86-64 disasm, Auto Analysis, projects,
+  CLI/MCP, egui GUI, IL2CPP metadata, Unity player inventory, GPU analyzer kernels +
+  multipass decompile) to reverse-engineer binaries without Ghidra. Exhaustive feature
+  catalog with when-to-use guidance.
   Triggers: /ghidrust, reverse engineer, RE a PE/ELF, disassemble, RTTI, auto analysis,
   analyze binary, Ghidrust project, MCP ghidrust, strings/functions, GPU decompile,
-  analyzer-bench, rtti-gpu-bench, bulk-bench.
+  IL2CPP, global-metadata, unity-inventory, GameAssembly, analyzer-bench,
+  rtti-gpu-bench, bulk-bench.
 metadata:
-  short-description: "Ghidrust RE — CLI, MCP, analyzers, GPU, projects"
+  short-description: "Ghidrust RE — CLI, MCP, IL2CPP, Unity, analyzers, GPU"
 ---
 
 # Ghidrust — agent skill
@@ -19,12 +21,12 @@ Hand-rolled **Rust** reverse-engineering core (Ghidra-inspired labels; measurabl
 
 | Item | Path / command |
 |------|----------------|
-| Workspace root | repo root (`Cargo.toml` with `ghidrust-core`, `ghidrust-cli`, `ghidrust-gui`, `ghidrust-decomp`) |
+| Workspace root | repo root (`Cargo.toml` with `ghidrust-core`, `ghidrust-cli`, `ghidrust-gui`, `ghidrust-decomp`, `ghidrust-il2cpp`, `ghidrust-unity-inventory`) |
 | CLI | `cargo run -p ghidrust-cli --release -- <cmd>` or `target/release/ghidrust.exe` |
 | GUI | `cargo run -p ghidrust-gui --release` |
-| Fixtures | `fixtures/tiny_x64.pe`, `fixtures/analysis_lab.pe`, `fixtures/tiny_x64.elf` |
-| Docs | `README.md`, `docs/GPU_ANALYZER_MATRIX.md`, `docs/PARALLEL_RE_RESEARCH.md` (local parity notes under `dev/`) |
-| Core API | `load_path`, `run_analyzers` / `run_analyzers_opts`, `Project`, `gpu_analyzers`, `bulk_scan` |
+| Fixtures | `fixtures/tiny_x64.pe`, `fixtures/analysis_lab.pe`, `fixtures/tiny_x64.elf`, `fixtures/il2cpp/*` |
+| Docs | `README.md`, `docs/IL2CPP.md`, `docs/GPU_ANALYZER_MATRIX.md`, `docs/PARALLEL_RE_RESEARCH.md` |
+| Core API | `load_path` / `load_path_opts` / `load_blob`, `collect_strings_opts`, `run_analyzers_opts`, `Project`, `gpu_analyzers`, `bulk_scan` |
 
 CLI always builds with `gpu` feature on deps. On Windows PowerShell: `.\target\release\ghidrust.exe …`.
 
@@ -94,6 +96,17 @@ Need Ghidra ↔ Ghidrust head-to-head?
   → When neither is supplied, the report is methodology-only: Ghidra column left blank
      + full runbook (dev/GHIDRA_HEADTOHEAD.md). Spawn failures surface as factual
      `ghidra spawn failed: <reason>` notes — no fabricated timings.
+
+Unity player / IL2CPP?
+  → unity-inventory GAME_DIR for install layout (assemblies, plugins, metadata)
+  → il2cpp meta …/global-metadata.dat for managed types/methods
+  → il2cpp stubs / map on GameAssembly.dll; xrefs --skip-stubs; decompile --follow-stub
+  → encrypted metadata (wrong magic) → report encrypted, do not invent types
+  → See docs/IL2CPP.md
+
+Large string dumps / raw non-PE files?
+  → strings PATH --match token|whole --limit N --out FILE
+  → strings PATH --raw for blobs (metadata dumps, etc.)
 ```
 
 ---
@@ -145,18 +158,61 @@ ghidrust project analyze PROJ_DIR --file ID \
 
 ### MCP (`ghidrust mcp`)
 
-| Tool | Args |
-|------|------|
-| `list_analyzers` | — |
-| `list_gpu_strategies` | — (name → strategy matrix) |
-| `analyze` | `path`, optional `analyzers[]`, optional **`gpu`: bool** |
-| `list_strings` / `search_strings` | `path`, optional `encoding`/`filter`/`min` |
-| `get_xrefs_to` / `get_xrefs_from` / `get_string_xrefs` | RIP-aware xrefs |
-| `list_imports` / `get_import_xrefs` | PE IAT + call-sites |
-| `function_at` / `get_function_by_address` | containing function for a VA |
-| `gpu_decompile` | `path`, optional `out` |
-| `rtti_gpu_bench` | `path` |
-| `load` / `disassemble` / `rtti` | as before |
+| Tool | Args | Notes |
+|------|------|-------|
+| `load` | `path` | PE/ELF map |
+| `disassemble` | `path`, optional `addr`, `count` | x86-64 listing |
+| `rtti` | `path` | RTTI classes / vtables |
+| `list_analyzers` | — | Auto Analysis names |
+| `analyze` | `path`, optional `analyzers[]`, **`gpu`** | CPU + optional GPU enrich |
+| `list_strings` / `search_strings` | `path`, optional `encoding`, `filter`, **`match`** (`substr`\|`token`\|`whole`\|`glob`), `min`, **`limit`**, **`raw`** | Blob scan when `raw:true` |
+| `get_xrefs_to` | `path`, `addr`, optional **`skip_stubs`**, **`classify`** | RIP/tables **and** non-exec data qword pointers; hide/label IL2CPP stubs |
+| `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs from VA |
+| `get_string_xrefs` | `path`, `filter` | Strings → xrefs |
+| `list_imports` / `get_import_xrefs` | `path`, optional `dll`/`name` | PE IAT |
+| `function_at` / `get_function_by_address` | `path`, `addr` | Containing function |
+| `read_bytes` | `path`, `addr`, optional `count` | Raw VA hex dump |
+| `il2cpp_meta` | `path`, optional `filter` | `global-metadata.dat` types/methods (v27/29/31); encrypted → `next_steps` JSON |
+| `il2cpp_map` | `binary`, `meta`, optional `filter` | Method RVA map; null when unproven |
+| `il2cpp_stubs` | `binary`, optional `filter`, `max` | Resolve stubs (filter: name or C-string at `name_string_va`) |
+| `il2cpp_icalls` | `binary`, optional `filter` | Engine name‖fn icall tables → index / RVA |
+| `unity_inventory` | `path` | Player dir → assemblies, plugins, metadata, XR-related inventory |
+| `decompile` | `path`, optional `addr`, `count`, `stage`, **`follow_stub`** | Stage-1 default; `runtime_unresolved` when slot empty |
+| `list_gpu_strategies` | — | Strategy matrix |
+| `gpu_decompile` | `path`, optional `out` | VRAM multipass |
+| `rtti_gpu_bench` | `path` | CPU vs GPU RTTI |
+
+MCP launch: `ghidrust mcp` / `target/release/ghidrust.exe mcp` (stdio; no host-specific paths).
+
+---
+
+## Unity / IL2CPP (CLI + MCP)
+
+Canonical detail: [`docs/IL2CPP.md`](../docs/IL2CPP.md).
+
+| Task | CLI | MCP |
+|------|-----|-----|
+| Player install inventory | `ghidrust unity-inventory GAME_DIR --json` | `unity_inventory` `{path}` |
+| Managed types/methods | `ghidrust il2cpp meta META.dat [--filter F] --json` | `il2cpp_meta` `{path, filter?}` |
+| Metadata ↔ RVA | `ghidrust il2cpp map --binary GA.dll --meta META.dat --json` | `il2cpp_map` `{binary, meta, filter?}` |
+| Engine icall name→fn | `ghidrust il2cpp icalls --binary ENGINE.dll --filter F --json` | `il2cpp_icalls` `{binary, filter?}` |
+| Resolve stubs | `ghidrust il2cpp stubs --binary GA.dll --filter F --json` | `il2cpp_stubs` `{binary, filter?, max?}` |
+| Raw bytes at VA | `ghidrust bytes PATH --addr HEX --count N --json` | `read_bytes` `{path, addr, count?}` |
+| Xrefs (incl. data ptrs / skip stubs) | `ghidrust xrefs PATH --to HEX [--skip-stubs] [--classify]` | `get_xrefs_to` `{…, skip_stubs, classify}` |
+| Decompile through stub | `ghidrust decompile GA.dll --addr HEX --follow-stub --json` | `decompile` `{…, follow_stub: true}` |
+| Strings on metadata blob | `ghidrust strings META.dat --raw --match token --limit N` | `list_strings` `{path, raw:true, match, limit}` |
+
+Wrong metadata magic → encrypted/obfuscated JSON with `next_steps` (fail closed). Never invent method or icall RVAs when pairing/map leaves them null.
+
+**Engine icall recipe (generic):**
+
+```bash
+ghidrust strings ENGINE.dll --filter ICallNameFragment --json
+ghidrust xrefs ENGINE.dll --to <name_string_va> --json
+ghidrust il2cpp icalls --binary ENGINE.dll --filter ICallNameFragment --json
+ghidrust bytes ENGINE.dll --addr <fn_va> --count 64 --json
+ghidrust disasm ENGINE.dll --addr <fn_va> --count 20 --json
+```
 
 ---
 
@@ -169,15 +225,18 @@ Add `--json` for structured stdout.
 | Help | `ghidrust help` |
 | Load | `ghidrust load <path>` |
 | Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad]` |
-| Strings | `ghidrust strings <path> [--encoding ascii\|utf16\|all] [--filter SUB]` |
-| Xrefs | `ghidrust xrefs <path> (--to HEX \| --from HEX \| --string F \| --import N)` |
+| Strings | `ghidrust strings <path> [--raw] [--match MODE] [--limit N] [--out FILE] [--filter SUB]` |
+| Xrefs | `ghidrust xrefs <path> (--to\|--from\|--string\|--import) [--skip-stubs] [--classify] [--out FILE]` |
+| Bytes | `ghidrust bytes <path> --addr HEX [--count N] [--out FILE]` |
 | Imports | `ghidrust imports <path> [--dll\|--name]` |
 | Function-at | `ghidrust function-at <path> --addr HEX` |
+| IL2CPP | `ghidrust il2cpp meta\|map\|stubs\|icalls …` (see `docs/IL2CPP.md`) |
+| Unity inventory | `ghidrust unity-inventory <game-dir>` |
 | RTTI only | `ghidrust rtti <path>` |
 | List analyzers | `ghidrust analyzers` |
 | **Analyze** | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu]` |
 | Bulk bench | `ghidrust bulk-bench <path>` |
-| Decompile (Stage-1 default; metrics only with `--verbose`) | `ghidrust decompile <path> [--verbose]` |
+| Decompile (Stage-1 default; `--follow-stub` for IL2CPP; metrics with `--verbose`) | `ghidrust decompile <path> [--follow-stub] [--verbose]` |
 | Decompile (Stage-0 CFG scaffolding, oracle) | `ghidrust decompile <path> --stage0` |
 | Decompile (Stage-0.5 IR-informed, oracle) | `ghidrust decompile <path> --stage05` |
 | Decompile bench (Stage-0 vs Stage-0.5 vs Stage-1) | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` |
@@ -195,11 +254,18 @@ Add `--json` for structured stdout.
 ```bash
 # Quick triage
 ghidrust load PATH --json
-ghidrust strings PATH --encoding all --filter SomeName --json
-ghidrust xrefs PATH --string SomeName --json
+ghidrust strings PATH --encoding all --filter SomeName --match token --limit 50 --json
+ghidrust xrefs PATH --string SomeName --skip-stubs --json
 ghidrust function-at PATH --addr 0x140001234 --json
 ghidrust imports PATH --json
 ghidrust analyze PATH --analyzer "ASCII Strings" --analyzer "Function Start Search" --json
+
+# Unity / IL2CPP
+ghidrust unity-inventory GAME_DIR --json
+ghidrust il2cpp meta GAME_DIR/*_Data/il2cpp_data/Metadata/global-metadata.dat --filter Camera --json
+ghidrust il2cpp stubs --binary GAME_DIR/GameAssembly.dll --filter Camera --json
+ghidrust il2cpp icalls --binary GAME_DIR/UnityPlayer.dll --filter Camera --json
+ghidrust xrefs GAME_DIR/GameAssembly.dll --to HEX --skip-stubs --classify --json
 
 # GPU RTTI seed path on one analyzer
 ghidrust analyze PATH --analyzer "WindowsPE x86 PE RTTI Analyzer" --gpu --json
@@ -340,7 +406,7 @@ Guardrails to respect:
 
 **Do:** exact analyzer names; `--analyzer` or `--analyzers`; `--gpu` when GPU enrich wanted; `--json` for scripts; `analyzer-bench-matrix` for strategy list; prefer `decompile --stage05` when you want the IR-informed emit; `decompile-bench` to capture wall-clock + lift-ratio numbers.
 
-**Don't:** invent typed/Hex-Rays C beyond the emit stage in use; claim Ghidra MCP is Ghidrust; claim Ghidra-surpass metrics without captured benches; skip empty-result honesty; conflate PCIe with on-device time.
+**Don't:** invent typed/Hex-Rays C beyond the emit stage in use; claim Ghidra MCP is Ghidrust; claim Ghidra-surpass metrics without captured benches; skip empty-result honesty; conflate PCIe with on-device time; claim absence of managed types from PE strings alone when IL2CPP metadata exists (run `il2cpp meta`); invent method RVAs when the map leaves them null.
 
 ---
 
@@ -348,8 +414,14 @@ Guardrails to respect:
 
 ```bash
 cargo test -p ghidrust-core --features gpu
+cargo test -p ghidrust-il2cpp -p ghidrust-unity-inventory --lib
 ghidrust analyzers --json
 ghidrust analyze fixtures/analysis_lab.pe --analyzer "ASCII Strings" --gpu --json
 ghidrust gpu-decompile fixtures/analysis_lab.pe --json
 ghidrust analyzer-bench-matrix
+ghidrust il2cpp meta fixtures/il2cpp/meta_v31.dat --filter Camera --json
+ghidrust il2cpp stubs --binary fixtures/il2cpp/il2cpp_stub_lab.pe --filter Camera --json
+ghidrust decompile fixtures/il2cpp/il2cpp_stub_lab.pe --addr 0x140001000 --follow-stub --json
+ghidrust bytes fixtures/il2cpp/il2cpp_stub_lab.pe --addr 0x140001000 --count 32 --json
+ghidrust strings fixtures/il2cpp/meta_v31.dat --raw --filter Camera --match token --limit 5 --json
 ```

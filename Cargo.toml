@@ -9,6 +9,8 @@ members = [
     "crates/ghidrust-structure",
     "crates/ghidrust-core",
     "crates/ghidrust-decomp",
+    "crates/ghidrust-il2cpp",
+    "crates/ghidrust-unity-inventory",
     "crates/ghidrust-cli",
     "crates/ghidrust-gui",
     "crates/ghidrust-agent",
@@ -30,4 +32,6 @@ ghidrust-types = { path = "crates/ghidrust-types" }
 ghidrust-structure = { path = "crates/ghidrust-structure" }
 ghidrust-core = { path = "crates/ghidrust-core" }
 ghidrust-decomp = { path = "crates/ghidrust-decomp" }
+ghidrust-il2cpp = { path = "crates/ghidrust-il2cpp" }
+ghidrust-unity-inventory = { path = "crates/ghidrust-unity-inventory" }
 ghidrust-agent = { path = "crates/ghidrust-agent" }

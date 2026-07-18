@@ -3,7 +3,7 @@
 use super::engine::{cpu_emulate_kernel, run_kernel, GpuPhaseTiming, KernelKind, MAX_HITS};
 use super::{flatten_exec, flatten_image, pad_large};
 use crate::program::{
-    AddressTableInfo, CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo, MediaHit, Program,
+    CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo, MediaHit, Program,
     ResourceInfo, SymbolInfo,
 };
 use crate::rtti::RttiClass;
@@ -256,16 +256,10 @@ pub fn merge_seeds_into_program(
             prog.analysis.functions.len()
         }
         GpuStrategyClass::PtrChain => {
-            for &off in hits {
-                if let Some(va) = flat_to_va(map, off) {
-                    prog.analysis.address_tables.push(AddressTableInfo {
-                        base: va,
-                        count: 3,
-                        entries: Vec::new(),
-                    });
-                }
-            }
-            prog.analysis.address_tables.len()
+            // Do not deposit empty AddressTableInfo stubs — CPU "Create Address Tables"
+            // owns full pointer-run recovery. Report seed hit count only.
+            let _ = (hits, map, hay, prog);
+            hits.len()
         }
         GpuStrategyClass::RttiScan => {
             for &off in hits {

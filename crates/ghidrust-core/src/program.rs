@@ -65,11 +65,27 @@ pub struct ReferenceInfo {
     pub kind: String,
 }
 
+/// Classification of what an address-table's entries predominantly point at.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressTableRole {
+    #[default]
+    Unknown,
+    /// Majority of entries land in executable blocks.
+    CodePtrs,
+    /// Majority of entries land in non-executable mapped blocks (strings, data).
+    DataPtrs,
+    /// No clear majority.
+    Mixed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AddressTableInfo {
     pub base: u64,
     pub count: usize,
     pub entries: Vec<u64>,
+    #[serde(default)]
+    pub role: AddressTableRole,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

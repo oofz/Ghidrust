@@ -678,6 +678,7 @@ mod tests {
             base: prog.image_base,
             count: 2,
             entries: vec![prog.image_base, prog.image_base + 8],
+            role: ghidrust_core::AddressTableRole::Unknown,
         });
         let hits = address_table_hits(&prog);
         assert_eq!(hits.len(), 1);

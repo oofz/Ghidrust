@@ -2,6 +2,7 @@
 //! Icons: Google Material 3 geometry (see `icons.rs`); no emoji in the UI.
 
 mod agent_pane;
+mod grok_term;
 mod debugger;
 mod decomp_tokens;
 mod entropy;
@@ -53,6 +54,7 @@ use std::sync::mpsc::{self, Receiver, RecvError, TryRecvError};
 /// Render one pseudo-C snippet from the Grok pane using the shared
 /// `decomp_tokens` highlighter — so agent-produced pseudo-C looks the same as
 /// the Decompiler pane's output.
+#[allow(dead_code)] // retained for future in-pane code blocks outside the TUI
 fn render_pseudo_c_inline(ui: &mut egui::Ui, body: &str) {
     let lines = tokenize_decomp(body);
     ui.group(|ui| {
@@ -213,6 +215,11 @@ pub struct GhidrustApp {
     show_program_tree: bool,
     show_symbol_tree: bool,
     show_console: bool,
+    /// Bottom dock (Grok/Console/Raw) height in points. Owned by us so the
+    /// top-edge drag grip can resize reliably — egui's built-in
+    /// `TopBottomPanel::resizable` snaps back unless content expands, which
+    /// is easy to get wrong across versions.
+    console_height: f32,
     show_analysis_dialog: bool,
     /// Use experimental GPU bulk path for string/byte scan analyzers.
     use_gpu_experimental: bool,
@@ -688,6 +695,9 @@ fn render_call_tree_node(
 
 impl GhidrustApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // Cascadia/Consolas + symbol fallbacks so the Grok TUI logo/box-drawing
+        // aren't tofu (▯) under egui's tiny default monospace.
+        grok_term::install_terminal_fonts(&cc.egui_ctx);
         let mut app = Self::headless();
         app.recent_projects = load_recent_projects();
         app.show_startup_picker = true;
@@ -721,6 +731,7 @@ impl GhidrustApp {
             show_program_tree: true,
             show_symbol_tree: true,
             show_console: true,
+            console_height: 280.0,
             show_analysis_dialog: false,
             use_gpu_experimental: false,
             pending_analyze_file_id: None,
@@ -2547,6 +2558,10 @@ impl GhidrustApp {
         v.hyperlink_color = rgb(t.primary);
         v.warn_fg_color = rgb(t.error);
         ctx.set_visuals(v);
+        // Wider side/top grab for resizable panels (bottom console drag).
+        ctx.style_mut(|s| {
+            s.interaction.resize_grab_radius_side = 12.0;
+        });
     }
 
     pub fn load_binary(&mut self, path: impl Into<PathBuf>) -> Result<(), String> {
@@ -2821,11 +2836,7 @@ impl GhidrustApp {
         self.log(m);
     }
 
-    /// Render the bottom-dock tabbed panel — `Grok` (primary) + `Console`.
-    ///
-    /// The old plain `Console` panel is preserved verbatim under the second
-    /// tab; the Grok tab hosts the agent chat + tool-call cards + install
-    /// prompt.
+    /// Render the bottom-dock tabbed panel — `Grok` (embedded TUI) + `Console`.
     fn render_bottom_dock(&mut self, ui: &mut egui::Ui) {
         use agent_pane::BottomTab;
         ui.horizontal(|ui| {
@@ -2838,30 +2849,29 @@ impl GhidrustApp {
                 self.grok_pane.tab = BottomTab::Console;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                match self.grok_pane.tab {
-                    BottomTab::Grok => {
-                        if ui.small_button("Clear chat").clicked() {
-                            self.grok_pane.transcript.clear();
-                        }
-                    }
-                    BottomTab::Console => {
-                        if ui.small_button("Clear").clicked() {
-                            self.console.clear();
-                            self.console_severity.clear();
-                        }
-                    }
+                if self.grok_pane.tab == BottomTab::Console
+                    && ui.small_button("Clear").clicked()
+                {
+                    self.console.clear();
+                    self.console_severity.clear();
                 }
+                ui.small(egui::RichText::new("drag top edge ↕").weak().small());
             });
         });
         ui.separator();
         match self.grok_pane.tab {
             BottomTab::Grok => self.render_grok_tab(ui),
-            BottomTab::Console => self.render_console_tab(ui),
+            BottomTab::Console => {
+                // Leaving the TUI — release keyboard so listing hotkeys work again.
+                self.grok_pane.keyboard_captured = false;
+                self.render_console_tab(ui);
+            }
         }
     }
 
     fn render_console_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 let n = self.console.len();
@@ -2899,170 +2909,90 @@ impl GhidrustApp {
             t.on_surface_variant[2],
         );
 
-        // Session header.
-        ui.horizontal_wrapped(|ui| {
-            let mode_label = self.grok_pane.mode.label();
-            ui.label(egui::RichText::new(format!("Grok · {mode_label}")).color(primary).strong());
-            if let Some(sess) = &self.grok_pane.session {
-                ui.small(
-                    egui::RichText::new(format!(
-                        "transport={} · model={}",
-                        sess.transport_kind().label(),
-                        sess.model().unwrap_or("(user default)")
-                    ))
-                    .color(muted),
-                );
-            } else if let Some(bin) = &self.grok_pane.grok_bin {
-                ui.small(
-                    egui::RichText::new(format!("grok bin: {}", bin.display())).color(muted),
-                );
-            } else {
-                ui.small(
-                    egui::RichText::new("grok binary not found on PATH")
-                        .color(Color32::from_rgb(0xFB, 0xC0, 0x2D)),
-                );
-            }
+        let ctx = ui.ctx().clone();
+        let mut start_err: Option<String> = None;
+        let mut do_install = false;
+        let mut do_rescan = false;
+        let mut do_probe = false;
+        let mut start_size: Option<(u16, u16)> = None;
 
-            // Mode picker.
-            ui.separator();
-            let mut mode = self.grok_pane.mode;
-            egui::ComboBox::new("grok_mode_combo", "mode")
-                .selected_text(mode.label())
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut mode, ghidrust_agent::AgentMode::Airgap, "airgap");
-                    ui.selectable_value(
-                        &mut mode,
-                        ghidrust_agent::AgentMode::ReadOnly,
-                        "read-only",
-                    );
-                    ui.selectable_value(&mut mode, ghidrust_agent::AgentMode::Full, "full");
-                });
-            if mode != self.grok_pane.mode {
-                self.grok_pane.mode = mode;
-                self.log(format!("Grok mode → {}", mode.label()));
-            }
+        agent_pane::render_grok_pane(
+            ui,
+            &mut self.grok_pane,
+            primary,
+            muted,
+            &mut |cols, rows| {
+                start_size = Some((cols, rows));
+                Ok(())
+            },
+            &mut || do_install = true,
+            &mut || do_rescan = true,
+            &mut || do_probe = true,
+        );
 
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.grok_pane.session.is_some() {
-                    if ui.button("Stop").clicked() {
-                        self.grok_pane.session = None;
-                        self.log("Grok session stopped.");
+        if do_install {
+            let status = agent_pane::spawn_install_grok();
+            self.log(status.clone());
+            self.grok_pane.install_status = Some(status);
+        }
+        if do_rescan {
+            self.grok_pane.refresh_grok_binary();
+            let msg = match &self.grok_pane.grok_bin {
+                Some(p) => format!("Found grok at {}", p.display()),
+                None => "grok not found on PATH — install first".into(),
+            };
+            self.log(msg);
+        }
+        if do_probe {
+            if let Some(bin) = self.grok_pane.grok_bin.clone() {
+                match ghidrust_agent::probe_grok_version(&bin) {
+                    Ok(v) => {
+                        self.log(format!("grok --version → {v}"));
+                        self.grok_pane.version_probe = Some(v);
                     }
-                } else {
-                    if ui.button("Start Session").clicked() {
-                        self.start_grok_session_from_ui();
-                    }
-                    if self.grok_pane.grok_bin.is_none()
-                        && ui.button("Install Grok Build…").clicked()
-                    {
-                        let status = agent_pane::spawn_install_grok();
-                        self.log(status.clone());
-                        self.grok_pane.install_status = Some(status);
-                    }
-                    if ui.button("Re-scan for grok").clicked() {
-                        self.grok_pane.refresh_grok_binary();
-                        let msg = match &self.grok_pane.grok_bin {
-                            Some(p) => format!("Found grok at {}", p.display()),
-                            None => "grok not found on PATH — install first".into(),
-                        };
-                        self.log(msg);
+                    Err(e) => {
+                        self.grok_pane.version_probe = Some(format!("(error) {e}"));
+                        self.log_warn(format!("grok --version failed: {e}"));
                     }
                 }
-            });
-        });
-
-        // Value proposition + honest banner when no session is live.
-        if self.grok_pane.session.is_none() && self.grok_pane.transcript.is_empty() {
-            ui.small(
-                egui::RichText::new(
-                    "Direct RE control via semantic search and chat — lower barrier to entry \
-                     to reverse engineering. Grok speaks the full Ghidrust MCP tool surface \
-                     (analyze, decompile Stage-0/0.5/1, xrefs, imports, strings, RTTI). \
-                     Read-only mode is safe by default; switch to Full for renames + comments.",
-                )
-                .color(muted),
-            );
-        }
-        if let Some(err) = &self.grok_pane.last_error {
-            ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
-        }
-        if let Some(status) = &self.grok_pane.install_status {
-            ui.small(egui::RichText::new(status).color(muted));
-        }
-
-        ui.separator();
-
-        // Transcript.
-        let mut pending_approvals: Vec<(String, bool)> = Vec::new();
-        egui::ScrollArea::vertical()
-            .id_salt("grok_transcript")
-            .stick_to_bottom(true)
-            .min_scrolled_height(120.0)
-            .show(ui, |ui| {
-                let transcript_len = self.grok_pane.transcript.len();
-                for i in 0..transcript_len {
-                    let entry = &mut self.grok_pane.transcript[i];
-                    let mut pseudo_c_render =
-                        |ui: &mut egui::Ui, body: &str| render_pseudo_c_inline(ui, body);
-                    let mut on_approval = |id: &str, ok: bool| {
-                        pending_approvals.push((id.to_string(), ok));
-                    };
-                    agent_pane::render_transcript_entry(
-                        ui,
-                        entry,
-                        &mut pseudo_c_render,
-                        &mut on_approval,
-                        muted,
-                        primary,
-                    );
-                    ui.add_space(2.0);
-                }
-                if transcript_len == 0 && self.grok_pane.session.is_some() {
-                    ui.small(
-                        egui::RichText::new("Session started. Type a prompt below and press Ctrl+Enter.")
-                            .color(muted),
-                    );
-                }
-            });
-        for (id, ok) in pending_approvals {
-            self.log(format!("Grok approval · {id} · {}", if ok { "approve" } else { "deny" }));
-            // The ACP transport doesn't yet accept approval verdicts back —
-            // when it does, forward via `session.send_approval(id, ok)`.
-            // For now the transcript reflects the user's decision locally.
-        }
-
-        ui.separator();
-
-        // Input row.
-        ui.horizontal(|ui| {
-            let sink = egui::TextEdit::multiline(&mut self.grok_pane.input)
-                .desired_rows(2)
-                .desired_width(ui.available_width() - 96.0)
-                .hint_text(if self.grok_pane.session.is_some() {
-                    "Ask about the current binary — Ctrl+Enter to send"
-                } else {
-                    "Start a session to chat with Grok"
-                });
-            let resp = ui.add(sink);
-            let ctrl_enter =
-                resp.has_focus() && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter));
-            let clicked = ui.button("Send").clicked();
-            if (ctrl_enter || clicked)
-                && !self.grok_pane.input.trim().is_empty()
-                && self.grok_pane.session.is_some()
-            {
-                self.dispatch_grok_prompt();
             }
-        });
+        }
+        if let Some((cols, rows)) = start_size {
+            if let Err(e) = self.start_grok_pty(cols, rows, ctx) {
+                start_err = Some(e);
+            }
+        }
+        if let Some(e) = start_err {
+            self.grok_pane.last_error = Some(e.clone());
+            self.log_error(format!("Grok TUI failed: {e}"));
+        }
     }
 
     /// Build the current program-facts snapshot for the Grok pane.
+    ///
+    /// This is what makes the agent actually *know* about the open project
+    /// and the currently-loaded file without needing an MCP round-trip first.
+    /// Every field is honest-empty when the underlying analysis hasn't run —
+    /// matches Ghidrust's "no fabrication on empty evidence" rule.
     fn grok_program_facts(&self) -> ghidrust_agent::ProgramFacts {
+        const TOP_FN_SAMPLE: usize = 24;
+        const IMPORT_SAMPLE: usize = 24;
+
         let mut f = ghidrust_agent::ProgramFacts::default();
         if let Some(proj) = &self.project {
             f.project_name = Some(proj.meta.name.clone());
             f.project_root = Some(proj.root.display().to_string());
+            for file in &proj.meta.files {
+                let has_saved = proj.results_dir().join(&file.id).exists()
+                    || proj.results_dir().join(format!("{}.bin", file.id)).exists();
+                f.project_files.push(ghidrust_agent::ProjectFileFact {
+                    id: file.id.clone(),
+                    display_name: file.display_name.clone(),
+                    has_saved_analysis: has_saved,
+                });
+            }
         }
+        f.active_file_id = self.active_file_id.clone();
         if let Some(prog) = &self.program {
             f.program = Some(prog.name.clone());
             f.format = Some(prog.format.clone());
@@ -3077,6 +3007,20 @@ impl GhidrustApp {
                     va: format!("{:#x}", s.va),
                     size: s.virtual_size,
                 });
+            }
+            for fi in prog.analysis.functions.iter().take(TOP_FN_SAMPLE) {
+                f.top_functions.push(ghidrust_agent::FunctionFact {
+                    va: format!("{:#x}", fi.entry),
+                    name: fi.name.clone(),
+                });
+            }
+            for imp in prog.imports.iter().take(IMPORT_SAMPLE) {
+                if let Some(name) = &imp.name {
+                    f.imports_sample.push(ghidrust_agent::ImportFact {
+                        dll: imp.dll.clone(),
+                        name: name.clone(),
+                    });
+                }
             }
         }
         f.analyzers_run = self.last_analyzers_run.clone();
@@ -3093,92 +3037,62 @@ impl GhidrustApp {
         f
     }
 
-    fn start_grok_session_from_ui(&mut self) {
+    /// Write MCP/skill/context and spawn the real Grok TUI in the PTY pane.
+    fn start_grok_pty(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        ctx: egui::Context,
+    ) -> Result<(), String> {
         self.grok_pane.last_error = None;
-        let Some(bin) = self.grok_pane.grok_bin.clone() else {
-            let msg = "grok binary not installed — click 'Install Grok Build…' first";
-            self.grok_pane.last_error = Some(msg.into());
-            self.log_warn(msg);
-            return;
-        };
-        // Per user spec: one grok per project. Prefer the open project root;
-        // fall back to the current working directory when running ad-hoc.
+        let bin = self
+            .grok_pane
+            .grok_bin
+            .clone()
+            .ok_or_else(|| {
+                "grok binary not installed — click 'Install Grok Build…' first".to_string()
+            })?;
         let project_root: std::path::PathBuf = match &self.project {
             Some(p) => p.root.clone(),
             None => std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
         };
-        let ghidrust_bin = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|d| d.join(if cfg!(windows) { "ghidrust.exe" } else { "ghidrust" })))
-            .or_else(|| Some(std::path::PathBuf::from(if cfg!(windows) { "ghidrust.exe" } else { "ghidrust" })))
-            .unwrap();
-        // Skill body: prefer the workspace `skill/SKILL.md` if we're running
-        // from a repo, else pass an empty body (system_prompt still emits the
-        // honesty rules).
-        let (skill_body, skill_source) = load_skill_body();
-
+        let ghidrust_bin = ghidrust_agent::resolve_ghidrust_cli_bin().ok_or_else(|| {
+            "ghidrust CLI not found next to the GUI or on PATH — build `ghidrust` \
+             (cargo build -p ghidrust-cli --release) so MCP can start"
+                .to_string()
+        })?;
+        if !ghidrust_bin.is_file() {
+            return Err(format!(
+                "ghidrust CLI missing at {} — MCP cannot start",
+                ghidrust_bin.display()
+            ));
+        }
+        let (_skill_body, skill_source) = load_skill_body();
         let facts = self.grok_program_facts();
-        match agent_pane::start_session(
+        // Drop any prior session before spawning a new one.
+        self.grok_pane.session = None;
+        let session = agent_pane::start_pty_session(
             &bin,
             &project_root,
             &ghidrust_bin,
             skill_source.as_deref(),
-            self.grok_pane.mode,
-            facts,
-            &skill_body,
-        ) {
-            Ok(session) => {
-                self.log(format!(
-                    "Grok session started · project={} · transport={} · mode={}",
-                    project_root.display(),
-                    session.transport_kind().label(),
-                    session.mode().label()
-                ));
-                self.grok_pane.session = Some(session);
-                self.grok_pane.transcript.push(agent_pane::TranscriptEntry::Info {
-                    text: format!(
-                        "Session started for project {} — ghidrust MCP wired at .grok/mcp.json.",
-                        project_root.display()
-                    ),
-                });
-            }
-            Err(e) => {
-                self.grok_pane.last_error = Some(e.clone());
-                self.log_error(format!("Grok session failed: {e}"));
-            }
-        }
-    }
-
-    fn dispatch_grok_prompt(&mut self) {
-        let prompt = std::mem::take(&mut self.grok_pane.input).trim().to_string();
-        if prompt.is_empty() {
-            return;
-        }
-        let facts = self.grok_program_facts();
-        let context = serde_json::to_string_pretty(&facts).unwrap_or_default();
-        let facts_key = context.clone();
-        // Only re-inject facts when they actually changed since the last turn —
-        // keeps token cost down and matches SKILL.md's "no fabricated context" rule.
-        let context_to_send =
-            if self.grok_pane.last_facts_snapshot.as_deref() == Some(&facts_key) {
-                String::new()
-            } else {
-                self.grok_pane.last_facts_snapshot = Some(facts_key);
-                format!("Live program facts JSON:\n```json\n{context}\n```")
-            };
-        self.grok_pane
-            .transcript
-            .push(agent_pane::TranscriptEntry::User { text: prompt.clone() });
-        if let Some(sess) = self.grok_pane.session.as_mut() {
-            if let Err(e) = sess.send_prompt(&prompt, &context_to_send) {
-                self.grok_pane
-                    .transcript
-                    .push(agent_pane::TranscriptEntry::Error {
-                        text: format!("send failed: {e}"),
-                    });
-            }
-        }
+            &facts,
+            ctx,
+            cols,
+            rows,
+        )?;
+        self.log(format!(
+            "Grok TUI started · project={} · grok={} · mcp={}",
+            project_root.display(),
+            bin.display(),
+            ghidrust_bin.display()
+        ));
+        self.grok_pane.session = Some(session);
+        self.grok_pane.status = None;
+        self.grok_pane.request_term_focus = true;
+        self.grok_pane.keyboard_captured = true;
+        Ok(())
     }
 
     /// Menu / pane identifiers present in the shell (for structural tests).
@@ -7664,100 +7578,8 @@ impl eframe::App for GhidrustApp {
             });
         });
 
-        // Global keyboard shortcuts. Ghidra bindings mirrored:
-        //   Alt+Left / Alt+Right — nav history
-        //   G — Go To dialog
-        //   L / Ctrl+L — Rename / Retype variable
-        //   ; — Set EOL comment
-        //   T — Choose Data Type (Data Type Chooser)
-        //   Alt+Enter — Edit Function Signature
-        //   Ctrl+Down / Ctrl+Up — Next / Previous function
-        let (
-            want_back,
-            want_forward,
-            want_goto,
-            want_rename,
-            want_retype,
-            want_comment,
-            want_chooser,
-            want_signature,
-            want_next_fn,
-            want_prev_fn,
-        ) = ctx.input(|i| {
-            let alt = i.modifiers.alt;
-            let ctrl = i.modifiers.ctrl;
-            (
-                alt && i.key_pressed(egui::Key::ArrowLeft),
-                alt && i.key_pressed(egui::Key::ArrowRight),
-                i.key_pressed(egui::Key::G) && !ctrl && !alt,
-                i.key_pressed(egui::Key::L) && !ctrl && !alt,
-                i.key_pressed(egui::Key::L) && ctrl,
-                i.key_pressed(egui::Key::Semicolon) && !ctrl && !alt,
-                i.key_pressed(egui::Key::T) && !ctrl && !alt,
-                alt && i.key_pressed(egui::Key::Enter),
-                ctrl && i.key_pressed(egui::Key::ArrowDown),
-                ctrl && i.key_pressed(egui::Key::ArrowUp),
-            )
-        });
-        if want_back {
-            self.nav_back();
-        }
-        if want_forward {
-            self.nav_forward();
-        }
-        if want_goto && self.program.is_some() {
-            if self.goto_input.is_empty() {
-                if let Some(prog) = &self.program {
-                    self.goto_input = prog.entry
-                        .map(|e| format!("{e:#x}"))
-                        .unwrap_or_else(|| format!("{:#x}", prog.image_base));
-                }
-            }
-            self.show_goto_dialog = true;
-        }
-        if want_rename {
-            if let Some(va) = self.listing_focus_va {
-                self.open_rename_dialog(va);
-            }
-        }
-        if want_retype {
-            if let Some(va) = self.listing_focus_va {
-                self.open_retype_dialog(va);
-            }
-        }
-        if want_comment {
-            if let Some(va) = self.listing_focus_va {
-                self.open_comment_dialog(va, CommentKind::Eol);
-            }
-        }
-        if want_chooser {
-            let va = self.listing_focus_va;
-            if va.is_some() {
-                self.open_type_chooser(va);
-            }
-        }
-        if want_signature {
-            if let Some(va) = self.listing_focus_va {
-                let entry = self
-                    .program
-                    .as_ref()
-                    .and_then(|p| {
-                        p.analysis
-                            .functions
-                            .iter()
-                            .find(|f| va >= f.entry && va < f.end)
-                            .map(|f| f.entry)
-                    })
-                    .unwrap_or(va);
-                self.open_signature_dialog(entry);
-            }
-        }
-        if want_next_fn {
-            self.nav_next_function();
-        }
-        if want_prev_fn {
-            self.nav_prev_function();
-        }
+        // Listing hotkeys run *after* the Grok dock paints (see below) so the
+        // TUI can claim focus/keys first — otherwise `G` opens Go To while typing.
 
         egui::TopBottomPanel::top("nav_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -7978,19 +7800,157 @@ impl eframe::App for GhidrustApp {
             }
         });
 
-        // Bottom dock: tabbed (Grok primary + Console). The plain analyzer /
-        // script log is never hidden — it just moves under the "Console" tab.
-        // Grok is the default active tab so an RE opens the app and starts
-        // typing to the agent immediately.
+        // Bottom dock: tabbed (Grok primary + Console + Raw). The plain
+        // analyzer / script log is never hidden — it just moves under the
+        // "Console" tab. Grok is the default active tab so an RE opens the
+        // app and starts typing to the agent immediately.
+        //
+        // Explicit min/max/default heights are required for the top-edge
+        // resize gizmo to be draggable freely — without them egui pins the
+        // panel to `default_height` and the drag handle becomes a 4px sliver
+        // that's easy to miss.
         if self.show_console {
-            // Pull streamed events into the transcript before we render.
+            // Detect Grok TUI child exit before paint.
             self.grok_pane.poll();
+            let screen_h = ctx.screen_rect().height();
+            // Own the height ourselves + paint a real drag grip. Built-in
+            // `resizable(true)` on TopBottomPanel is unreliable here (snaps
+            // back when content doesn't expand — egui #581 / 0.31).
+            let max_h = (screen_h - 160.0).max(220.0);
+            let min_h = 140.0;
+            self.console_height = self.console_height.clamp(min_h, max_h);
             egui::TopBottomPanel::bottom("console")
-                .resizable(true)
-                .default_height(180.0)
+                .exact_height(self.console_height)
+                .show_separator_line(false)
                 .show(ctx, |ui| {
+                    // Full-width drag strip at the top of the dock.
+                    let grip_h = 10.0;
+                    let (grip_rect, grip_resp) = ui.allocate_exact_size(
+                        egui::vec2(ui.available_width(), grip_h),
+                        egui::Sense::drag(),
+                    );
+                    let grip_color = if grip_resp.dragged() {
+                        ui.visuals().widgets.active.bg_fill
+                    } else if grip_resp.hovered() {
+                        ui.visuals().widgets.hovered.bg_fill
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_fill
+                    };
+                    ui.painter().rect_filled(grip_rect, 0.0, grip_color);
+                    // Center handle bar.
+                    let bar = egui::Rect::from_center_size(
+                        grip_rect.center(),
+                        egui::vec2(48.0, 3.0),
+                    );
+                    ui.painter().rect_filled(
+                        bar,
+                        1.5,
+                        ui.visuals().widgets.noninteractive.fg_stroke.color,
+                    );
+                    if grip_resp.hovered() || grip_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+                    if grip_resp.dragged() {
+                        // Dragging the top edge up (negative dy) grows the panel.
+                        self.console_height = (self.console_height - grip_resp.drag_delta().y)
+                            .clamp(min_h, max_h);
+                    }
+                    grip_resp.on_hover_text("Drag to resize console");
+
+                    ui.set_min_height(ui.available_height());
                     self.render_bottom_dock(ui);
                 });
+        }
+
+        // Global keyboard shortcuts (after Grok dock so keyboard_captured is current).
+        // Ghidra bindings: Alt+Left/Right, G, L/Ctrl+L, ;, T, Alt+Enter, Ctrl+Up/Down.
+        if !self.grok_pane.keyboard_captured {
+            let (
+                want_back,
+                want_forward,
+                want_goto,
+                want_rename,
+                want_retype,
+                want_comment,
+                want_chooser,
+                want_signature,
+                want_next_fn,
+                want_prev_fn,
+            ) = ctx.input(|i| {
+                let alt = i.modifiers.alt;
+                let ctrl = i.modifiers.ctrl;
+                (
+                    alt && i.key_pressed(egui::Key::ArrowLeft),
+                    alt && i.key_pressed(egui::Key::ArrowRight),
+                    i.key_pressed(egui::Key::G) && !ctrl && !alt,
+                    i.key_pressed(egui::Key::L) && !ctrl && !alt,
+                    i.key_pressed(egui::Key::L) && ctrl,
+                    i.key_pressed(egui::Key::Semicolon) && !ctrl && !alt,
+                    i.key_pressed(egui::Key::T) && !ctrl && !alt,
+                    alt && i.key_pressed(egui::Key::Enter),
+                    ctrl && i.key_pressed(egui::Key::ArrowDown),
+                    ctrl && i.key_pressed(egui::Key::ArrowUp),
+                )
+            });
+            if want_back {
+                self.nav_back();
+            }
+            if want_forward {
+                self.nav_forward();
+            }
+            if want_goto && self.program.is_some() {
+                if self.goto_input.is_empty() {
+                    if let Some(prog) = &self.program {
+                        self.goto_input = prog.entry
+                            .map(|e| format!("{e:#x}"))
+                            .unwrap_or_else(|| format!("{:#x}", prog.image_base));
+                    }
+                }
+                self.show_goto_dialog = true;
+            }
+            if want_rename {
+                if let Some(va) = self.listing_focus_va {
+                    self.open_rename_dialog(va);
+                }
+            }
+            if want_retype {
+                if let Some(va) = self.listing_focus_va {
+                    self.open_retype_dialog(va);
+                }
+            }
+            if want_comment {
+                if let Some(va) = self.listing_focus_va {
+                    self.open_comment_dialog(va, CommentKind::Eol);
+                }
+            }
+            if want_chooser {
+                let va = self.listing_focus_va;
+                if va.is_some() {
+                    self.open_type_chooser(va);
+                }
+            }
+            if want_signature {
+                if let Some(va) = self.listing_focus_va {
+                    let entry = self
+                        .program
+                        .as_ref()
+                        .and_then(|p| {
+                            p.analysis
+                                .functions
+                                .iter()
+                                .find(|f| va >= f.entry && va < f.end)
+                                .map(|f| f.entry)
+                        })
+                        .unwrap_or(va);
+                    self.open_signature_dialog(entry);
+                }
+            }
+            if want_next_fn {
+                self.nav_next_function();
+            }
+            if want_prev_fn {
+                self.nav_prev_function();
+            }
         }
 
         // Ghidra Project Window–style dock: Project → binaries (upgraded badges + actions)
@@ -10487,6 +10447,7 @@ mod tests {
                 base: prog.image_base,
                 count: 3,
                 entries: vec![prog.image_base, prog.image_base + 8, prog.image_base + 16],
+                role: ghidrust_core::AddressTableRole::Unknown,
             });
         }
         let hits = address_table_hits(app.program.as_ref().unwrap());

@@ -14,9 +14,8 @@ ghidrust-core = { workspace = true, features = ["gpu"] }
 # CPU Stage-0 (CFG → pseudo-C); do not call GPU decompile APIs from the GUI.
 ghidrust-decomp = { path = "../ghidrust-decomp" }
 ghidrust-types = { workspace = true }
-# Grok Build agent bridge (Option C — ACP sidecar). Ships default-on; the
-# runtime child (`grok`) is user-installed via the pane's one-click Install
-# button, so this dep only adds ~120 KB of Rust code, no binary vendoring.
+# Grok Build glue (install + MCP/skill/context). The TUI itself is hosted via
+# an in-tree hand-rolled PTY (`src/grok_term/`) — no crates.io terminal stacks.
 ghidrust-agent = { workspace = true }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
@@ -24,3 +23,20 @@ rfd = "0.15"
 # Phase H (M8) — layout persistence (`.tool.json`) via serde_json.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Same width tables ratatui/crossterm use — required so Grok's braille/box
+# logo and cursor columns stay in sync with the app (not a terminal stack).
+unicode-width = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

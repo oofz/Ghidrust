@@ -148,6 +148,24 @@ fn size_prefix(sz: u32) -> &'static str {
 /// register-side (mod == 3) to use the 1-byte name set; `mem_size` labels
 /// the memory access width (1/2/4/8) so downstream lift can pick the right
 /// load/store width without needing to reparse the mnemonic.
+fn xmm_name(reg: u8) -> String {
+    format!("xmm{}", reg & 0xf)
+}
+
+/// Decode ModRM for SSE xmm, xmm/m128 forms. Returns (xmm_reg, rm_operand).
+fn decode_sse_xmm_rm(cur: &mut Cursor<'_>, pfx: Prefix) -> Result<(String, String)> {
+    let modrm = cur.get()?;
+    let reg = ((modrm >> 3) & 7) | if pfx.rex_r { 8 } else { 0 };
+    let xmm = xmm_name(reg);
+    if (modrm >> 6) == 3 {
+        let rm = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+        Ok((xmm, xmm_name(rm)))
+    } else {
+        let (_r, rm) = decode_modrm_mem(cur, modrm, pfx, false)?;
+        Ok((xmm, rm))
+    }
+}
+
 fn decode_modrm_sized(
     cur: &mut Cursor<'_>,
     modrm: u8,
@@ -776,6 +794,25 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
         }
         // LEAVE
         0xC9 => ("leave".into(), String::new()),
+        // Group1 Eb,Ib — ADD/OR/…/CMP r/m8, imm8 (80 /x); 82 is an alias
+        0x80 | 0x82 => {
+            let modrm = cur.get()?;
+            let reg_field = (modrm >> 3) & 7;
+            let mnem = match reg_field {
+                0 => "add",
+                1 => "or",
+                2 => "adc",
+                3 => "sbb",
+                4 => "and",
+                5 => "sub",
+                6 => "xor",
+                7 => "cmp",
+                _ => "grp",
+            };
+            let (_reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+            let imm = cur.take_imm(1)? as i8 as i64;
+            (mnem.into(), format!("{rm}, {imm:#x}"))
+        }
         // SUB/ADD r/m, imm8 (83 /x)
         0x83 => {
             let modrm = cur.get()?;
@@ -822,6 +859,24 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
         0x0F => {
             let op2 = cur.get()?;
             match op2 {
+                // MOVUPS xmm, xmm/m128  /  MOVUPS xmm/m128, xmm
+                0x10 | 0x11 => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    if op2 == 0x10 {
+                        ("movups".into(), format!("{xmm}, {rm}"))
+                    } else {
+                        ("movups".into(), format!("{rm}, {xmm}"))
+                    }
+                }
+                // MOVAPS xmm, xmm/m128  /  MOVAPS xmm/m128, xmm
+                0x28 | 0x29 => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    if op2 == 0x28 {
+                        ("movaps".into(), format!("{xmm}, {rm}"))
+                    } else {
+                        ("movaps".into(), format!("{rm}, {xmm}"))
+                    }
+                }
                 // Jcc rel32
                 0x80..=0x8F => {
                     let names = [
@@ -1149,5 +1204,39 @@ mod tests {
             "expected SIB scale 4, got '{}'",
             i.operands
         );
+    }
+
+    #[test]
+    fn decode_group1_byte_cmp_mem_imm8() {
+        // 80 b9 e1 01 00 00 00  cmp byte ptr [rcx+0x1e1], 0x0
+        let i = decode_one(&[0x80, 0xb9, 0xe1, 0x01, 0x00, 0x00, 0x00], 0).unwrap();
+        assert_eq!(i.mnemonic, "cmp");
+        assert_eq!(i.length, 7);
+        assert!(
+            i.operands.contains("byte ptr") && i.operands.contains("[rcx+0x1e1]"),
+            "got '{}'",
+            i.operands
+        );
+        assert!(i.operands.ends_with(", 0x0") || i.operands.ends_with(", 0"), "got '{}'", i.operands);
+    }
+
+    #[test]
+    fn decode_movups_load_store() {
+        // 0f 10 1a  movups xmm3, [rdx]
+        let load = decode_one(&[0x0f, 0x10, 0x1a], 0).unwrap();
+        assert_eq!(load.mnemonic, "movups");
+        assert_eq!(load.operands, "xmm3, [rdx]");
+        // 0f 11 59 10  movups [rcx+0x10], xmm3
+        let store = decode_one(&[0x0f, 0x11, 0x59, 0x10], 0).unwrap();
+        assert_eq!(store.mnemonic, "movups");
+        assert_eq!(store.operands, "[rcx+0x10], xmm3");
+    }
+
+    #[test]
+    fn decode_movaps_reg_reg() {
+        // 0f 28 c1  movaps xmm0, xmm1
+        let i = decode_one(&[0x0f, 0x28, 0xc1], 0).unwrap();
+        assert_eq!(i.mnemonic, "movaps");
+        assert_eq!(i.operands, "xmm0, xmm1");
     }
 }

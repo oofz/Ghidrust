@@ -42,6 +42,7 @@ Same rule for any other mature decoder used only to cross-check edge cases again
 
 - `goblin`, `object`, `pelite`, `scroll` — PE/ELF parsed by hand in `ghidrust-core`.
 - `iced-x86`, `zydis`, `capstone` bindings — **not** runtime decode; see CI oracle exception above.
+- Il2CppDumper / Cpp2IL / Il2CppInspector as runtime deps — formats reimplemented in `ghidrust-il2cpp` (reference-only).
 - Full `rmcp` / heavy MCP SDKs — thin hand-rolled tools/list + tools/call over stdio.
 
 ## Supply chain

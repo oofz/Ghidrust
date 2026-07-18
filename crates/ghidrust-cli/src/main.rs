@@ -1,13 +1,19 @@
 //! Ghidrust CLI + stdio MCP/agent tool surface over ghidrust-core.
 
 use ghidrust_core::{
-    analyzer_catalog, analyze_path, collect_strings, disassemble_range, disassemble_range_opts,
-    filter_imports, load_path, recover_rtti, run_analyzers, scan_ascii_strings_bulk,
-    scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel, scan_printable_runs_seq,
-    time_bulk_printable, xrefs_from, xrefs_to, xrefs_to_import, xrefs_to_string_filter,
-    AnalysisBundle, BulkScanMode, Program, Project, ANALYZER_NAMES,
+    analyzer_catalog, analyze_path, collect_strings_bytes, collect_strings_opts,
+    disassemble_range, disassemble_range_opts, filter_imports, load_path, load_path_opts,
+    recover_rtti, run_analyzers, scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback,
+    scan_printable_runs_parallel, scan_printable_runs_seq, time_bulk_printable, write_json_no_bom,
+    xrefs_from, xrefs_to, xrefs_to_import, xrefs_to_string_filter, AnalysisBundle, BulkScanMode,
+    Program, Project, StringCollectOpts, StringMatchMode, ANALYZER_NAMES,
 };
 use ghidrust_decomp::decompile_entry;
+use ghidrust_il2cpp::{
+    classify_at, correlate, filter_entries, find_resolve_stubs, follow_stub_target,
+    is_resolve_stub_va, resolve_icalls_path, stub_matches_filter, to_script_json, Il2CppMetadata,
+};
+use ghidrust_unity_inventory::inventory_path;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::env;
@@ -32,6 +38,7 @@ fn main() -> ExitCode {
         }
         "load" => cmd_load(&args[1..], json_mode),
         "disasm" | "disassemble" => cmd_disasm(&args[1..], json_mode),
+        "bytes" | "dump" => cmd_bytes(&args[1..], json_mode),
         "rtti" => cmd_rtti(&args[1..], json_mode),
         "analyzers" => cmd_analyzers(json_mode),
         "analyze" => cmd_analyze(&args[1..], json_mode),
@@ -39,6 +46,8 @@ fn main() -> ExitCode {
         "xrefs" => cmd_xrefs(&args[1..], json_mode),
         "imports" => cmd_imports(&args[1..], json_mode),
         "function-at" => cmd_function_at(&args[1..], json_mode),
+        "il2cpp" => cmd_il2cpp(&args[1..], json_mode),
+        "unity-inventory" => cmd_unity_inventory(&args[1..], json_mode),
         "bulk-bench" => cmd_bulk_bench(&args[1..], json_mode),
         "decompile" => cmd_decompile(&args[1..], json_mode),
         "decompile-bench" => cmd_decompile_bench(&args[1..], json_mode),
@@ -65,17 +74,26 @@ fn print_help() {
     eprintln!(
         "ghidrust — AI-native reverse-engineering (CodeBrowser headless)\n\n\
          Usage:\n\
-           ghidrust load <path> [--json]\n\
-           ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--json]\n\
-           ghidrust strings <path> [--encoding ascii|utf16|all] [--filter SUB] [--min N] [--json]\n\
-           ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--json]\n\
+           ghidrust load <path> [--out FILE] [--json]\n\
+           ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--out FILE] [--json]\n\
+           ghidrust bytes <path> --addr HEX [--count N] [--out FILE] [--json]\n\
+           ghidrust strings <path> [--raw] [--encoding ascii|utf16|all] [--filter SUB]\n\
+                     [--match substr|token|whole|glob] [--min N] [--limit N] [--out FILE] [--json]\n\
+           ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME)\n\
+                     [--skip-stubs] [--classify] [--out FILE] [--json]\n\
            ghidrust imports <path> [--dll NAME] [--name NAME] [--json]\n\
            ghidrust function-at <path> --addr HEX [--json]\n\
+           ghidrust il2cpp meta <metadata.dat> [--filter SUB] [--out FILE] [--json]\n\
+           ghidrust il2cpp map --binary <il2cpp> --meta <metadata.dat> [--filter SUB] [--script-json] [--out FILE] [--json]\n\
+           ghidrust il2cpp stubs --binary <il2cpp> [--filter SUB] [--max N] [--out FILE] [--json]\n\
+           ghidrust il2cpp icalls --binary <engine.dll> [--filter SUB] [--out FILE] [--json]\n\
+           ghidrust unity-inventory <game-dir> [--out FILE] [--json]\n\
            ghidrust rtti <path> [--json]\n\
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
-           ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--verbose] [--json]\n\
+           ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1]\n\
+                     [--follow-stub] [--verbose] [--out FILE] [--json]\n\
            ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--stage1] [--parallel] [--json]\n\
            ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]\n\
            ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]\n\
@@ -354,10 +372,39 @@ fn path_arg(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn cmd_load(args: &[String], json: bool) -> ExitCode {
-    match path_arg(args).and_then(|p| load_path(&p).map_err(|e| e.to_string())) {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    match load_path(&path) {
         Ok(prog) => {
-            emit_load(&prog, json);
-            ExitCode::SUCCESS
+            let v = json!({
+                "name": prog.name,
+                "format": prog.format,
+                "image_base": format!("{:#x}", prog.image_base),
+                "entry": prog.entry.map(|e| format!("{e:#x}")),
+                "sections": prog.sections.iter().map(|s| json!({
+                    "name": s.name,
+                    "va": format!("{:#x}", s.va),
+                    "virtual_size": s.virtual_size,
+                    "raw_size": s.raw_size,
+                })).collect::<Vec<_>>(),
+            });
+            emit_result(&v, json, out_path.as_deref(), || print_program_summary(&prog))
         }
         Err(e) => {
             eprintln!("error: {e}");
@@ -366,35 +413,19 @@ fn cmd_load(args: &[String], json: bool) -> ExitCode {
     }
 }
 
-fn emit_load(prog: &Program, json: bool) {
-    if json {
-        let v = json!({
-            "name": prog.name,
-            "format": prog.format,
-            "image_base": format!("{:#x}", prog.image_base),
-            "entry": prog.entry.map(|e| format!("{e:#x}")),
-            "sections": prog.sections.iter().map(|s| json!({
-                "name": s.name,
-                "va": format!("{:#x}", s.va),
-                "virtual_size": s.virtual_size,
-                "raw_size": s.raw_size,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&v).unwrap());
-    } else {
-        println!("name:   {}", prog.name);
-        println!("format: {}", prog.format);
-        println!("base:   {:#x}", prog.image_base);
-        if let Some(e) = prog.entry {
-            println!("entry:  {e:#x}");
-        }
-        println!("sections:");
-        for s in &prog.sections {
-            println!(
-                "  {:8} va={:#x} vsize={:#x} raw={:#x}",
-                s.name, s.va, s.virtual_size, s.raw_size
-            );
-        }
+fn print_program_summary(prog: &Program) {
+    println!("name:   {}", prog.name);
+    println!("format: {}", prog.format);
+    println!("base:   {:#x}", prog.image_base);
+    if let Some(e) = prog.entry {
+        println!("entry:  {e:#x}");
+    }
+    println!("sections:");
+    for s in &prog.sections {
+        println!(
+            "  {:8} va={:#x} vsize={:#x} raw={:#x}",
+            s.name, s.va, s.virtual_size, s.raw_size
+        );
     }
 }
 
@@ -408,6 +439,32 @@ fn emit_json<T: Serialize>(value: &T) {
     let _ = writeln!(out);
 }
 
+fn emit_json_to_path<T: Serialize>(path: &Path, value: &T) -> bool {
+    if let Err(e) = write_json_no_bom(path, value) {
+        eprintln!("error writing {}: {e}", path.display());
+        return false;
+    }
+    true
+}
+
+fn emit_result<T: Serialize>(value: &T, json: bool, out_path: Option<&Path>, text: impl FnOnce()) -> ExitCode {
+    if let Some(p) = out_path {
+        if !emit_json_to_path(p, value) {
+            return ExitCode::FAILURE;
+        }
+        if !json {
+            eprintln!("wrote {}", p.display());
+        }
+        return ExitCode::SUCCESS;
+    }
+    if json {
+        emit_json(value);
+    } else {
+        text();
+    }
+    ExitCode::SUCCESS
+}
+
 fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
     let path = match path_arg(args) {
         Ok(p) => p,
@@ -419,6 +476,7 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
     let mut addr: Option<u64> = None;
     let mut count: usize = 16;
     let mut skip_bad = false;
+    let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -434,6 +492,10 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
                 skip_bad = true;
                 i += 1;
             }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -441,22 +503,101 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
         Ok(prog) => {
             let start = addr.or(prog.entry).unwrap_or(prog.image_base);
             match disassemble_range_opts(&prog, start, count, skip_bad) {
-                Ok(listing) => {
-                    if json {
-                        emit_json(&listing);
-                    } else {
-                        for insn in &listing {
-                            println!("{}", insn.text());
-                        }
+                Ok(listing) => emit_result(&listing, json, out_path.as_deref(), || {
+                    for insn in &listing {
+                        println!("{}", insn.text());
                     }
-                    ExitCode::SUCCESS
-                }
+                }),
                 Err(e) => {
                     eprintln!("error: {e}");
                     ExitCode::FAILURE
                 }
             }
         }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_bytes(args: &[String], json: bool) -> ExitCode {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut addr: Option<u64> = None;
+    let mut count: usize = 64;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--addr" if i + 1 < args.len() => {
+                addr = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            "--count" if i + 1 < args.len() => {
+                count = args[i + 1].parse().unwrap_or(64).clamp(1, 1_048_576);
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(addr) = addr else {
+        eprintln!("usage: ghidrust bytes <path> --addr HEX [--count N] [--out FILE] [--json]");
+        return ExitCode::from(2);
+    };
+    match load_path(&path) {
+        Ok(prog) => match prog.read_va(addr, count) {
+            Some(bytes) => {
+                let hex: String = bytes
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let payload = json!({
+                    "addr": format!("{addr:#x}"),
+                    "count": bytes.len(),
+                    "hex": hex,
+                    "bytes": bytes,
+                });
+                emit_result(&payload, json, out_path.as_deref(), || {
+                    // 16-byte rows: hex + ASCII
+                    let mut off = 0usize;
+                    while off < bytes.len() {
+                        let row = &bytes[off..(off + 16).min(bytes.len())];
+                        let hex_row: String = row
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        let ascii: String = row
+                            .iter()
+                            .map(|&b| {
+                                if (0x20..=0x7e).contains(&b) {
+                                    b as char
+                                } else {
+                                    '.'
+                                }
+                            })
+                            .collect();
+                        println!("{:#x}: {:<47}  {}", addr + off as u64, hex_row, ascii);
+                        off += 16;
+                    }
+                })
+            }
+            None => {
+                eprintln!("error: address {addr:#x} not mapped or unreadable");
+                ExitCode::FAILURE
+            }
+        },
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -475,6 +616,10 @@ fn cmd_strings(args: &[String], json: bool) -> ExitCode {
     let mut encoding = "all".to_string();
     let mut filter: Option<String> = None;
     let mut min_len: usize = 4;
+    let mut match_mode = StringMatchMode::Substr;
+    let mut limit: Option<usize> = None;
+    let mut raw = false;
+    let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -486,27 +631,67 @@ fn cmd_strings(args: &[String], json: bool) -> ExitCode {
                 filter = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--match" if i + 1 < args.len() => {
+                match StringMatchMode::parse(&args[i + 1]) {
+                    Ok(m) => match_mode = m,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        return ExitCode::from(2);
+                    }
+                }
+                i += 2;
+            }
             "--min" if i + 1 < args.len() => {
                 min_len = args[i + 1].parse().unwrap_or(4);
                 i += 2;
             }
+            "--limit" if i + 1 < args.len() => {
+                limit = args[i + 1].parse().ok();
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--raw" => {
+                raw = true;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
-    match load_path(&path).and_then(|prog| {
-        collect_strings(&prog, &encoding, min_len, filter.as_deref())
-            .map(|s| (prog, s))
-    }) {
-        Ok((_prog, strings)) => {
-            if json {
-                emit_json(&strings);
-            } else {
-                for s in &strings {
-                    println!("{:#x}\t{}\t{}", s.va, s.encoding, s.value);
-                }
+    // Auto-glob when wildcards present and user left default substr.
+    if matches!(match_mode, StringMatchMode::Substr) {
+        if let Some(pat) = &filter {
+            if pat.contains('*') || pat.contains('?') {
+                match_mode = StringMatchMode::Glob;
             }
-            ExitCode::SUCCESS
         }
+    }
+    let opts = StringCollectOpts {
+        encoding: encoding.clone(),
+        min_len,
+        filter: filter.clone(),
+        match_mode,
+        limit,
+    };
+    let strings = if raw {
+        match std::fs::read(&path) {
+            Ok(bytes) => collect_strings_bytes(&bytes, 0, &opts),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        load_path_opts(&path, true).and_then(|prog| collect_strings_opts(&prog, &opts))
+    };
+    match strings {
+        Ok(strings) => emit_result(&strings, json, out_path.as_deref(), || {
+            for s in &strings {
+                println!("{:#x}\t{}\t{}", s.va, s.encoding, s.value);
+            }
+        }),
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -526,6 +711,9 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
     let mut from: Option<u64> = None;
     let mut string_filter: Option<String> = None;
     let mut import_name: Option<String> = None;
+    let mut skip_stubs = false;
+    let mut classify = false;
+    let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -545,6 +733,18 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
                 import_name = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--skip-stubs" => {
+                skip_stubs = true;
+                i += 1;
+            }
+            "--classify" => {
+                classify = true;
+                i += 1;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
             _ => i += 1,
         }
     }
@@ -554,13 +754,13 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
         .count();
     if modes != 1 {
         eprintln!(
-            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--json]"
+            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--skip-stubs] [--classify] [--out FILE] [--json]"
         );
         return ExitCode::from(2);
     }
     match load_path(&path) {
         Ok(prog) => {
-            let refs = if let Some(t) = to {
+            let mut refs = if let Some(t) = to {
                 xrefs_to(&prog, t, None)
             } else if let Some(f) = from {
                 xrefs_from(&prog, f, 256)
@@ -569,26 +769,470 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
             } else {
                 xrefs_to_import(&prog, import_name.as_deref().unwrap())
             };
-            if json {
-                let rows: Vec<_> = refs
-                    .iter()
-                    .map(|r| {
+            if skip_stubs {
+                refs.retain(|r| !is_resolve_stub_va(&prog, r.from));
+            }
+            let rows: Vec<_> = refs
+                .iter()
+                .map(|r| {
+                    let stub = if classify {
+                        classify_at(&prog, r.from)
+                    } else {
+                        None
+                    };
+                    let kind = if stub.is_some() {
+                        "resolve_stub"
+                    } else {
+                        r.kind
+                    };
+                    let mut preview = r.preview.clone();
+                    if let Some(s) = stub {
+                        if let Some(name) = s.icall_name {
+                            preview = format!("{preview}  ; il2cpp resolve {name}");
+                        }
+                    }
+                    json!({
+                        "from": format!("{:#x}", r.from),
+                        "to": format!("{:#x}", r.to),
+                        "kind": kind,
+                        "preview": preview,
+                    })
+                })
+                .collect();
+            emit_result(&rows, json, out_path.as_deref(), || {
+                for r in &rows {
+                    println!(
+                        "{} -> {}  [{}]  {}",
+                        r["from"].as_str().unwrap_or("?"),
+                        r["to"].as_str().unwrap_or("?"),
+                        r["kind"].as_str().unwrap_or("?"),
+                        r["preview"].as_str().unwrap_or("")
+                    );
+                }
+            })
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_il2cpp(args: &[String], json: bool) -> ExitCode {
+    let sub = match args.first().map(|s| s.as_str()) {
+        Some(s) => s,
+        None => {
+            eprintln!("usage: ghidrust il2cpp meta|map|stubs|icalls ...");
+            return ExitCode::from(2);
+        }
+    };
+    match sub {
+        "meta" => cmd_il2cpp_meta(&args[1..], json),
+        "map" => cmd_il2cpp_map(&args[1..], json),
+        "stubs" => cmd_il2cpp_stubs(&args[1..], json),
+        "icalls" => cmd_il2cpp_icalls(&args[1..], json),
+        other => {
+            eprintln!("unknown il2cpp subcommand: {other}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_il2cpp_icalls(args: &[String], json: bool) -> ExitCode {
+    let mut binary: Option<PathBuf> = None;
+    let mut filter: Option<String> = None;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--binary" if i + 1 < args.len() => {
+                binary = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--filter" if i + 1 < args.len() => {
+                filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            other if binary.is_none() && !other.starts_with('-') => {
+                binary = Some(PathBuf::from(other));
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(binary) = binary else {
+        eprintln!(
+            "usage: ghidrust il2cpp icalls --binary <engine.dll> [--filter SUB] [--out FILE] [--json]"
+        );
+        return ExitCode::from(2);
+    };
+    match resolve_icalls_path(&binary) {
+        Ok(report) => {
+            let payload = if let Some(f) = &filter {
+                let hits = filter_entries(&report, f);
+                json!({
+                    "filter": f,
+                    "table_count": report.tables.len(),
+                    "hit_count": hits.len(),
+                    "hits": hits.iter().map(|(ti, e)| json!({
+                        "table_index": ti,
+                        "index": e.index,
+                        "name": e.name,
+                        "name_string_va": format!("{:#x}", e.name_string_va),
+                        "fn_va": format!("{:#x}", e.fn_va),
+                        "fn_rva": format!("{:#x}", e.fn_rva),
+                    })).collect::<Vec<_>>(),
+                    "tables": report.tables.iter().map(|t| json!({
+                        "name_va": format!("{:#x}", t.name_va),
+                        "fn_va": format!("{:#x}", t.fn_va),
+                        "count": t.count,
+                        "layout": t.layout,
+                        "confidence": t.confidence,
+                    })).collect::<Vec<_>>(),
+                })
+            } else {
+                json!({
+                    "table_count": report.tables.len(),
+                    "tables": report.tables.iter().map(|t| json!({
+                        "name_va": format!("{:#x}", t.name_va),
+                        "fn_va": format!("{:#x}", t.fn_va),
+                        "count": t.count,
+                        "layout": t.layout,
+                        "confidence": t.confidence,
+                        "entries": t.entries.iter().take(64).map(|e| json!({
+                            "index": e.index,
+                            "name": e.name,
+                            "name_string_va": format!("{:#x}", e.name_string_va),
+                            "fn_va": format!("{:#x}", e.fn_va),
+                            "fn_rva": format!("{:#x}", e.fn_rva),
+                        })).collect::<Vec<_>>(),
+                    })).collect::<Vec<_>>(),
+                })
+            };
+            emit_result(&payload, json, out_path.as_deref(), || {
+                println!(
+                    "icall tables: {} (engine {})",
+                    report.tables.len(),
+                    binary.display()
+                );
+                for t in report.tables.iter().take(8) {
+                    println!(
+                        "  names {:#x}  fns {:#x}  count={}  conf={:.2}  {:?}",
+                        t.name_va, t.fn_va, t.count, t.confidence, t.layout
+                    );
+                }
+                if let Some(f) = &filter {
+                    let hits = filter_entries(&report, f);
+                    println!("filter {:?} hits: {}", f, hits.len());
+                    for (_ti, e) in hits.iter().take(40) {
+                        println!(
+                            "  [{}] RVA {:#x}  {}",
+                            e.index, e.fn_rva, e.name
+                        );
+                    }
+                }
+            })
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_il2cpp_meta(args: &[String], json: bool) -> ExitCode {
+    let path = match args.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("usage: ghidrust il2cpp meta <metadata.dat> [--filter SUB] [--out FILE] [--json]");
+            return ExitCode::from(2);
+        }
+    };
+    let mut filter: Option<String> = None;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--filter" if i + 1 < args.len() => {
+                filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    match Il2CppMetadata::load_path(&path) {
+        Ok(meta) => {
+            let types: Vec<_> = match &filter {
+                Some(f) => meta.filter_types(f).into_iter().cloned().collect(),
+                None => meta.types.clone(),
+            };
+            let methods: Vec<_> = match &filter {
+                Some(f) => meta
+                    .filter_methods(f)
+                    .into_iter()
+                    .map(|m| {
                         json!({
-                            "from": format!("{:#x}", r.from),
-                            "to": format!("{:#x}", r.to),
-                            "kind": r.kind,
-                            "preview": r.preview,
+                            "index": m.index,
+                            "name": m.name,
+                            "full_name": meta.method_full_name(m),
+                            "token": m.token,
                         })
                     })
-                    .collect();
-                emit_json(&rows);
-            } else {
-                for r in &refs {
-                    println!("{:#x} -> {:#x}  [{}]  {}", r.from, r.to, r.kind, r.preview);
+                    .collect(),
+                None => meta
+                    .methods
+                    .iter()
+                    .map(|m| {
+                        json!({
+                            "index": m.index,
+                            "name": m.name,
+                            "full_name": meta.method_full_name(m),
+                            "token": m.token,
+                        })
+                    })
+                    .collect(),
+            };
+            let report = json!({
+                "version": meta.header.version,
+                "dialect": meta.header.dialect,
+                "type_count": meta.types.len(),
+                "method_count": meta.methods.len(),
+                "image_count": meta.images.len(),
+                "types": types.iter().map(|t| json!({
+                    "index": t.index,
+                    "full_name": t.full_name(),
+                    "method_count": t.method_count,
+                    "token": t.token,
+                })).collect::<Vec<_>>(),
+                "methods": methods,
+            });
+            emit_result(&report, json, out_path.as_deref(), || {
+                println!(
+                    "IL2CPP metadata v{} {:?} — {} types, {} methods, {} images",
+                    meta.header.version,
+                    meta.header.dialect,
+                    meta.types.len(),
+                    meta.methods.len(),
+                    meta.images.len()
+                );
+                for t in types.iter().take(50) {
+                    println!("  type {}", t.full_name());
                 }
-            }
-            ExitCode::SUCCESS
+                if types.len() > 50 {
+                    println!("  ... {} more types", types.len() - 50);
+                }
+            })
         }
+        Err(e) => {
+            if let Some(payload) = e.to_structured_json() {
+                if json {
+                    return emit_result(&payload, true, out_path.as_deref(), || {});
+                }
+                eprintln!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| e.to_string()));
+            } else {
+                eprintln!("error: {e}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
+    let mut binary: Option<PathBuf> = None;
+    let mut meta_path: Option<PathBuf> = None;
+    let mut filter: Option<String> = None;
+    let mut out_path: Option<PathBuf> = None;
+    let mut script_json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--binary" if i + 1 < args.len() => {
+                binary = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--meta" if i + 1 < args.len() => {
+                meta_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--filter" if i + 1 < args.len() => {
+                filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--script-json" => {
+                script_json = true;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let (Some(binary), Some(meta_path)) = (binary, meta_path) else {
+        eprintln!(
+            "usage: ghidrust il2cpp map --binary <il2cpp> --meta <metadata.dat> [--filter SUB] [--script-json] [--out FILE] [--json]"
+        );
+        return ExitCode::from(2);
+    };
+    let prog = match load_path(&binary) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let meta = match Il2CppMetadata::load_path(&meta_path) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match correlate(&prog, &meta) {
+        Ok(mut map) => {
+            if let Some(f) = &filter {
+                let fl = f.to_ascii_lowercase();
+                map.entries
+                    .retain(|e| e.full_name.to_ascii_lowercase().contains(&fl));
+            }
+            if script_json {
+                let script = to_script_json(&map);
+                return emit_result(&script, json, out_path.as_deref(), || {
+                    println!(
+                        "script.json methods with addresses: {}",
+                        script.script_method.len()
+                    );
+                });
+            }
+            emit_result(&map, json, out_path.as_deref(), || {
+                println!(
+                    "method map: {} entries, pointer_count={:?}",
+                    map.entries.len(),
+                    map.method_pointer_count
+                );
+                for n in &map.notes {
+                    println!("  note: {n}");
+                }
+                for e in map.entries.iter().take(40) {
+                    match e.rva {
+                        Some(rva) => println!("  {:#x}  {}", rva, e.full_name),
+                        None => println!("  (unmapped)  {}", e.full_name),
+                    }
+                }
+            })
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_il2cpp_stubs(args: &[String], json: bool) -> ExitCode {
+    let mut binary: Option<PathBuf> = None;
+    let mut filter: Option<String> = None;
+    let mut out_path: Option<PathBuf> = None;
+    let mut max_scan: usize = 250_000;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--binary" if i + 1 < args.len() => {
+                binary = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--filter" if i + 1 < args.len() => {
+                filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--max" if i + 1 < args.len() => {
+                max_scan = args[i + 1].parse().unwrap_or(max_scan);
+                i += 2;
+            }
+            other if binary.is_none() && !other.starts_with('-') => {
+                binary = Some(PathBuf::from(other));
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(binary) = binary else {
+        eprintln!(
+            "usage: ghidrust il2cpp stubs --binary <il2cpp> [--filter SUB] [--max N] [--out FILE] [--json]"
+        );
+        return ExitCode::from(2);
+    };
+    match load_path(&binary) {
+        Ok(prog) => {
+            let mut stubs = find_resolve_stubs(&prog, max_scan);
+            if let Some(f) = &filter {
+                stubs.retain(|s| stub_matches_filter(&prog, s, f));
+            }
+            emit_result(&stubs, json, out_path.as_deref(), || {
+                println!("resolve stubs: {}", stubs.len());
+                for s in stubs.iter().take(80) {
+                    println!(
+                        "  {:#x}  {}",
+                        s.entry,
+                        s.icall_name.as_deref().unwrap_or("(unnamed)")
+                    );
+                }
+            })
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_unity_inventory(args: &[String], json: bool) -> ExitCode {
+    let path = match args.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("usage: ghidrust unity-inventory <game-dir> [--out FILE] [--json]");
+            return ExitCode::from(2);
+        }
+    };
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    match inventory_path(&path) {
+        Ok(inv) => emit_result(&inv, json, out_path.as_deref(), || {
+            println!("unity-inventory schema={} root={}", inv.schema_version, inv.root);
+            println!(
+                "  verdict={:?} confidence={:?} il2cpp={} xr_stock={} xr_pkg={} external={}",
+                inv.verdict,
+                inv.confidence,
+                inv.engine.il2cpp,
+                inv.xr_stock_modules.len(),
+                inv.xr_packages.len(),
+                inv.external_vr_indicators.len()
+            );
+            for n in &inv.notes {
+                println!("  note: {n}");
+            }
+        }),
         Err(e) => {
             eprintln!("error: {e}");
             ExitCode::FAILURE
@@ -1219,7 +1863,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!(
-                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--verbose] [--json]"
+                "usage: ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1] [--follow-stub] [--verbose] [--out FILE] [--json]"
             );
             return ExitCode::from(2);
         }
@@ -1233,6 +1877,8 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
     let mut stage0 = false;
     let mut stage1 = true;
     let mut verbose = false;
+    let mut follow_stub = false;
+    let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1261,9 +1907,17 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 stage0 = false;
                 i += 1;
             }
+            "--follow-stub" => {
+                follow_stub = true;
+                i += 1;
+            }
             "--verbose" | "-v" => {
                 verbose = true;
                 i += 1;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
             }
             _ => i += 1,
         }
@@ -1271,7 +1925,42 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
     let _ = stage0; // suppressed; retained for future gating
     match load_path(&path) {
         Ok(prog) => {
-            let va = addr.unwrap_or_else(|| prog.entry.unwrap_or(prog.image_base));
+            let mut va = addr.unwrap_or_else(|| prog.entry.unwrap_or(prog.image_base));
+            let mut follow_meta: Option<Value> = None;
+            if follow_stub {
+                if let Some(stub) = classify_at(&prog, va) {
+                    if let Some(target) = follow_stub_target(&prog, &stub) {
+                        if verbose {
+                            eprintln!(
+                                "follow-stub: {:#x} -> {:#x} ({})",
+                                va,
+                                target,
+                                stub.icall_name.as_deref().unwrap_or("resolve")
+                            );
+                        }
+                        follow_meta = Some(json!({
+                            "status": "resolved",
+                            "from": format!("{va:#x}"),
+                            "to": format!("{target:#x}"),
+                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                            "icall_name": stub.icall_name,
+                        }));
+                        va = target;
+                    } else {
+                        let note = "resolve slot empty or unmapped — filled at runtime";
+                        if verbose || !json {
+                            eprintln!("follow-stub: {va:#x} runtime_unresolved ({note})");
+                        }
+                        follow_meta = Some(json!({
+                            "status": "runtime_unresolved",
+                            "from": format!("{va:#x}"),
+                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                            "icall_name": stub.icall_name,
+                            "note": note,
+                        }));
+                    }
+                }
+            }
             if stage1 {
                 // Default to Windows x64 for PE targets, SysV otherwise.
                 let conv = if prog.format.to_ascii_lowercase().contains("pe") {
@@ -1281,20 +1970,21 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 };
                 match ghidrust_decomp::decompile_stage1_at(&prog, va, count, conv) {
                     Ok((d, s1)) => {
-                        if json {
-                            let obj = json!({
-                                "decompile": d,
-                                "stage1": {
-                                    "loops": s1.structure.loops.len(),
-                                    "phis": s1.ssa.phi_count(),
-                                    "locals": s1.types.locals.len(),
-                                    "params": s1.types.params.len(),
-                                    "lift_ratio": s1.coverage.ratio(),
-                                    "total_ops": s1.coverage.total_ops,
-                                }
-                            });
-                            emit_json(&obj);
-                        } else {
+                        let mut obj = json!({
+                            "decompile": d,
+                            "stage1": {
+                                "loops": s1.structure.loops.len(),
+                                "phis": s1.ssa.phi_count(),
+                                "locals": s1.types.locals.len(),
+                                "params": s1.types.params.len(),
+                                "lift_ratio": s1.coverage.ratio(),
+                                "total_ops": s1.coverage.total_ops,
+                            }
+                        });
+                        if let Some(fm) = &follow_meta {
+                            obj.as_object_mut().unwrap().insert("follow_stub".into(), fm.clone());
+                        }
+                        return emit_result(&obj, json, out_path.as_deref(), || {
                             print!("{}", d.pseudo_c);
                             if verbose {
                                 eprintln!(
@@ -1308,8 +1998,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                                     s1.coverage.ratio() * 100.0
                                 );
                             }
-                        }
-                        return ExitCode::SUCCESS;
+                        });
                     }
                     Err(e) => {
                         eprintln!("decompile-stage1 error: {e}");
@@ -1320,18 +2009,19 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
             if stage05 {
                 match ghidrust_decomp::decompile_ir_at(&prog, va, count) {
                     Ok((d, cov)) => {
-                        if json {
-                            let obj = json!({
-                                "decompile": d,
-                                "lift_coverage": {
-                                    "total_ops": cov.total_ops,
-                                    "unimplemented_ops": cov.unimplemented_ops,
-                                    "source_instructions": cov.source_instructions,
-                                    "ratio": cov.ratio(),
-                                }
-                            });
-                            emit_json(&obj);
-                        } else {
+                        let mut obj = json!({
+                            "decompile": d,
+                            "lift_coverage": {
+                                "total_ops": cov.total_ops,
+                                "unimplemented_ops": cov.unimplemented_ops,
+                                "source_instructions": cov.source_instructions,
+                                "ratio": cov.ratio(),
+                            }
+                        });
+                        if let Some(fm) = &follow_meta {
+                            obj.as_object_mut().unwrap().insert("follow_stub".into(), fm.clone());
+                        }
+                        return emit_result(&obj, json, out_path.as_deref(), || {
                             print!("{}", d.pseudo_c);
                             if verbose {
                                 eprintln!(
@@ -1345,8 +2035,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                                     d.line_count()
                                 );
                             }
-                        }
-                        ExitCode::SUCCESS
+                        });
                     }
                     Err(e) => {
                         eprintln!("decompile-ir error: {e}");
@@ -1356,9 +2045,11 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
             } else {
                 match ghidrust_decomp::decompile_at(&prog, va, count) {
                     Ok(d) => {
-                        if json {
-                            emit_json(&d);
-                        } else {
+                        let mut obj = json!({ "decompile": d });
+                        if let Some(fm) = &follow_meta {
+                            obj.as_object_mut().unwrap().insert("follow_stub".into(), fm.clone());
+                        }
+                        emit_result(&obj, json, out_path.as_deref(), || {
                             print!("{}", d.pseudo_c);
                             if verbose {
                                 eprintln!(
@@ -1370,8 +2061,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                                     d.line_count()
                                 );
                             }
-                        }
-                        ExitCode::SUCCESS
+                        })
                     }
                     Err(e) => {
                         eprintln!("decompile error: {e}");
@@ -1897,7 +2587,7 @@ fn cmd_analyze(args: &[String], json: bool) -> ExitCode {
                     serde_json::to_string_pretty(&bundle_json(&bundle)).unwrap()
                 );
             } else {
-                emit_load(&bundle.program, false);
+                print_program_summary(&bundle.program);
                 println!("--- disassembly ---");
                 for insn in &bundle.listing {
                     println!("{}", insn.text());
@@ -1964,6 +2654,9 @@ fn parse_u64(s: &str) -> Result<u64, String> {
 struct ToolDef {
     name: &'static str,
     description: &'static str,
+    /// MCP protocol field name is camelCase; serde default would emit `input_schema`
+    /// and Grok's client then fails tools/list with "Unexpected response type".
+    #[serde(rename = "inputSchema")]
     input_schema: Value,
 }
 
@@ -2032,7 +2725,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "decompile",
-            description: "Decompile function to structured C. Defaults to Stage-1 (SSA + types + structure). Pass stage='stage0' or 'stage05' for oracle output.",
+            description: "Decompile function to structured C. Defaults to Stage-1 (SSA + types + structure). Pass stage='stage0' or 'stage05' for oracle output. follow_stub follows IL2CPP resolve thunks when the slot target is mapped.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2043,6 +2736,10 @@ fn tool_defs() -> Vec<ToolDef> {
                         "type": "string",
                         "enum": ["stage0", "stage05", "stage1"],
                         "description": "Emit stage. Default 'stage1' — full SSA + types + structure."
+                    },
+                    "follow_stub": {
+                        "type": "boolean",
+                        "description": "If addr is an IL2CPP resolve stub, decompile the cached target when mapped"
                     }
                 },
                 "required": ["path"]
@@ -2071,14 +2768,17 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_strings",
-            description: "Scan ASCII and/or UTF-16LE strings; optional filter substring/glob",
+            description: "Scan ASCII/UTF-16LE strings on PE/ELF or raw blob (raw:true). match=substr|token|whole|glob; optional limit.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "encoding": { "type": "string", "enum": ["ascii", "utf16", "all"] },
                     "filter": { "type": "string" },
-                    "min": { "type": "integer" }
+                    "match": { "type": "string", "enum": ["substr", "token", "whole", "glob"] },
+                    "min": { "type": "integer" },
+                    "limit": { "type": "integer" },
+                    "raw": { "type": "boolean", "description": "Treat file as a byte blob (not PE/ELF)" }
                 },
                 "required": ["path"]
             }),
@@ -2092,19 +2792,98 @@ fn tool_defs() -> Vec<ToolDef> {
                     "path": { "type": "string" },
                     "encoding": { "type": "string", "enum": ["ascii", "utf16", "all"] },
                     "filter": { "type": "string" },
-                    "min": { "type": "integer" }
+                    "match": { "type": "string", "enum": ["substr", "token", "whole", "glob"] },
+                    "min": { "type": "integer" },
+                    "limit": { "type": "integer" },
+                    "raw": { "type": "boolean" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "il2cpp_meta",
+            description: "Parse IL2CPP global-metadata.dat → types/methods (v27/29/31). Fails closed if encrypted/obfuscated.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Path to global-metadata.dat" },
+                    "filter": { "type": "string", "description": "Substring filter on type/method full names" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "il2cpp_map",
+            description: "Correlate metadata methods with binary RVAs when CodeRegistration validates. Unproven RVAs are null.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "binary": { "type": "string", "description": "IL2CPP binary (e.g. GameAssembly.dll)" },
+                    "meta": { "type": "string", "description": "Path to global-metadata.dat" },
+                    "filter": { "type": "string" }
+                },
+                "required": ["binary", "meta"]
+            }),
+        },
+        ToolDef {
+            name: "il2cpp_stubs",
+            description: "List IL2CPP resolve stubs (LEA icall name → resolve → store slot → jmp reg). Filter matches parsed name or C-string at name_string_va.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "binary": { "type": "string" },
+                    "filter": { "type": "string", "description": "Substring on icall name or name string" },
+                    "max": { "type": "integer", "description": "Max scan budget (default 250000)" }
+                },
+                "required": ["binary"]
+            }),
+        },
+        ToolDef {
+            name: "il2cpp_icalls",
+            description: "Resolve Unity engine icall name‖fn pointer tables (index, name, fn RVA)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "binary": { "type": "string", "description": "Engine PE (e.g. UnityPlayer.dll)" },
+                    "filter": { "type": "string", "description": "Substring on icall name" }
+                },
+                "required": ["binary"]
+            }),
+        },
+        ToolDef {
+            name: "read_bytes",
+            description: "Raw bytes dump at a virtual address (hex + byte array)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string", "description": "VA in hex" },
+                    "count": { "type": "integer", "description": "Byte count (default 64)" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "unity_inventory",
+            description: "Unity player install inventory (assemblies, plugins, metadata peek, XR-related fields)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Player directory (exe + *_Data/)" }
                 },
                 "required": ["path"]
             }),
         },
         ToolDef {
             name: "get_xrefs_to",
-            description: "Cross-references to a VA (includes RIP-relative LEA/call/jmp)",
+            description: "Cross-references to a VA (RIP LEA/call/jmp, address tables, and non-exec data qword pointers). Optional IL2CPP stub skip/classify.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "addr": { "type": "string" }
+                    "addr": { "type": "string" },
+                    "skip_stubs": { "type": "boolean", "description": "Omit xrefs whose from-VA is an IL2CPP resolve stub" },
+                    "classify": { "type": "boolean", "description": "Label resolve_stub kind when applicable" }
                 },
                 "required": ["path", "addr"]
             }),
@@ -2282,11 +3061,174 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("encoding")
                 .and_then(|e| e.as_str())
                 .unwrap_or("all");
-            let filter = args.get("filter").and_then(|f| f.as_str());
+            let filter = args.get("filter").and_then(|f| f.as_str()).map(|s| s.to_string());
             let min_len = args.get("min").and_then(|m| m.as_u64()).unwrap_or(4) as usize;
-            let prog = load_path(path).map_err(|e| e.to_string())?;
-            let strings = collect_strings(&prog, encoding, min_len, filter).map_err(|e| e.to_string())?;
+            let limit = args.get("limit").and_then(|m| m.as_u64()).map(|n| n as usize);
+            let raw = args.get("raw").and_then(|r| r.as_bool()).unwrap_or(false);
+            let mut match_mode = args
+                .get("match")
+                .and_then(|m| m.as_str())
+                .map(StringMatchMode::parse)
+                .transpose()
+                .map_err(|e| e.to_string())?
+                .unwrap_or(StringMatchMode::Substr);
+            if matches!(match_mode, StringMatchMode::Substr) {
+                if let Some(pat) = &filter {
+                    if pat.contains('*') || pat.contains('?') {
+                        match_mode = StringMatchMode::Glob;
+                    }
+                }
+            }
+            let opts = StringCollectOpts {
+                encoding: encoding.into(),
+                min_len,
+                filter,
+                match_mode,
+                limit,
+            };
+            let strings = if raw {
+                let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+                collect_strings_bytes(&bytes, 0, &opts).map_err(|e| e.to_string())?
+            } else {
+                let prog = load_path_opts(path, true).map_err(|e| e.to_string())?;
+                collect_strings_opts(&prog, &opts).map_err(|e| e.to_string())?
+            };
             Ok(serde_json::to_string_pretty(&strings).unwrap())
+        }
+        "il2cpp_meta" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let filter = args.get("filter").and_then(|f| f.as_str());
+            let meta = match Il2CppMetadata::load_path(path) {
+                Ok(m) => m,
+                Err(e) => {
+                    if let Some(payload) = e.to_structured_json() {
+                        return Err(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| e.to_string()));
+                    }
+                    return Err(e.to_string());
+                }
+            };
+            let types: Vec<_> = match filter {
+                Some(f) => meta.filter_types(f).into_iter().map(|t| t.full_name()).collect(),
+                None => meta.types.iter().map(|t| t.full_name()).collect(),
+            };
+            let methods: Vec<_> = match filter {
+                Some(f) => meta
+                    .filter_methods(f)
+                    .into_iter()
+                    .map(|m| meta.method_full_name(m))
+                    .collect(),
+                None => meta
+                    .methods
+                    .iter()
+                    .map(|m| meta.method_full_name(m))
+                    .collect(),
+            };
+            Ok(serde_json::to_string_pretty(&json!({
+                "version": meta.header.version,
+                "dialect": meta.header.dialect,
+                "types": types,
+                "methods": methods,
+            }))
+            .unwrap())
+        }
+        "il2cpp_map" => {
+            let binary = args
+                .get("binary")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.binary".to_string())?;
+            let meta_path = args
+                .get("meta")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.meta".to_string())?;
+            let filter = args.get("filter").and_then(|f| f.as_str());
+            let prog = load_path(binary).map_err(|e| e.to_string())?;
+            let meta = Il2CppMetadata::load_path(meta_path).map_err(|e| e.to_string())?;
+            let mut map = correlate(&prog, &meta).map_err(|e| e.to_string())?;
+            if let Some(f) = filter {
+                let fl = f.to_ascii_lowercase();
+                map.entries
+                    .retain(|e| e.full_name.to_ascii_lowercase().contains(&fl));
+            }
+            Ok(serde_json::to_string_pretty(&map).unwrap())
+        }
+        "il2cpp_stubs" => {
+            let binary = args
+                .get("binary")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.binary".to_string())?;
+            let filter = args.get("filter").and_then(|f| f.as_str());
+            let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(250_000) as usize;
+            let prog = load_path(binary).map_err(|e| e.to_string())?;
+            let mut stubs = find_resolve_stubs(&prog, max);
+            if let Some(f) = filter {
+                stubs.retain(|s| stub_matches_filter(&prog, s, f));
+            }
+            Ok(serde_json::to_string_pretty(&stubs).unwrap())
+        }
+        "read_bytes" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let count = args.get("count").and_then(|c| c.as_u64()).unwrap_or(64) as usize;
+            let count = count.clamp(1, 1_048_576);
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let va = parse_u64(addr)?;
+            let bytes = prog
+                .read_va(va, count)
+                .ok_or_else(|| format!("address {va:#x} not mapped or unreadable"))?;
+            let hex: String = bytes
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            Ok(serde_json::to_string_pretty(&json!({
+                "addr": format!("{va:#x}"),
+                "count": bytes.len(),
+                "hex": hex,
+                "bytes": bytes,
+            }))
+            .unwrap())
+        }
+        "il2cpp_icalls" => {
+            let binary = args
+                .get("binary")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.binary".to_string())?;
+            let filter = args.get("filter").and_then(|f| f.as_str());
+            let report = resolve_icalls_path(binary).map_err(|e| e.to_string())?;
+            if let Some(f) = filter {
+                let hits = filter_entries(&report, f);
+                Ok(serde_json::to_string_pretty(&json!({
+                    "filter": f,
+                    "table_count": report.tables.len(),
+                    "hits": hits.iter().map(|(ti, e)| json!({
+                        "table_index": ti,
+                        "index": e.index,
+                        "name": e.name,
+                        "name_string_va": format!("{:#x}", e.name_string_va),
+                        "fn_va": format!("{:#x}", e.fn_va),
+                        "fn_rva": format!("{:#x}", e.fn_rva),
+                    })).collect::<Vec<_>>(),
+                })).unwrap())
+            } else {
+                Ok(serde_json::to_string_pretty(&report).unwrap())
+            }
+        }
+        "unity_inventory" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let inv = inventory_path(path)?;
+            Ok(serde_json::to_string_pretty(&inv).unwrap())
         }
         "get_xrefs_to" => {
             let path = args
@@ -2297,9 +3239,39 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("addr")
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let skip_stubs = args
+                .get("skip_stubs")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let classify = args
+                .get("classify")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let prog = load_path(path).map_err(|e| e.to_string())?;
             let va = parse_u64(addr)?;
-            let refs = xrefs_to(&prog, va, None);
+            let mut refs = xrefs_to(&prog, va, None);
+            if skip_stubs {
+                refs.retain(|r| !is_resolve_stub_va(&prog, r.from));
+            }
+            if classify {
+                let rows: Vec<_> = refs
+                    .iter()
+                    .map(|r| {
+                        let kind = if classify_at(&prog, r.from).is_some() {
+                            "resolve_stub"
+                        } else {
+                            r.kind
+                        };
+                        json!({
+                            "from": format!("{:#x}", r.from),
+                            "to": format!("{:#x}", r.to),
+                            "kind": kind,
+                            "preview": r.preview,
+                        })
+                    })
+                    .collect();
+                return Ok(serde_json::to_string_pretty(&rows).unwrap());
+            }
             Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
         }
         "get_xrefs_from" => {
@@ -2461,12 +3433,39 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("stage")
                 .and_then(|s| s.as_str())
                 .unwrap_or("stage1");
+            let follow_stub = args
+                .get("follow_stub")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let prog = load_path(path).map_err(|e| e.to_string())?;
-            let va = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
+            let mut va = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
                 parse_u64(a)?
             } else {
                 prog.entry.unwrap_or(prog.image_base)
             };
+            let mut follow_meta: Option<Value> = None;
+            if follow_stub {
+                if let Some(stub) = classify_at(&prog, va) {
+                    if let Some(target) = follow_stub_target(&prog, &stub) {
+                        follow_meta = Some(json!({
+                            "status": "resolved",
+                            "from": format!("{va:#x}"),
+                            "to": format!("{target:#x}"),
+                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                            "icall_name": stub.icall_name,
+                        }));
+                        va = target;
+                    } else {
+                        follow_meta = Some(json!({
+                            "status": "runtime_unresolved",
+                            "from": format!("{va:#x}"),
+                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                            "icall_name": stub.icall_name,
+                            "note": "resolve slot empty or unmapped — filled at runtime",
+                        }));
+                    }
+                }
+            }
             let conv = if prog.format.to_ascii_lowercase().contains("pe") {
                 ghidrust_types::CallConv::Windows
             } else {
@@ -2476,7 +3475,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 "stage0" | "stage-0" => {
                     let d =
                         ghidrust_decomp::decompile_at(&prog, va, count).map_err(|e| e.to_string())?;
-                    Ok(serde_json::to_string_pretty(&json!({
+                    let mut obj = json!({
                         "stage": "0",
                         "name": d.name,
                         "entry": format!("{:#x}", d.entry),
@@ -2484,13 +3483,16 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         "edges": d.edges.len(),
                         "insns": d.insn_count,
                         "pseudo_c": d.pseudo_c,
-                    }))
-                    .unwrap())
+                    });
+                    if let Some(fm) = follow_meta {
+                        obj.as_object_mut().unwrap().insert("follow_stub".into(), fm);
+                    }
+                    Ok(serde_json::to_string_pretty(&obj).unwrap())
                 }
                 "stage05" | "stage-0.5" | "ir" => {
                     let (d, cov) = ghidrust_decomp::decompile_ir_at(&prog, va, count)
                         .map_err(|e| e.to_string())?;
-                    Ok(serde_json::to_string_pretty(&json!({
+                    let mut obj = json!({
                         "stage": "0.5",
                         "name": d.name,
                         "entry": format!("{:#x}", d.entry),
@@ -2499,14 +3501,17 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         "insns": d.insn_count,
                         "lift_ratio": cov.ratio(),
                         "pseudo_c": d.pseudo_c,
-                    }))
-                    .unwrap())
+                    });
+                    if let Some(fm) = follow_meta {
+                        obj.as_object_mut().unwrap().insert("follow_stub".into(), fm);
+                    }
+                    Ok(serde_json::to_string_pretty(&obj).unwrap())
                 }
                 _ => {
                     // Default (Phase F): Stage-1 full pipeline.
                     let (d, s1) = ghidrust_decomp::decompile_stage1_at(&prog, va, count, conv)
                         .map_err(|e| e.to_string())?;
-                    Ok(serde_json::to_string_pretty(&json!({
+                    let mut obj = json!({
                         "stage": "1",
                         "name": d.name,
                         "entry": format!("{:#x}", d.entry),
@@ -2522,8 +3527,11 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         "return_type": s1.types.signature.return_type.c_style(),
                         "prototype": s1.types.signature.to_prototype(),
                         "pseudo_c": d.pseudo_c,
-                    }))
-                    .unwrap())
+                    });
+                    if let Some(fm) = follow_meta {
+                        obj.as_object_mut().unwrap().insert("follow_stub".into(), fm);
+                    }
+                    Ok(serde_json::to_string_pretty(&obj).unwrap())
                 }
             }
         }

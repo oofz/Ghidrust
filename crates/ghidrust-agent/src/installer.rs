@@ -97,6 +97,44 @@ pub fn grok_binary_path() -> Option<PathBuf> {
     candidates.into_iter().find(|c| c.is_file())
 }
 
+/// Run `grok --version` synchronously (short timeout) and return the first
+/// non-empty stdout / stderr line.
+pub fn probe_grok_version(grok_bin: &std::path::Path) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(grok_bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawn '{} --version': {e}", grok_bin.display()))?;
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() > deadline => {
+                let _ = child.kill();
+                return Err("timed out waiting for `grok --version`".into());
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first = stdout
+        .lines()
+        .chain(stderr.lines())
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("(no output)")
+        .to_string();
+    Ok(first)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

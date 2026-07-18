@@ -247,7 +247,9 @@ pub fn cpu_emulate_kernel(
             while i + 24 <= hay.len() {
                 let mut run = 0u32;
                 let mut j = i;
-                while j + 8 <= hay.len() && run < 64 {
+                // No 64-entry cap — CPU Create Address Tables is authoritative for full runs;
+                // this kernel only seeds candidate bases (run >= 3).
+                while j + 8 <= hay.len() && run < 1_000_000 {
                     let v = u64::from_le_bytes(hay[j..j + 8].try_into().unwrap());
                     if v >= image_base && v < image_end {
                         run += 1;

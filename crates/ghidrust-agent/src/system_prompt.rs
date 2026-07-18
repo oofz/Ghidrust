@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 pub struct ProgramFacts {
     pub project_name: Option<String>,
     pub project_root: Option<String>,
+    /// Every file imported into the project. Lets the agent say "you have
+    /// mnm_exe.exe and mnm_dll.dll open" without needing a tool call first.
+    pub project_files: Vec<ProjectFileFact>,
+    /// Which file id is currently loaded into the main view (matches
+    /// `project_files[*].id`).
+    pub active_file_id: Option<String>,
+
     pub program: Option<String>,
     pub format: Option<String>,
     pub arch: Option<String>,
@@ -35,7 +42,24 @@ pub struct ProgramFacts {
     pub analyzers_run: Vec<String>,
     pub functions: Option<usize>,
     pub strings: Option<usize>,
+
+    /// Small sample of the discovered functions so the agent has a starting
+    /// point without a `list_functions` round-trip. Cap at ~24 entries in
+    /// the caller.
+    pub top_functions: Vec<FunctionFact>,
+    /// Small sample of PE imports (dll + name). Same reasoning.
+    pub imports_sample: Vec<ImportFact>,
+
     pub current_selection: Option<SelectionFact>,
+}
+
+/// One project-imported file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFileFact {
+    pub id: String,
+    pub display_name: String,
+    /// Whether this file has been analyzed at least once in the project.
+    pub has_saved_analysis: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +73,18 @@ pub struct SectionFact {
 pub struct SelectionFact {
     pub va: String,
     pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionFact {
+    pub va: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportFact {
+    pub dll: String,
+    pub name: String,
 }
 
 /// System-prompt assembler.
@@ -123,8 +159,17 @@ impl<'a> SystemPromptBuilder<'a> {
             out.push_str("\n```\n\n");
         }
 
-        out.push_str("## Ghidrust skill (verbatim — the authoritative catalog)\n\n");
-        out.push_str(self.skill_md);
+        if self.skill_md.trim().is_empty() {
+            out.push_str(
+                "## Ghidrust skill\n\n\
+                 The authoritative catalog is on disk at `.grok/skills/ghidrust/SKILL.md` \
+                 (loaded by Grok Build on session start). Read it before calling analyzers \
+                 or claiming decompile capabilities.\n",
+            );
+        } else {
+            out.push_str("## Ghidrust skill (verbatim — the authoritative catalog)\n\n");
+            out.push_str(self.skill_md);
+        }
 
         out
     }

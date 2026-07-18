@@ -2,7 +2,7 @@
 
 Hand-rolled **Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra).
 
-Ghidrust loads PE/ELF binaries, produces x86-64 listings, runs Auto Analysis, decompiles to pseudo-C, and saves durable projects — from a CLI, an MCP server for agents, or an egui CodeBrowser-style GUI.
+Ghidrust loads PE/ELF (and raw blobs), produces x86-64 listings, runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / Unity install inventory, and saves durable projects — from a CLI, an MCP server for agents, or an egui CodeBrowser-style GUI.
 
 It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyzers, decompile) is written in-tree so the core stays small, auditable, and freestanding.
 
@@ -16,7 +16,7 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 | **Ghidra-shaped workflow** | Familiar labels and surfaces (Auto Analysis names, project import/analyze/export, listing + click FUN → decompile) without depending on the Ghidra JVM stack |
 | **Hand-rolled core** | PE/ELF, x86-64 decode, RTTI, analyzers, and the IR → SSA → structure → typed-C pipeline implemented in Rust — third-party RE libraries are avoided at runtime ([DEPENDENCIES.md](DEPENDENCIES.md)); Ghidra sources are reference-only |
 | **CPU-correct first** | CPU paths are the oracle; optional GPU paths must match or enrich them, not replace honesty with speed claims |
-| **Agent-ready** | Headless CLI + stdio MCP so coding agents can load, disassemble, analyze, look up strings/xrefs/imports/functions, and decompile without a GUI or ad-hoc PE scripts |
+| **Agent-ready** | Headless CLI + stdio MCP so coding agents can load, disassemble, analyze, look up strings/xrefs/imports/functions, inventory Unity/IL2CPP, and decompile without a GUI or ad-hoc PE scripts |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
 
 **Current maturity (Phase F, pcode-parity plan):** **Stage-1 is the product default** on CLI, GUI, and MCP. It runs the full hand-rolled pipeline: `ghidrust-ssa` builds CFG + dominators + Cytron phi placement + rename + copy/const/load-store propagation + DCE; `ghidrust-structure` recovers gotoless `if`/`while`/`do-while`/`loop`/`switch`/short-circuit regions with `break;` / `continue;` inside natural loops (goto rate <0.15 on lab fixture); `ghidrust-types` supplies a lattice covering `Bool` / `IntN` / `IntSigned` / `Ptr` / `StructPtr` / `ArrayPtr` / `Void` / `Any`, recovers return type + Windows/SysV prototypes (register + stack params), stack locals, and struct/array pointer seeds from load/store patterns rendered as `p->field_<off>` / `p[i]`. **Stage-0** (`decompile --stage0`) and **Stage-0.5** (`--stage05`) remain as regression oracles; the Phase-E head-to-head oracle enforces a shared-entry set and Stage-1-vs-Ghidra normalized-token similarity metric so no unfair comparison ships. **Never fabricates C**: irreducible regions or lift ratios <50% — again, no fabricated C. Head-to-head timings against Ghidra headless are captured (never fabricated) via `ghidrust ghidra-headtohead` and [`docs/GHIDRA_HEADTOHEAD.md`](docs/GHIDRA_HEADTOHEAD.md). Hex-Rays-class quality remains a later phase after the Ghidra bar is met. **Non-goals (today):** multi-ISA SLEIGH runtime, switch-statement structuring, debugger integration, or "GPU is always faster."
@@ -181,18 +181,21 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
-| `ghidrust strings <path>` | Scan ASCII and/or UTF-16LE strings | `--encoding ascii\|utf16\|all` (default `all`), `--filter SUB` (substring or `*`/`?` glob), `--min N`, `--json` |
-| `ghidrust xrefs <path>` | Cross-references (absolute operand hex **and** RIP-relative `LEA`/`call`/`jmp`) | Exactly one of: `--to HEX`, `--from HEX`, `--string FILTER`, `--import NAME` |
+| `ghidrust strings <path>` | Scan ASCII and/or UTF-16LE strings (PE/ELF or `--raw` blob) | `--encoding`, `--filter`, `--match substr\|token\|whole\|glob`, `--limit N`, `--out FILE`, `--raw`, `--json` |
+| `ghidrust xrefs <path>` | Cross-references (absolute operand hex **and** RIP-relative `LEA`/`call`/`jmp`) | Exactly one of: `--to` / `--from` / `--string` / `--import`; `--skip-stubs` / `--classify` for IL2CPP |
 | `ghidrust imports <path>` | PE import directory → DLL + symbol + IAT VA | `--dll NAME`, `--name NAME`, `--json` |
 | `ghidrust function-at <path> --addr HEX` | Containing analyzed function for a body VA (runs Function Start Search if needed) | `--json` |
+| `ghidrust il2cpp meta\|map\|stubs` | IL2CPP metadata + method map + resolve stubs | See [docs/IL2CPP.md](docs/IL2CPP.md) |
+| `ghidrust unity-inventory <dir>` | Unity player layout inventory (assemblies, plugins, metadata peek) | `--json`, `--out FILE` |
 | `ghidrust disasm <path>` | Listing; optional continuity across undecodable bytes | `--addr HEX`, `--count N`, `--skip-bad`, `--json` |
 
 ```bash
-# Wide + ASCII string search
-ghidrust strings app.exe --encoding all --filter Config --json
+# Wide + ASCII string search (token match + limit; BOM-free --out)
+ghidrust strings app.exe --encoding all --filter Config --match token --limit 50 --json
+ghidrust strings huge.bin --raw --filter Camera --out camera_strings.json --json
 
-# Code sites that reference a string (RIP-relative LEA included)
-ghidrust xrefs app.exe --string ResolutionWidth --json
+# Code sites that reference a string (RIP-relative LEA included; hide IL2CPP resolve stubs)
+ghidrust xrefs app.exe --string ResolutionWidth --skip-stubs --json
 
 # Import call-sites (IAT slot + FF15/RIP refs)
 ghidrust imports app.exe --name ShellExecuteW --json
@@ -203,13 +206,19 @@ ghidrust function-at app.exe --addr 0x14000d8ad --json
 
 # Keep listing through a decode hole
 ghidrust disasm app.exe --addr 0x14000d890 --count 40 --skip-bad
+
+# Unity / IL2CPP (see docs/IL2CPP.md)
+ghidrust unity-inventory /path/to/GameDir --json
+ghidrust il2cpp meta /path/to/*_Data/il2cpp_data/Metadata/global-metadata.dat --filter Camera --json
+ghidrust il2cpp stubs --binary /path/to/GameAssembly.dll --json
+ghidrust decompile /path/to/GameAssembly.dll --addr 0x180012345 --follow-stub
 ```
 
 ### Decompile methods
 
 | Method | CLI | What it emits | Outputs / where to see them |
 |---|---|---|---|
-| **Stage-1** (**default**) | `ghidrust decompile <path> [--addr HEX] [--count N] [--verbose]` | Full SSA + structure + types Stage-1 emit: recovered return type / SysV or Windows __fastcall prototype, `local_<off>: T` stack locals, `struct s_<key>{ field_<off>: T; }` seeds from load/store patterns rendered as `p->field_<off>` / `p[i]`, `switch { case … }` regions from Decompiler Switch Analysis, compound `&&` / `\|\|` short-circuits, and `break;` / `continue;` inside natural loops (goto rate <0.15 on lab). | stdout: `pseudo_c` only (script-friendly). Optional stderr metrics with `--verbose` / `-v`: `[name] stage=1 blocks=…`. `--json`: UTF-8 no BOM `{decompile: …, stage1: {loops, phis, locals, params, lift_ratio, total_ops, …}}`. |
+| **Stage-1** (**default**) | `ghidrust decompile <path> [--addr HEX] [--count N] [--follow-stub] [--verbose]` | Full SSA + structure + types Stage-1 emit (`--follow-stub` decompiles through an IL2CPP resolve thunk when the slot target is mapped): recovered return type / SysV or Windows __fastcall prototype, `local_<off>: T` stack locals, `struct s_<key>{ field_<off>: T; }` seeds from load/store patterns rendered as `p->field_<off>` / `p[i]`, `switch { case … }` regions from Decompiler Switch Analysis, compound `&&` / `\|\|` short-circuits, and `break;` / `continue;` inside natural loops (goto rate <0.15 on lab). | stdout: `pseudo_c` only (script-friendly). Optional stderr metrics with `--verbose` / `-v`: `[name] stage=1 blocks=…`. `--json`: UTF-8 no BOM `{decompile: …, stage1: {loops, phis, locals, params, lift_ratio, total_ops, …}}`. |
 | **Stage-0** (oracle) | `ghidrust decompile <path> --stage0 [--addr HEX] [--count N] [--verbose]` | CFG-driven pseudo-C: `void FUN_<va>() { block_0: … goto/return; }` — mnemonic-style scaffolding, no fabricated locals or types. Kept as regression oracle only. | stdout: `pseudo_c`. Metrics on stderr only with `--verbose`. `--json`: full `Decompile { name, blocks[], edges[], insn_count, pseudo_c }`. |
 | **Stage-0.5 IR** (oracle) | `ghidrust decompile <path> --stage05 [--addr HEX] [--count N] [--verbose]` | IR-informed emit from the hand-rolled x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, `add/sub/or/and/xor/shl/shr` augmented-assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 scaffolding for uncovered ops. | stdout: `pseudo_c`. Metrics on stderr only with `--verbose`. `--json`: `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
 | **decompile-bench** | `ghidrust decompile-bench <path> [--functions N] [--count N] [--stage1] [--parallel] [--out FILE]` | Runs default analyzers, then benches Stage-0/0.5 (default) or Stage-1 (`--stage1`) across every discovered function; `--parallel` fans out per-entry Stage-1 across a rayon thread pool. | Text table (or JSON via `--json`); optional `--out FILE`. Report carries per-function `stage0_us`, `stage05_us`, `stage1_us`, `stage1_goto_count`, `stage1_leaf_count`, and per-function `pseudo_c` when Stage-1 is on. |
@@ -272,12 +281,19 @@ ghidrust disasm /path/to/app.exe --count 32
 ghidrust disasm /path/to/app.exe --addr 0x140001000 --count 64 --skip-bad
 
 # Strings / xrefs / imports / containing function
-ghidrust strings /path/to/app.exe --encoding all --filter SomeName --json
-ghidrust xrefs /path/to/app.exe --string SomeName --json
+ghidrust strings /path/to/app.exe --encoding all --filter SomeName --match token --limit 50 --json
+ghidrust strings /path/to/blob.dat --raw --filter Camera --out camera.json --json
+ghidrust xrefs /path/to/app.exe --string SomeName --skip-stubs --classify --json
 ghidrust xrefs /path/to/app.exe --to 0x140002010 --json
 ghidrust imports /path/to/app.exe --json
 ghidrust xrefs /path/to/app.exe --import CreateFileW --json
 ghidrust function-at /path/to/app.exe --addr 0x140001234 --json
+
+# Unity player inventory + IL2CPP metadata / stubs / method map
+ghidrust unity-inventory /path/to/GameDir --json
+ghidrust il2cpp meta /path/to/Game_Data/il2cpp_data/Metadata/global-metadata.dat --filter Camera --json
+ghidrust il2cpp map --binary /path/to/GameAssembly.dll --meta /path/to/.../global-metadata.dat --json
+ghidrust il2cpp stubs --binary /path/to/GameAssembly.dll --json
 
 # List Auto Analysis names (Ghidra-compatible labels)
 ghidrust analyzers
@@ -286,11 +302,12 @@ ghidrust analyzers
 ghidrust analyze /path/to/app.exe --analyzers "Function Start Search,ASCII Strings,Unicode Strings" --json
 ghidrust analyze /path/to/app.exe --analyzer "Stack" --analyzer "Function ID" --gpu --json
 
-# CPU decompile — Stage-1 default; oracles via --stage0 / --stage05
+# CPU decompile — Stage-1 default; oracles via --stage0 / --stage05; IL2CPP --follow-stub
 ghidrust decompile /path/to/app.exe                    # Stage-1; quiet stderr
 ghidrust decompile /path/to/app.exe --verbose          # + metrics line on stderr
 ghidrust decompile /path/to/app.exe --addr 0x140001000 --json
 ghidrust decompile /path/to/app.exe --stage05 --json   # IR oracle + lift-coverage JSON
+ghidrust decompile /path/to/GameAssembly.dll --addr 0x180012345 --follow-stub
 
 # Wall-clock + lift-coverage bench across all discovered functions
 ghidrust decompile-bench /path/to/app.exe --functions 32 --count 128 --out bench.txt
@@ -333,14 +350,16 @@ MyProject/
 |---------|----------------|
 | `ghidrust load <path> [--json]` | Load PE/ELF, show map (PE also parses import/IAT directory into the program model) |
 | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--json]` | x86-64 listing; `--skip-bad` advances one byte on decode failure |
-| `ghidrust strings <path> [--encoding ascii\|utf16\|all] [--filter SUB] [--min N] [--json]` | ASCII + UTF-16LE string scan / filter |
-| `ghidrust xrefs <path> (--to HEX \| --from HEX \| --string F \| --import N) [--json]` | RIP-aware xrefs (string / IAT / arbitrary VA) |
+| `ghidrust strings <path> [--raw] [--encoding …] [--filter SUB] [--match MODE] [--limit N] [--out FILE] [--json]` | String scan (blob-capable) |
+| `ghidrust xrefs <path> (--to\|--from\|--string\|--import) [--skip-stubs] [--classify] [--json]` | RIP-aware xrefs |
 | `ghidrust imports <path> [--dll NAME] [--name NAME] [--json]` | PE import / IAT slots |
 | `ghidrust function-at <path> --addr HEX [--json]` | Containing function for a body VA |
+| `ghidrust il2cpp meta\|map\|stubs …` | IL2CPP metadata / RVA map / resolve stubs ([docs/IL2CPP.md](docs/IL2CPP.md)) |
+| `ghidrust unity-inventory <dir> [--out FILE] [--json]` | Unity player install inventory |
 | `ghidrust rtti <path> [--json]` | RTTI recovery only |
 | `ghidrust analyzers [--json]` | List Auto Analysis names |
 | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu] [--json]` | Run analyzers; `--gpu` = bulk strings + seed enrich |
-| `ghidrust decompile <path> [--addr HEX] [--count N] [--stage0\|--stage05\|--stage1] [--verbose] [--json]` | **CPU** decompile (**Stage-1** default; oracles via `--stage0` / `--stage05`) |
+| `ghidrust decompile <path> [--addr HEX] [--count N] [--stage0\|--stage05\|--stage1] [--follow-stub] [--verbose] [--json]` | **CPU** decompile (**Stage-1** default; `--follow-stub` for IL2CPP resolve thunks) |
 | `ghidrust decompile-bench <path> [--functions N] [--count N] [--stage1] [--parallel] [--out F]` | Per-function wall-clock + lift-coverage across stages |
 | `ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE]` | **GPU-resident** multipass → `.gdecomp` |
 | `ghidrust bulk-bench <path>` | Seq / parallel CPU / GPU bulk string timings |
@@ -351,9 +370,9 @@ MyProject/
 | `ghidrust project create\|import\|list\|analyze\|export …` | Durable projects |
 | `ghidrust mcp` | Stdio MCP server for agents |
 
-`--json` writes UTF-8 **without BOM**. Decompile status lines go to stderr only with `--verbose` (avoids PowerShell `NativeCommandError` noise when scripting).
+`--json` and `--out FILE` write UTF-8 **without BOM**. Prefer `--out` over shell redirection when filters contain `:` (Windows path hazard). Decompile status lines go to stderr only with `--verbose` (avoids PowerShell `NativeCommandError` noise when scripting).
 
-Recommended early path: **strings / imports / xrefs** for orientation → **Function Start Search** + `function-at` → address tables → conventions/stack → RTTI → `decompile`.
+Recommended early path: **strings / imports / xrefs** for orientation → **Function Start Search** + `function-at` → address tables → conventions/stack → RTTI → `decompile`. For Unity IL2CPP players: **`unity-inventory`** for install layout → **`il2cpp meta`** for managed types → stubs / map / `--follow-stub` as needed.
 
 ---
 
@@ -442,25 +461,38 @@ On Linux/macOS you can use a shell wrapper if needed:
 | `rtti` | `path` | Recover RTTI class names / vtables |
 | `list_analyzers` | — | Auto Analysis option names |
 | `analyze` | `path`, optional `analyzers[]`, optional `gpu` | Run analyzers (+ GPU enrich if `gpu: true`) |
-| `list_strings` / `search_strings` | `path`, optional `encoding` (`ascii`\|`utf16`\|`all`), `filter`, `min` | ASCII / UTF-16LE strings |
-| `get_xrefs_to` | `path`, `addr` | Xrefs **to** a VA (RIP-relative LEA/call/jmp included) |
+| `list_strings` / `search_strings` | `path`, optional `encoding` (`ascii`\|`utf16`\|`all`), `filter`, `match` (`substr`\|`token`\|`whole`\|`glob`), `min`, `limit`, `raw` | ASCII / UTF-16LE strings; `raw:true` for non-PE/ELF blobs |
+| `get_xrefs_to` | `path`, `addr`, optional `skip_stubs`, `classify` | Xrefs **to** a VA; IL2CPP resolve-stub filter/label |
 | `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs **from** a VA |
 | `get_string_xrefs` | `path`, `filter` | Resolve matching strings, then xrefs to each |
 | `list_imports` | `path`, optional `dll` / `name` | PE IAT slots |
 | `get_import_xrefs` | `path`, `name` | Code sites that reference an import IAT slot |
 | `function_at` / `get_function_by_address` | `path`, `addr` | Containing function for a body VA |
-| `decompile` | `path`, optional `addr`, `count`, `stage` | Stage-1 default (`stage0` / `stage05` oracles) |
+| `il2cpp_meta` | `path`, optional `filter` | Parse `global-metadata.dat` (v27/29/31); fail closed if encrypted |
+| `il2cpp_map` | `binary`, `meta`, optional `filter` | Metadata ↔ RVA map (`rva` null when unproven) |
+| `il2cpp_stubs` | `binary`, optional `filter`, `max` | List IL2CPP resolve stubs by icall name |
+| `unity_inventory` | `path` | Unity player dir → assemblies, plugins, metadata, XR-related inventory |
+| `decompile` | `path`, optional `addr`, `count`, `stage`, `follow_stub` | Stage-1 default; `follow_stub` follows IL2CPP resolve thunks |
 | `list_gpu_strategies` | — | Per-analyzer GPU strategy matrix |
 | `gpu_decompile` | `path`, optional `out` | GPU-resident multipass decompile |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI with PCIe/device split |
 
+IL2CPP version matrix and Unity inventory schema: [docs/IL2CPP.md](docs/IL2CPP.md).
+
 Example agent-facing call shapes (conceptual):
 
 ```json
-{ "name": "list_strings", "arguments": { "path": "…/app.exe", "encoding": "utf16", "filter": "UserConfig" } }
+{ "name": "list_strings", "arguments": { "path": "…/app.exe", "encoding": "all", "filter": "Camera", "match": "token", "limit": 50 } }
+{ "name": "list_strings", "arguments": { "path": "…/global-metadata.dat", "raw": true, "filter": "UnityEngine", "limit": 20 } }
+{ "name": "get_xrefs_to", "arguments": { "path": "…/GameAssembly.dll", "addr": "0x180012345", "skip_stubs": true, "classify": true } }
 { "name": "get_string_xrefs", "arguments": { "path": "…/app.exe", "filter": "ResolutionWidth" } }
 { "name": "get_import_xrefs", "arguments": { "path": "…/app.exe", "name": "ShellExecuteW" } }
 { "name": "function_at", "arguments": { "path": "…/app.exe", "addr": "0x14000d8ad" } }
+{ "name": "unity_inventory", "arguments": { "path": "…/GameDir" } }
+{ "name": "il2cpp_meta", "arguments": { "path": "…/global-metadata.dat", "filter": "Camera" } }
+{ "name": "il2cpp_map", "arguments": { "binary": "…/GameAssembly.dll", "meta": "…/global-metadata.dat" } }
+{ "name": "il2cpp_stubs", "arguments": { "binary": "…/GameAssembly.dll", "filter": "Camera" } }
+{ "name": "decompile", "arguments": { "path": "…/GameAssembly.dll", "addr": "0x180012345", "follow_stub": true } }
 { "name": "analyze", "arguments": { "path": "…/app.exe", "analyzers": ["ASCII Strings", "Unicode Strings"], "gpu": true } }
 ```
 
@@ -509,12 +541,14 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 
 | Crate | Role |
 |-------|------|
-| `ghidrust-core` | PE/ELF, x86-64, analyzers, imports/IAT, xrefs, projects, bulk scan |
+| `ghidrust-core` | PE/ELF/blob, x86-64, analyzers, imports/IAT, xrefs, projects, bulk scan |
 | `ghidrust-decode` | Hand-rolled x86-64 length-disasm + mnemonic/operand strings |
 | `ghidrust-ir` | Architecture-neutral pcode-like IR (varnodes, ops, tagged blocks, address spaces) |
 | `ghidrust-lift` | x86-64 → IR semantics with flag model + `LiftCoverage` reporting |
 | `ghidrust-ssa` | CFG-on-IR, Cooper–Harvey–Kennedy dominators, Cytron dominance frontiers, phi placement |
 | `ghidrust-decomp` | Stage-0 CFG → pseudo-C (regression oracle), Stage-0.5 IR-informed emit (`ir_emit`), decompile-bench harness, experimental GPU VRAM multipass |
+| `ghidrust-il2cpp` | IL2CPP `global-metadata.dat` + CodeRegistration correlation + resolve stubs |
+| `ghidrust-unity-inventory` | Unity player layout inventory (assemblies, plugins, metadata) |
 | `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` / `decompile-bench` |
 | `ghidrust-gui` | CodeBrowser-style UI |
 
@@ -528,6 +562,7 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 | [docs/GPU_DECOMPILE_PROCESS.md](docs/GPU_DECOMPILE_PROCESS.md) | Multipass dataflow + dump format |
 | [docs/GPU_ANALYZER_MATRIX.md](docs/GPU_ANALYZER_MATRIX.md) | Per-analyzer GPU strategy + bench CLI |
 | [docs/PARALLEL_RE_RESEARCH.md](docs/PARALLEL_RE_RESEARCH.md) | CPU pool vs GPU bulk RE |
+| [docs/IL2CPP.md](docs/IL2CPP.md) | IL2CPP metadata matrix + Unity player inventory |
 | [DEPENDENCIES.md](DEPENDENCIES.md) | Dependency policy |
 | [skill/README.md](skill/README.md) | Agent skill install |
 

@@ -4,6 +4,56 @@ use crate::error::Result;
 use crate::program::Program;
 use serde::Serialize;
 
+/// How `--filter` matches string values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StringMatchMode {
+    /// Case-insensitive substring (legacy default).
+    #[default]
+    Substr,
+    /// Case-insensitive token: whole word / identifier boundary.
+    Token,
+    /// Entire string equals needle (case-insensitive).
+    Whole,
+    /// Glob with `*` / `?` (case-insensitive).
+    Glob,
+}
+
+impl StringMatchMode {
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "substr" | "substring" | "contains" => Ok(Self::Substr),
+            "token" | "word" => Ok(Self::Token),
+            "whole" | "exact" | "eq" => Ok(Self::Whole),
+            "glob" => Ok(Self::Glob),
+            other => Err(crate::error::Error::Parse(format!(
+                "unknown match mode '{other}' (use substr|token|whole|glob)"
+            ))),
+        }
+    }
+}
+
+/// Options for [`collect_strings`] / [`collect_strings_bytes`].
+#[derive(Debug, Clone)]
+pub struct StringCollectOpts {
+    pub encoding: String,
+    pub min_len: usize,
+    pub filter: Option<String>,
+    pub match_mode: StringMatchMode,
+    pub limit: Option<usize>,
+}
+
+impl Default for StringCollectOpts {
+    fn default() -> Self {
+        Self {
+            encoding: "all".into(),
+            min_len: 4,
+            filter: None,
+            match_mode: StringMatchMode::Substr,
+            limit: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FoundString {
     pub va: u64,
@@ -138,44 +188,126 @@ fn is_utf16_printable(cu: u16) -> bool {
     cu <= 0x00ff
 }
 
-/// Combined ASCII + UTF-16LE scan with optional case-insensitive substring /
-/// simple glob filter (`*` / `?` only; no regex crate).
+/// Combined ASCII + UTF-16LE scan (legacy filter = substr, with auto-glob).
 pub fn collect_strings(
     prog: &Program,
     encoding: &str,
     min_len: usize,
     filter: Option<&str>,
 ) -> Result<Vec<FoundString>> {
-    let enc = encoding.to_ascii_lowercase();
-    let mut out = Vec::new();
-    if enc == "ascii" || enc == "all" {
-        out.extend(scan_ascii_strings(prog, min_len));
+    let mut opts = StringCollectOpts {
+        encoding: encoding.into(),
+        min_len,
+        filter: filter.map(|s| s.to_string()),
+        ..Default::default()
+    };
+    // Preserve prior auto-glob when pattern contains wildcards and mode is default substr.
+    if let Some(pat) = filter {
+        if pat.contains('*') || pat.contains('?') {
+            opts.match_mode = StringMatchMode::Glob;
+        }
     }
-    if enc == "utf16" || enc == "utf16le" || enc == "all" {
-        out.extend(scan_utf16le_strings(prog, min_len));
-    }
+    collect_strings_opts(prog, &opts)
+}
+
+/// Scan with explicit match mode / limit (filter-during-scan when a filter is set).
+pub fn collect_strings_opts(prog: &Program, opts: &StringCollectOpts) -> Result<Vec<FoundString>> {
+    let enc = opts.encoding.to_ascii_lowercase();
     if enc != "ascii" && enc != "utf16" && enc != "utf16le" && enc != "all" {
         return Err(crate::error::Error::Parse(format!(
-            "unknown encoding '{encoding}' (use ascii|utf16|all)"
+            "unknown encoding '{}' (use ascii|utf16|all)",
+            opts.encoding
         )));
+    }
+    let mut out = Vec::new();
+    if enc == "ascii" || enc == "all" {
+        for s in scan_ascii_strings(prog, opts.min_len) {
+            if filter_accept(opts, &s.value) {
+                out.push(s);
+                if limit_hit(opts, out.len()) {
+                    break;
+                }
+            }
+        }
+    }
+    if !limit_hit(opts, out.len()) && (enc == "utf16" || enc == "utf16le" || enc == "all") {
+        for s in scan_utf16le_strings(prog, opts.min_len) {
+            if filter_accept(opts, &s.value) {
+                out.push(s);
+                if limit_hit(opts, out.len()) {
+                    break;
+                }
+            }
+        }
     }
     out.sort_by_key(|s| s.va);
     out.dedup_by(|a, b| a.va == b.va && a.encoding == b.encoding);
-
-    if let Some(pat) = filter {
-        out.retain(|s| filter_match(pat, &s.value));
+    if let Some(lim) = opts.limit {
+        out.truncate(lim);
     }
     Ok(out)
 }
 
-fn filter_match(pat: &str, value: &str) -> bool {
+/// Scan an arbitrary byte slice as a single blob at `base_va` (raw files / metadata).
+pub fn collect_strings_bytes(
+    bytes: &[u8],
+    base_va: u64,
+    opts: &StringCollectOpts,
+) -> Result<Vec<FoundString>> {
+    let mut prog = Program::new("blob".into(), "blob");
+    prog.image_base = base_va;
+    prog.blocks.push(crate::program::MemoryBlock {
+        name: ".blob".into(),
+        va: base_va,
+        size: bytes.len() as u64,
+        bytes: bytes.to_vec(),
+        readable: true,
+        writable: false,
+        executable: false,
+    });
+    collect_strings_opts(&prog, opts)
+}
+
+fn limit_hit(opts: &StringCollectOpts, n: usize) -> bool {
+    opts.limit.is_some_and(|lim| n >= lim)
+}
+
+fn filter_accept(opts: &StringCollectOpts, value: &str) -> bool {
+    match &opts.filter {
+        None => true,
+        Some(pat) => filter_match_mode(opts.match_mode, pat, value),
+    }
+}
+
+fn filter_match_mode(mode: StringMatchMode, pat: &str, value: &str) -> bool {
     let pat_l = pat.to_ascii_lowercase();
     let val_l = value.to_ascii_lowercase();
-    if pat_l.contains('*') || pat_l.contains('?') {
-        glob_match(&pat_l, &val_l)
-    } else {
-        val_l.contains(&pat_l)
+    match mode {
+        StringMatchMode::Substr => val_l.contains(&pat_l),
+        StringMatchMode::Whole => val_l == pat_l,
+        StringMatchMode::Glob => glob_match(&pat_l, &val_l),
+        StringMatchMode::Token => token_match(&pat_l, &val_l),
     }
+}
+
+fn token_match(pat: &str, value: &str) -> bool {
+    if pat.is_empty() {
+        return false;
+    }
+    // Split on non-alphanumeric / non-underscore boundaries (identifier-ish).
+    let mut start = 0usize;
+    let bytes = value.as_bytes();
+    for i in 0..=bytes.len() {
+        let boundary = i == bytes.len()
+            || !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_';
+        if boundary {
+            if i > start && &value[start..i] == pat {
+                return true;
+            }
+            start = i + 1;
+        }
+    }
+    false
 }
 
 fn glob_match(pat: &str, value: &str) -> bool {
@@ -227,5 +359,38 @@ mod tests {
             "{hits:?}"
         );
         assert!(hits.iter().all(|s| s.encoding == "utf16le"));
+    }
+
+    #[test]
+    fn token_match_skips_substring_noise() {
+        // Underscore keeps identifier tokens together; dots/spaces split.
+        assert!(token_match("xr", "foo.xr.bar"));
+        assert!(token_match("xr", "foo xr bar"));
+        assert!(!token_match("xr", "foo_xr_bar"));
+        assert!(!token_match("xr", "openxrloader"));
+        assert!(filter_match_mode(
+            StringMatchMode::Token,
+            "Camera",
+            "UnityEngine.Camera"
+        ));
+        assert!(!filter_match_mode(
+            StringMatchMode::Token,
+            "Cam",
+            "UnityEngine.Camera"
+        ));
+    }
+
+    #[test]
+    fn collect_bytes_respects_limit() {
+        let hay = b"AAAA_hello\0BBBB_hello\0CCCC_hello\0";
+        let opts = StringCollectOpts {
+            encoding: "ascii".into(),
+            min_len: 4,
+            filter: Some("hello".into()),
+            match_mode: StringMatchMode::Substr,
+            limit: Some(2),
+        };
+        let hits = collect_strings_bytes(hay, 0, &opts).unwrap();
+        assert_eq!(hits.len(), 2);
     }
 }

@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 ghidrust-core = { workspace = true, features = ["gpu"] }
 ghidrust-decomp = { workspace = true, features = ["gpu"] }
+ghidrust-il2cpp = { workspace = true }
+ghidrust-unity-inventory = { workspace = true }
 ghidrust-types = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -25,7 +25,10 @@ use crate::program::Program;
 use crate::rtti::{recover_rtti, RttiReport};
 use serde::Serialize;
 
-pub use strings::{collect_strings, scan_ascii_strings, scan_utf16le_strings, FoundString};
+pub use strings::{
+    collect_strings, collect_strings_bytes, collect_strings_opts, scan_ascii_strings,
+    scan_utf16le_strings, FoundString, StringCollectOpts, StringMatchMode,
+};
 
 /// Exact labels from the Ghidra Auto Analysis screenshot (order preserved).
 pub const ANALYZER_NAMES: &[&str] = &[

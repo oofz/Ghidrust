@@ -2,7 +2,7 @@
 
 ## What Ghidrust is
 
-Ghidrust is a **Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra) — not a fork. It loads PE/ELF, disassembles x86-64, runs Auto Analysis, decompiles to pseudo-C, and supports durable projects via **CLI**, **MCP** (stdio), and an **egui** CodeBrowser-style GUI.
+Ghidrust is a **Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra) — not a fork. It loads PE/ELF (and raw blobs), disassembles x86-64, runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / Unity install inventory, and supports durable projects via **CLI**, **MCP** (stdio), and an **egui** CodeBrowser-style GUI.
 
 **Aims:** a freestanding, auditable RE core; CPU-correct analysis first; optional experimental GPU bulk scan + VRAM-resident decompile; agent-friendly headless use.
 
@@ -19,6 +19,8 @@ cargo build --workspace --release
 ./target/release/ghidrust load fixtures/tiny_x64.pe
 ./target/release/ghidrust disasm fixtures/tiny_x64.pe --count 16
 ./target/release/ghidrust decompile fixtures/tiny_x64.pe
+./target/release/ghidrust il2cpp meta fixtures/il2cpp/meta_v31.dat --filter Camera --json
+./target/release/ghidrust il2cpp stubs --binary fixtures/il2cpp/il2cpp_stub_lab.pe --json
 ./target/release/ghidrust gpu-decompile fixtures/tiny_x64.pe --out entry.gdecomp --json
 
 cargo run -p ghidrust-gui --release

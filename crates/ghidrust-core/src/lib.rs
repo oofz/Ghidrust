@@ -8,6 +8,7 @@ pub mod disasm;
 pub mod elf;
 pub mod error;
 pub mod imports;
+pub mod io_util;
 pub mod pe;
 pub mod program;
 pub mod project;
@@ -16,9 +17,10 @@ pub mod theme;
 pub mod xrefs;
 
 pub use analyzers::{
-    analyzer_catalog, collect_strings, run_analyzers, run_analyzers_opts, scan_ascii_strings,
-    scan_utf16le_strings, AnalysisRunReport, AnalyzerInfo, AnalyzerOutput, AnalyzerStatus,
-    FoundString, ANALYZER_NAMES,
+    analyzer_catalog, collect_strings, collect_strings_bytes, collect_strings_opts, run_analyzers,
+    run_analyzers_opts, scan_ascii_strings, scan_utf16le_strings, AnalysisRunReport, AnalyzerInfo,
+    AnalyzerOutput, AnalyzerStatus, FoundString, StringCollectOpts, StringMatchMode,
+    ANALYZER_NAMES,
 };
 pub use bulk_scan::{
     plan_dispatch_workgroup_chunks, preferred_bulk_mode, scan_ascii_strings_bulk,
@@ -37,13 +39,15 @@ pub use disasm::{
     decode_one, disassemble_at, disassemble_range, disassemble_range_opts, Instruction,
 };
 pub use imports::{filter_imports, load_imports, parse_pe_imports};
+pub use io_util::{sanitize_path_component, sanitized_out_name, write_json_no_bom};
 pub use edits::{
     CommentKind, EquateEdit, FunctionSignatureEdit, ProgramEditTotals, ProgramEdits, RetypeEdit,
     BUILTIN_TYPES,
 };
 pub use error::{Error, Result};
 pub use program::{
-    AddressTableInfo, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo,
+    AddressTableInfo, AddressTableRole, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch,
+    FunctionInfo,
     ImportEntry, MediaHit, MemoryBlock, Program, ReferenceInfo, ResourceInfo, SectionInfo,
     SwitchInfo, SymbolInfo,
 };
@@ -73,15 +77,64 @@ pub fn load_bytes(data: &[u8], name: impl Into<String>) -> Result<Program> {
     }
 }
 
+/// Load arbitrary bytes as a single readable blob (`format: "blob"`).
+///
+/// Used for raw files (e.g. metadata dumps) that are not PE/ELF. Image base is 0;
+/// the whole file is one memory block at VA 0.
+pub fn load_blob(data: &[u8], name: impl Into<String>) -> Program {
+    let name = name.into();
+    let mut prog = Program::new(name, "blob");
+    prog.image_base = 0;
+    prog.file_bytes = data.to_vec();
+    let size = data.len() as u64;
+    prog.sections.push(program::SectionInfo {
+        name: ".blob".into(),
+        va: 0,
+        virtual_size: size,
+        raw_size: size,
+        file_offset: 0,
+        characteristics: 0,
+    });
+    prog.blocks.push(program::MemoryBlock {
+        name: ".blob".into(),
+        va: 0,
+        size,
+        bytes: data.to_vec(),
+        readable: true,
+        writable: false,
+        executable: false,
+    });
+    prog
+}
+
+/// Load PE/ELF, or a raw blob when `allow_blob` is true and magic is unrecognized.
+pub fn load_bytes_opts(
+    data: &[u8],
+    name: impl Into<String>,
+    allow_blob: bool,
+) -> Result<Program> {
+    let name = name.into();
+    match load_bytes(data, name.clone()) {
+        Ok(p) => Ok(p),
+        Err(Error::UnsupportedFormat(_)) if allow_blob => Ok(load_blob(data, name)),
+        Err(e) => Err(e),
+    }
+}
+
 /// Load from a filesystem path.
 pub fn load_path(path: impl AsRef<Path>) -> Result<Program> {
+    load_path_opts(path, false)
+}
+
+/// Load from path; when `allow_blob` is set, non-PE/ELF files become blobs.
+pub fn load_path_opts(path: impl AsRef<Path>, allow_blob: bool) -> Result<Program> {
     let path = path.as_ref();
     let data = std::fs::read(path).map_err(|e| Error::Io(e.to_string()))?;
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "image".into());
-    load_bytes(&data, name)
+    load_bytes_opts(&data, name, allow_blob)
 }
 
 /// Run load + disasm slice + default analyzers.

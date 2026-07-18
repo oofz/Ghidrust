@@ -1326,7 +1326,9 @@ version = "0.1.0"
 dependencies = [
  "ghidrust-core",
  "ghidrust-decomp",
+ "ghidrust-il2cpp",
  "ghidrust-types",
+ "ghidrust-unity-inventory",
  "serde",
  "serde_json",
 ]
@@ -1381,7 +1383,19 @@ dependencies = [
  "ghidrust-core",
  "ghidrust-decomp",
  "ghidrust-types",
+ "libc",
  "rfd",
+ "serde",
+ "serde_json",
+ "unicode-width",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "ghidrust-il2cpp"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-core",
  "serde",
  "serde_json",
 ]
@@ -1431,6 +1445,18 @@ dependencies = [
  "ghidrust-lift",
  "ghidrust-ssa",
  "serde",
+]
+
+[[package]]
+name = "ghidrust-unity-inventory"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-core",
+ "ghidrust-il2cpp",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2955,6 +2981,17 @@ name = "sha1"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
 dependencies = [
  "cfg-if",
  "cpufeatures",

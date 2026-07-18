@@ -3,8 +3,9 @@
 //! Sources:
 //! 1. `Program::analysis.references` — analyzer-deposited refs
 //! 2. `Program::analysis.address_tables` — pointer tables
-//! 3. Decoded instructions — absolute operand hex + RIP-relative targets
-//! 4. Import / IAT slots — `call/jmp [rip+disp]` landing on IAT VAs
+//! 3. Non-exec data — aligned LE `u64` slots equal to the target (`kind: "ptr"`)
+//! 4. Decoded instructions — absolute operand hex + RIP-relative targets
+//! 5. Import / IAT slots — `call/jmp [rip+disp]` landing on IAT VAs
 
 use crate::disasm::{decode_one, disassemble_range};
 use crate::program::{ImportEntry, Program};
@@ -17,7 +18,7 @@ pub struct XRef {
     pub from: u64,
     /// Target VA (where the reference points at).
     pub to: u64,
-    /// Ghidra-analog kind (`call`, `jmp`, `cond_jmp`, `data`, `ptr_table`,
+    /// Ghidra-analog kind (`call`, `jmp`, `cond_jmp`, `data`, `ptr`, `ptr_table`,
     /// `resource`, `xref`, `iat`).
     pub kind: &'static str,
     /// Ghidra "From Preview" — mnemonic/operand text where computable.
@@ -60,6 +61,8 @@ pub fn xrefs_to(
         }
     }
 
+    scan_data_pointer_refs(prog, target, &mut out);
+
     if let Some(listing) = hint_listing {
         push_listing_xrefs_to(listing, target, &mut out);
     } else {
@@ -68,6 +71,43 @@ pub fn xrefs_to(
 
     finalize(&mut out);
     out
+}
+
+/// Cap on lone data-pointer hits per `xrefs_to` (avoids huge .data scans dominating output).
+const DATA_PTR_XREF_CAP: usize = 4096;
+
+/// Scan non-executable blocks for aligned LE `u64` slots equal to `target`.
+fn scan_data_pointer_refs(prog: &Program, target: u64, out: &mut Vec<XRef>) {
+    let mut found = 0usize;
+    for block in &prog.blocks {
+        if block.executable {
+            continue;
+        }
+        let b = &block.bytes;
+        let mut off = 0usize;
+        // Align to 8 within the block.
+        let mis = (block.va as usize + off) % 8;
+        if mis != 0 {
+            off += 8 - mis;
+        }
+        while off + 8 <= b.len() {
+            if found >= DATA_PTR_XREF_CAP {
+                return;
+            }
+            let val = u64::from_le_bytes(b[off..off + 8].try_into().unwrap());
+            if val == target {
+                let from = block.va + off as u64;
+                out.push(XRef {
+                    from,
+                    to: target,
+                    kind: "ptr",
+                    preview: format!("dq {target:#x}"),
+                });
+                found += 1;
+            }
+            off += 8;
+        }
+    }
 }
 
 /// Compute references **from** `source` (disassemble up to `max_insns`).
@@ -319,6 +359,7 @@ fn mnemonic_kind(mnem: &str) -> &'static str {
 fn static_kind(raw: &str) -> &'static str {
     match raw {
         "ptr_table" => "ptr_table",
+        "ptr" => "ptr",
         "resource" => "resource",
         "call" => "call",
         "jmp" => "jmp",
@@ -377,6 +418,7 @@ mod tests {
             base: prog.image_base,
             count: 1,
             entries: vec![entry],
+            role: crate::program::AddressTableRole::Unknown,
         });
         prog.analysis.references.push(ReferenceInfo {
             from: prog.image_base + 0x40,
@@ -421,6 +463,44 @@ mod tests {
         let refs = xrefs_to(&prog, str_va, None);
         assert!(
             refs.iter().any(|r| r.from == insn_va && r.to == str_va),
+            "{refs:?}"
+        );
+    }
+
+    #[test]
+    fn xrefs_to_finds_lone_rdata_qword_pointer() {
+        let mut prog = Program::new("t".into(), "PE32+");
+        let str_va = 0x140002000u64;
+        let slot_va = 0x140003008u64; // intentionally not part of a 3+ table run
+        prog.blocks.push(MemoryBlock {
+            name: ".rdata".into(),
+            va: 0x140002000,
+            size: 0x20,
+            bytes: {
+                let mut b = b"Hello\0\0\0".to_vec();
+                b.resize(0x20, 0);
+                b
+            },
+            readable: true,
+            writable: false,
+            executable: false,
+        });
+        // Sparse data block: 8 bytes of zeros then one qword pointer (singleton, not a table).
+        let mut data = vec![0u8; 8];
+        data.extend_from_slice(&str_va.to_le_bytes());
+        prog.blocks.push(MemoryBlock {
+            name: ".data".into(),
+            va: 0x140003000,
+            size: data.len() as u64,
+            bytes: data,
+            readable: true,
+            writable: true,
+            executable: false,
+        });
+        let refs = xrefs_to(&prog, str_va, None);
+        assert!(
+            refs.iter()
+                .any(|r| r.from == slot_va && r.to == str_va && r.kind == "ptr"),
             "{refs:?}"
         );
     }
