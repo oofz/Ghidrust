@@ -1377,6 +1377,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "ghidrust-agent",
  "ghidrust-core",
  "ghidrust-decomp",
  "ghidrust-types",

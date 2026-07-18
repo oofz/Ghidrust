@@ -20,18 +20,13 @@ use ghidrust_agent::{
 use std::path::{Path, PathBuf};
 
 /// Which tab of the bottom dock is currently active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BottomTab {
     /// The Grok Build agent console (default primary tab per user spec).
+    #[default]
     Grok,
     /// The plain analyzer / script Console (existing behavior).
     Console,
-}
-
-impl Default for BottomTab {
-    fn default() -> Self {
-        BottomTab::Grok
-    }
 }
 
 /// One transcript entry the pane renders.
@@ -381,5 +376,78 @@ pub fn spawn_install_grok() -> String {
             "Failed to spawn installer ({e}).\nRun manually: {}\nDocs: {}",
             cmd.display, cmd.docs_url
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_tab_is_grok() {
+        assert_eq!(BottomTab::default(), BottomTab::Grok);
+    }
+
+    #[test]
+    fn pane_state_defaults_to_read_only() {
+        let s = GrokPaneState::new();
+        assert_eq!(s.mode, AgentMode::ReadOnly);
+        assert_eq!(s.tab, BottomTab::Grok);
+        assert!(s.transcript.is_empty());
+        assert!(s.session.is_none());
+    }
+
+    #[test]
+    fn assistant_deltas_coalesce_into_one_bubble() {
+        let mut s = GrokPaneState::new();
+        s.ingest_events(vec![
+            AgentEvent::AssistantDelta { text: "hel".into() },
+            AgentEvent::AssistantDelta { text: "lo".into() },
+            AgentEvent::AssistantDelta { text: " world".into() },
+        ]);
+        assert_eq!(s.transcript.len(), 1);
+        match &s.transcript[0] {
+            TranscriptEntry::Assistant { markdown } => assert_eq!(markdown, "hello world"),
+            _ => panic!("expected assistant bubble"),
+        }
+    }
+
+    #[test]
+    fn tool_call_finished_binds_to_pending_start() {
+        let mut s = GrokPaneState::new();
+        s.ingest_events(vec![
+            AgentEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "analyze".into(),
+                args_json: "{}".into(),
+            },
+            AgentEvent::ToolCallFinished {
+                id: "c1".into(),
+                ok: true,
+                summary: "42 fns".into(),
+            },
+        ]);
+        assert_eq!(s.transcript.len(), 1);
+        match &s.transcript[0] {
+            TranscriptEntry::ToolCall {
+                id, done: Some(res), ..
+            } => {
+                assert_eq!(id, "c1");
+                assert!(res.ok);
+                assert!(res.summary.contains("42"));
+            }
+            _ => panic!("expected finished tool card"),
+        }
+    }
+
+    #[test]
+    fn child_exit_clears_session_and_notes_transcript() {
+        let mut s = GrokPaneState::new();
+        s.ingest_events(vec![AgentEvent::ChildExited { code: Some(1) }]);
+        assert!(s.session.is_none());
+        match s.transcript.last() {
+            Some(TranscriptEntry::Info { text }) => assert!(text.contains("exit=1")),
+            _ => panic!("expected info entry"),
+        }
     }
 }

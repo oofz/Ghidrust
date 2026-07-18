@@ -50,6 +50,65 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvError, TryRecvError};
 
+/// Render one pseudo-C snippet from the Grok pane using the shared
+/// `decomp_tokens` highlighter — so agent-produced pseudo-C looks the same as
+/// the Decompiler pane's output.
+fn render_pseudo_c_inline(ui: &mut egui::Ui, body: &str) {
+    let lines = tokenize_decomp(body);
+    ui.group(|ui| {
+        for line in &lines {
+            let mut job = egui::text::LayoutJob::default();
+            for tok in &line.tokens {
+                let (color, italic) = token_style(&tok.kind, ui.visuals().text_color());
+                let mut fmt = egui::TextFormat {
+                    color,
+                    font_id: egui::FontId::monospace(12.0),
+                    italics: italic,
+                    ..Default::default()
+                };
+                // Preserve original whitespace / newlines faithfully.
+                if matches!(tok.kind, TokenKind::Comment) {
+                    fmt.italics = true;
+                }
+                job.append(&tok.text, 0.0, fmt);
+            }
+            ui.label(job);
+        }
+    });
+}
+
+/// Locate the workspace `skill/SKILL.md` when running from a repo checkout so
+/// the Grok session prompt can inline the exhaustive catalog. When Ghidrust
+/// is installed as a released binary and no adjacent skill file exists we
+/// return `(String::new(), None)` — the `SystemPromptBuilder` still emits the
+/// honesty rules from its own body, just without the catalog.
+fn load_skill_body() -> (String, Option<PathBuf>) {
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        // 1. Adjacent to the running binary (production layout).
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                v.push(dir.join("skill").join("SKILL.md"));
+                if let Some(root) = dir.parent() {
+                    v.push(root.join("skill").join("SKILL.md"));
+                }
+            }
+        }
+        // 2. Workspace-local (development layout — cargo run from repo root).
+        if let Ok(cwd) = std::env::current_dir() {
+            v.push(cwd.join("skill").join("SKILL.md"));
+            v.push(cwd.join("..").join("skill").join("SKILL.md"));
+        }
+        v
+    };
+    for c in candidates {
+        if let Ok(body) = std::fs::read_to_string(&c) {
+            return (body, Some(c));
+        }
+    }
+    (String::new(), None)
+}
+
 fn recent_projects_path() -> PathBuf {
     // %APPDATA%/ghidrust/recent_projects.txt (or home fallback)
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -2893,12 +2952,12 @@ impl GhidrustApp {
                     if ui.button("Start Session").clicked() {
                         self.start_grok_session_from_ui();
                     }
-                    if self.grok_pane.grok_bin.is_none() {
-                        if ui.button("Install Grok Build…").clicked() {
-                            let status = agent_pane::spawn_install_grok();
-                            self.log(status.clone());
-                            self.grok_pane.install_status = Some(status);
-                        }
+                    if self.grok_pane.grok_bin.is_none()
+                        && ui.button("Install Grok Build…").clicked()
+                    {
+                        let status = agent_pane::spawn_install_grok();
+                        self.log(status.clone());
+                        self.grok_pane.install_status = Some(status);
                     }
                     if ui.button("Re-scan for grok").clicked() {
                         self.grok_pane.refresh_grok_binary();
@@ -3016,7 +3075,7 @@ impl GhidrustApp {
                 f.sections.push(ghidrust_agent::SectionFact {
                     name: s.name.clone(),
                     va: format!("{:#x}", s.va),
-                    size: s.virtual_size as u64,
+                    size: s.virtual_size,
                 });
             }
         }

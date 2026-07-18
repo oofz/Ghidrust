@@ -94,12 +94,7 @@ pub fn grok_binary_path() -> Option<PathBuf> {
         candidates.push(PathBuf::from(&userprofile).join(".grok").join("bin").join(exe_name));
         candidates.push(PathBuf::from(&userprofile).join("AppData").join("Local").join("Programs").join("grok").join(exe_name));
     }
-    for c in candidates {
-        if c.is_file() {
-            return Some(c);
-        }
-    }
-    None
+    candidates.into_iter().find(|c| c.is_file())
 }
 
 #[cfg(test)]
