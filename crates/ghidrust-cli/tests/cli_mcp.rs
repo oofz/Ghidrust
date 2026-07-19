@@ -178,3 +178,68 @@ fn mcp_lists_new_lookup_tools() {
         assert!(s.contains(tool), "missing {tool} in {s}");
     }
 }
+
+#[test]
+fn cli_version_matches_package() {
+    let out = bin().args(["--version"]).output().expect("version");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(env!("CARGO_PKG_VERSION")),
+        "missing package version in {s}"
+    );
+    assert!(s.contains("tool_surface="), "{s}");
+}
+
+#[test]
+fn mcp_server_info_and_live_tools() {
+    let mut child = bin()
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mcp");
+    let mut stdin = child.stdin.take().unwrap();
+    let reqs = format!(
+        "{}\n{}\n{}\n",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2024-11-05",
+            "capabilities":{},
+            "clientInfo":{"name":"test","version":"0"}
+        }}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"server_info","arguments":{}
+        }}),
+    );
+    stdin.write_all(reqs.as_bytes()).unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let s = String::from_utf8_lossy(&out.stdout);
+    let ver = env!("CARGO_PKG_VERSION");
+    assert!(s.contains(ver), "initialize/server_info missing version {ver}: {s}");
+    assert!(
+        s.contains("toolSurface") || s.contains("tool_surface"),
+        "missing tool_surface in {s}"
+    );
+    for tool in [
+        "server_info",
+        "process_list",
+        "process_attach",
+        "process_resolve",
+        "process_read",
+        "artifact_query",
+        "inventory",
+    ] {
+        assert!(s.contains(tool), "missing {tool} in {s}");
+    }
+    // tool_surface must be at least 2 (not a placeholder zero)
+    assert!(
+        s.contains("\"toolSurface\":2")
+            || s.contains("\"tool_surface\": 2")
+            || s.contains("\"tool_surface\":2"),
+        "expected tool_surface >= 2 in {s}"
+    );
+}

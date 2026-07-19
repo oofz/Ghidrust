@@ -31,6 +31,8 @@ cargo run -p ghidrust-gui --release
 
 Windows: `.\target\release\ghidrust.exe` / `.\target\release\ghidrust-gui.exe`. Friction surfaces (`inventory`, `tree`, `artifact`, `process`, `rtti --filter`) match MCP tool names in `tool_defs()` — see [`SKILL.md`](SKILL.md).
 
+Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Live multi-step work needs MCP `tool_surface >= 2`; restart MCP after rebuild if `process_*` is missing.
+
 MCP for agents (register in Cursor / Claude Desktop / other MCP clients — see root README):
 
 ```bash

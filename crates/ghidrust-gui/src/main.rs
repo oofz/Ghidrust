@@ -176,14 +176,15 @@ struct AnalysisJob {
 }
 
 fn main() -> eframe::Result<()> {
+    let title = format!("Ghidrust {} CodeBrowser", env!("CARGO_PKG_VERSION"));
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_title("Ghidrust CodeBrowser"),
+            .with_title(&title),
         ..Default::default()
     };
     eframe::run_native(
-        "Ghidrust CodeBrowser",
+        &title,
         opts,
         Box::new(|cc| Ok(Box::new(GhidrustApp::new(cc)))),
     )
@@ -7953,8 +7954,10 @@ impl eframe::App for GhidrustApp {
                     }
                     ui.separator();
                     if ui.button("About Ghidrust").clicked() {
-                        self.status =
-                            "Ghidrust — Rust RE foundation (Material 3 CodeBrowser shell)".into();
+                        self.status = format!(
+                            "Ghidrust {} — Rust RE toolkit (CodeBrowser shell)",
+                            env!("CARGO_PKG_VERSION")
+                        );
                         self.log(self.status.clone());
                         ui.close_menu();
                     }

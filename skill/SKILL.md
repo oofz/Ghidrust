@@ -39,13 +39,15 @@ cargo build -p ghidrust-gui --release
 
 ## Agent friction SOPs (required)
 
+- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 2`** (live process + artifacts + inventory). If `server_info` is missing, `tool_surface` is below that minimum, or `process_list` / `artifact_query` / `inventory` are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
 - **Artifacts**: When envelope `entry_count` > preview or the host truncates tool text, drain via `artifact_query` / `artifact get` until `next_offset` is null. Never assume truncated MCP text is complete.
 - **Program identity**: Prefer `load` with absolute `path`, or `project` + `file_id`. Facts always include `resolved_path` or honest null — resolve before analyze/decompile.
 - **Inventory / tree**: Use `inventory <dir>` (PE VERSIONINFO + exe/dll) before OS `dir`/`Get-Item`. Use `tree` / `list_tree` for non-PE sidecars (existence/size only; no unpack).
 - **Address→function**: Always pass `addr` to `decompile` / `disassemble` / `gpu_decompile`; trust `resolved_entry` / `resolve` meta. Mid-body hits resolve to containing entry; unmapped → `no_containing_function` (no invented 1-insn fn).
 - **RTTI catalog**: Prefer `rtti_query` (`--filter`/`--exact`) before mangled `.?AV` string archaeology. Multi-vtable types report `vtable_vas[]` honestly.
 - **UTF-16 xrefs**: If `search_strings` returns `utf16le`, query `get_string_xrefs` with `encoding=all` (or `utf16le`) before concluding “no refs”.
-- **Live process (Windows)**: `process_list` → `process_attach` → `process_modules` → `process_resolve` (`static_to_live`) → `process_read` → optional `process_regions` / `process_detach`. Bytes ≠ types. No write/breakpoints in MVP.
+- **Live process (Windows)**: Multi-step live work **must** use MCP (or one long-lived process) — `process_list` → `process_attach` → `process_modules` → `process_resolve` (`static_to_live`) → `process_read` → optional `process_regions` / `process_detach`. Never chain separate CLI `ghidrust process` spawns expecting the same `session_id` (sessions are in-process). Bytes ≠ types. No write/breakpoints in MVP.
+- **IL2CPP offline → live**: (1) `il2cpp_meta` / `il2cpp_map` for method RVAs (null = unknown offline). (2) `decompile` + `follow_stub` for resolve stubs with mapped slots. (3) On `runtime_unresolved` / `trampoline_or_invoker` (see `next_steps` in JSON) → live attach → `process_resolve(module, rva)` → `process_read` for class/instance bytes. `follow_stub` is **not** “get managed method body for every RVA.”
 - **Skill bootstrap**: GUI project open / Start writes `.grok/skills/ghidrust/SKILL.md` (disk or embedded fallback) and shows a fail-loud checklist (mcp/skill/agents/context + hash).
 - **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only).
 
@@ -176,8 +178,11 @@ ghidrust project analyze PROJ_DIR --file ID \
 
 ### MCP (`ghidrust mcp`)
 
+Requires **`tool_surface >= 2`**. Check with `server_info` after connect.
+
 | Tool | Args | Notes |
 |------|------|-------|
+| `server_info` | — | Package `version`, `tool_surface`, features, live session_model |
 | `load` | `path` **or** `project`+`file_id` | Map + `section_notes` + `resolved_path` |
 | `disassemble` | `path`, optional `addr`, `count` | Containing-fn resolve + `decode_gaps` |
 | `rtti` / `rtti_query` | `path`, optional `filter`/`exact`/`match` | Catalog; multi-vtable; artifact if large |
@@ -198,7 +203,7 @@ ghidrust project analyze PROJ_DIR --file ID \
 | `il2cpp_stubs` | `binary`, optional `filter`, `max` | Resolve stubs (filter: name or C-string at `name_string_va`) |
 | `il2cpp_icalls` | `binary`, optional `filter` | Engine name‖fn icall tables → index / RVA |
 | `unity_inventory` | `path` | Player dir + PE VERSIONINFO helpers |
-| `decompile` | `path`, optional `addr`, `count`, `stage`, **`follow_stub`** | Resolve meta + Stage-1 (expression fold, named calls); JSON: `folded_temps`, `token_count`, `goto_rate`; `runtime_unresolved` when IL2CPP slot empty |
+| `decompile` | `path`, optional `addr`, `count`, `stage`, **`follow_stub`** | Resolve meta + Stage-1; JSON: `folded_temps`, `token_count`, `goto_rate`; `follow_stub` may be `runtime_unresolved` / `trampoline_or_invoker` with `next_steps` → live process |
 | `list_gpu_strategies` | — | Strategy matrix |
 | `gpu_decompile` | `path`, optional `addr`, `out` | VA resolve; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI |
@@ -222,9 +227,10 @@ Canonical detail: [`docs/IL2CPP.md`](../docs/IL2CPP.md).
 | Raw bytes at VA | `ghidrust bytes PATH --addr HEX --count N --json` | `read_bytes` `{path, addr, count?}` |
 | Xrefs (incl. data ptrs / skip stubs) | `ghidrust xrefs PATH --to HEX [--skip-stubs] [--classify]` | `get_xrefs_to` `{…, skip_stubs, classify}` |
 | Decompile through stub | `ghidrust decompile GA.dll --addr HEX --follow-stub --json` | `decompile` `{…, follow_stub: true}` |
+| Live resolve + read (runtime slots) | `ghidrust process …` (single spawn only) | MCP: attach → resolve → read (keep session) |
 | Strings on metadata blob | `ghidrust strings META.dat --raw --match token --limit N` | `list_strings` `{path, raw:true, match, limit}` |
 
-Wrong metadata magic → encrypted/obfuscated JSON with `next_steps` (fail closed). Never invent method or icall RVAs when pairing/map leaves them null.
+Wrong metadata magic → encrypted/obfuscated JSON with `next_steps` (fail closed). Never invent method or icall RVAs when pairing/map leaves them null. Empty/runtime stub slots → `runtime_unresolved` + live `next_steps`; do not heap-scan as a substitute.
 
 **Engine icall recipe (generic):**
 
@@ -245,6 +251,7 @@ Add `--json` for structured stdout.
 | Feature | Command |
 |---------|---------|
 | Help | `ghidrust help` |
+| Version | `ghidrust version` / `--version` / `-V` `[--json]` (package + `tool_surface`) |
 | Load | `ghidrust load <path\|--project DIR --file-id ID>` |
 | Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad]` |
 | Strings | `ghidrust strings <path> [--raw] [--encoding …] [--match MODE] [--limit N] [--out FILE] [--filter SUB]` |

@@ -392,6 +392,7 @@ MyProject/
 | `ghidrust analyzer-bench-matrix` | Print GPU strategy class per analyzer |
 | `ghidrust rtti-gpu-bench <path> [--out FILE]` | CPU RTTI vs GPU `rtti_scan` |
 | `ghidrust project create\|import\|list\|analyze\|export …` | Durable projects |
+| `ghidrust version` / `--version` / `-V` `[--json]` | Package version + `tool_surface` (matches MCP / egui About) |
 | `ghidrust mcp` | Stdio MCP server for agents |
 
 `--json` and `--out FILE` write UTF-8 **without BOM**. Prefer `--out` over shell redirection when filters contain `:` (Windows path hazard). Decompile status lines go to stderr only with `--verbose` (avoids PowerShell `NativeCommandError` noise when scripting).
@@ -463,6 +464,8 @@ Note the absolute path to the binary, e.g. `C:\path\to\Ghidrust\target\release\g
 
 **Other MCP clients** — same pattern: command = absolute path to `ghidrust` / `ghidrust.exe`, args = `["mcp"]`. Restart the client after editing config.
 
+After rebuild/restart, confirm the binary matches the skill: `ghidrust --version` (package + `tool_surface`), and MCP `server_info` / `tools/list` includes `process_list` and `server_info`. If those tools are missing, the client is still running a stale binary — rebuild and restart MCP; do not treat that as “live process unsupported.”
+
 On Linux/macOS:
 
 ```json
@@ -480,6 +483,7 @@ On Linux/macOS:
 
 | Tool | Args | Purpose |
 |------|------|---------|
+| `server_info` | — | Package `version`, monotonic `tool_surface`, features, live session_model |
 | `load` | `path` **or** `project`+`file_id` | Load PE/ELF; `resolved_path`, `sections`, `section_notes` |
 | `disassemble` | `path`, optional `addr`, `count` | Listing + containing-fn resolve + `decode_gaps` |
 | `rtti` | `path` | Full RTTI recover dump |
@@ -510,7 +514,9 @@ On Linux/macOS:
 
 #### Live process (Windows)
 
-Attach read-only (`PROCESS_VM_READ`): `process list` → `attach <pid>` → `modules` → `resolve --module NAME --rva HEX` (`static_to_live`) → `read --addr LIVE --size N` → optional `regions` / `detach`. Short reads and access denied are explicit errors. Bytes ≠ recovered types — do not invent structs from live reads. GUI: Debugger → Targets / Modules / Memory Bytes / Regions / Static Mappings.
+Attach read-only (`PROCESS_VM_READ`): `process list` → `attach <pid>` → `modules` → `resolve --module NAME --rva HEX` (`static_to_live`) → `read --addr LIVE --size N` → optional `regions` / `detach`. Multi-step attach **must** use the long-lived MCP (or GUI) process — CLI `ghidrust process` cannot reuse `session_id` across separate spawns. Short reads and access denied are explicit errors. Bytes ≠ recovered types — do not invent structs from live reads. GUI: Debugger → Targets / Modules / Memory Bytes / Regions / Static Mappings.
+
+Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface` (minimum `2` for live process + artifacts).
 
 #### Analysis artifacts
 

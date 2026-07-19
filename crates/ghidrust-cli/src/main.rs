@@ -17,6 +17,7 @@ use ghidrust_decomp::decompile_entry;
 use ghidrust_il2cpp::{
     classify_at, correlate, filter_entries, find_resolve_stubs, follow_stub_target,
     is_resolve_stub_va, resolve_icalls_path, stub_matches_filter, to_script_json, Il2CppMetadata,
+    ResolveStub,
 };
 use ghidrust_unity_inventory::inventory_path;
 use serde::Serialize;
@@ -26,6 +27,128 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
+
+/// Workspace package version — same string as MCP `serverInfo` and egui About.
+const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Monotonic MCP tool-surface contract. Bump when tools are added/removed/renamed
+/// or required args change in a breaking way. Skill documents a minimum.
+/// `2` = live process + artifacts + inventory / tree / rtti_query surface.
+const TOOL_SURFACE_VERSION: u32 = 2;
+
+fn package_version() -> &'static str {
+    PACKAGE_VERSION
+}
+
+fn server_info_json() -> Value {
+    json!({
+        "name": "ghidrust",
+        "version": package_version(),
+        "tool_surface": TOOL_SURFACE_VERSION,
+        "features": [
+            "live_process",
+            "artifacts",
+            "il2cpp",
+            "inventory",
+            "rtti_query",
+            "list_tree",
+            "decompile_stage1"
+        ],
+        "live_process": {
+            "tools": [
+                "process_list",
+                "process_attach",
+                "process_detach",
+                "process_modules",
+                "process_read",
+                "process_resolve",
+                "process_regions"
+            ],
+            "session_model": "in_process_mcp",
+            "note": "Attach sessions live in the long-lived MCP (or GUI) process. CLI one-shot `ghidrust process` cannot reuse session_id across separate spawns."
+        }
+    })
+}
+
+/// Structured escalation when offline `follow_stub` cannot yield a real method body.
+fn live_process_next_steps() -> Value {
+    json!([
+        "process_list",
+        "process_attach",
+        "process_modules",
+        "process_resolve (module + method RVA from il2cpp_map)",
+        "process_read",
+        "optional process_regions / process_detach"
+    ])
+}
+
+/// True when a followed stub target looks like a tiny trampoline/invoker, not a real body.
+fn looks_like_trampoline(prog: &Program, target: u64) -> bool {
+    if let Some(f) = prog.analysis.functions.iter().find(|f| f.entry == target) {
+        let size = f.end.saturating_sub(f.entry);
+        if size > 0 && size <= 32 {
+            return true;
+        }
+    }
+    match disassemble_range_opts(prog, target, 8, true) {
+        Ok(range) => {
+            let insns = &range.insns;
+            if insns.len() <= 5 {
+                let text = insns
+                    .iter()
+                    .map(|i| i.mnemonic.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                text.contains("jmp") || text.contains("ret") || insns.len() <= 3
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+fn build_follow_stub_meta(prog: &Program, from: u64, stub: &ResolveStub) -> (Option<u64>, Value) {
+    if let Some(target) = follow_stub_target(prog, stub) {
+        if looks_like_trampoline(prog, target) {
+            (
+                Some(target),
+                json!({
+                    "status": "trampoline_or_invoker",
+                    "from": format!("{from:#x}"),
+                    "to": format!("{target:#x}"),
+                    "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                    "icall_name": stub.icall_name,
+                    "note": "followed target looks like a trampoline/invoker — not a full managed body; use live process for runtime fields",
+                    "next_steps": live_process_next_steps(),
+                }),
+            )
+        } else {
+            (
+                Some(target),
+                json!({
+                    "status": "resolved",
+                    "from": format!("{from:#x}"),
+                    "to": format!("{target:#x}"),
+                    "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                    "icall_name": stub.icall_name,
+                }),
+            )
+        }
+    } else {
+        (
+            None,
+            json!({
+                "status": "runtime_unresolved",
+                "from": format!("{from:#x}"),
+                "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
+                "icall_name": stub.icall_name,
+                "note": "empty/runtime slot; offline follow_stub cannot yield method body",
+                "next_steps": live_process_next_steps(),
+            }),
+        )
+    }
+}
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = env::args().skip(1).collect();
@@ -39,6 +162,18 @@ fn main() -> ExitCode {
     match args[0].as_str() {
         "help" | "-h" | "--help" => {
             print_help();
+            ExitCode::SUCCESS
+        }
+        "version" | "--version" | "-V" => {
+            if json_mode {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&server_info_json()).unwrap()
+                );
+            } else {
+                println!("ghidrust {}", package_version());
+                println!("tool_surface={}", TOOL_SURFACE_VERSION);
+            }
             ExitCode::SUCCESS
         }
         "load" => cmd_load(&args[1..], json_mode),
@@ -97,6 +232,7 @@ fn print_help() {
     eprintln!(
         "ghidrust — AI-native reverse-engineering (CodeBrowser headless)\n\n\
          Usage:\n\
+           ghidrust version | --version | -V [--json]\n\
            ghidrust load <path|--project DIR --file-id ID> [--out FILE] [--json]\n\
            ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--out FILE] [--json]\n\
            ghidrust bytes <path> --addr HEX [--count N] [--out FILE] [--json]\n\
@@ -2018,36 +2154,22 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
             let mut follow_meta: Option<Value> = None;
             if follow_stub {
                 if let Some(stub) = classify_at(&prog, va) {
-                    if let Some(target) = follow_stub_target(&prog, &stub) {
-                        if verbose {
+                    let (new_va, fm) = build_follow_stub_meta(&prog, va, &stub);
+                    if let Some(status) = fm.get("status").and_then(|s| s.as_str()) {
+                        if verbose || (!json && status != "resolved") {
                             eprintln!(
-                                "follow-stub: {:#x} -> {:#x} ({})",
-                                va,
-                                target,
-                                stub.icall_name.as_deref().unwrap_or("resolve")
+                                "follow-stub: {va:#x} {status}{}",
+                                fm.get("to")
+                                    .and_then(|t| t.as_str())
+                                    .map(|t| format!(" -> {t}"))
+                                    .unwrap_or_default()
                             );
                         }
-                        follow_meta = Some(json!({
-                            "status": "resolved",
-                            "from": format!("{va:#x}"),
-                            "to": format!("{target:#x}"),
-                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
-                            "icall_name": stub.icall_name,
-                        }));
-                        va = target;
-                    } else {
-                        let note = "resolve slot empty or unmapped — filled at runtime";
-                        if verbose || !json {
-                            eprintln!("follow-stub: {va:#x} runtime_unresolved ({note})");
-                        }
-                        follow_meta = Some(json!({
-                            "status": "runtime_unresolved",
-                            "from": format!("{va:#x}"),
-                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
-                            "icall_name": stub.icall_name,
-                            "note": note,
-                        }));
                     }
+                    if let Some(t) = new_va {
+                        va = t;
+                    }
+                    follow_meta = Some(fm);
                 }
             }
             if stage1 {
@@ -2765,6 +2887,11 @@ struct ToolDef {
 fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
+            name: "server_info",
+            description: "Package version, tool_surface, and feature flags (check before assuming live process / artifacts)",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
             name: "load",
             description: "Load a PE or ELF binary (path OR project+file_id) and return sections + section_notes",
             input_schema: json!({
@@ -3215,6 +3342,18 @@ fn tool_defs() -> Vec<ToolDef> {
     ]
 }
 
+fn mcp_write(stdout: &mut impl Write, resp: &Value) -> bool {
+    // MCP stdio: one compact JSON object per line (no embedded newlines).
+    let Ok(line) = serde_json::to_string(resp) else {
+        return false;
+    };
+    if writeln!(stdout, "{line}").is_err() {
+        return false;
+    }
+    stdout.flush().ok();
+    true
+}
+
 fn run_mcp_stdio() -> ExitCode {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
@@ -3233,7 +3372,9 @@ fn run_mcp_stdio() -> ExitCode {
             Ok(v) => v,
             Err(e) => {
                 let err = json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":e.to_string()}});
-                writeln!(stdout, "{err}").ok();
+                if !mcp_write(&mut stdout, &err) {
+                    return ExitCode::FAILURE;
+                }
                 continue;
             }
         };
@@ -3242,20 +3383,45 @@ fn run_mcp_stdio() -> ExitCode {
         let params = req.get("params").cloned().unwrap_or(json!({}));
 
         let resp = match method {
-            "initialize" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "ghidrust", "version": "0.1.0" }
-                }
-            }),
-            "tools/list" | "list_tools" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "tools": tool_defs() }
-            }),
+            "initialize" => {
+                // Echo a client-requested protocol version when present; Cursor
+                // currently sends 2025-11-25. Fall back to a stable baseline.
+                let client_proto = params
+                    .get("protocolVersion")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("2024-11-05");
+                let proto = match client_proto {
+                    "2025-11-25" | "2025-06-18" | "2025-03-26" | "2024-11-05" => client_proto,
+                    _ => "2024-11-05",
+                };
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": proto,
+                        "capabilities": { "tools": { "listChanged": false } },
+                        "serverInfo": {
+                            "name": "ghidrust",
+                            "version": package_version(),
+                            "toolSurface": TOOL_SURFACE_VERSION
+                        }
+                    }
+                })
+            }
+            "tools/list" | "list_tools" => {
+                // Serialize tools explicitly so the line stays compact and
+                // schema field names match MCP (inputSchema).
+                let tools: Vec<Value> = tool_defs()
+                    .into_iter()
+                    .filter_map(|t| serde_json::to_value(t).ok())
+                    .collect();
+                eprintln!("mcp tools/list → {} tools (tool_surface={})", tools.len(), TOOL_SURFACE_VERSION);
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "tools": tools }
+                })
+            }
             "tools/call" | "call_tool" => match call_tool(&params) {
                 Ok(content) => json!({
                     "jsonrpc": "2.0",
@@ -3286,10 +3452,9 @@ fn run_mcp_stdio() -> ExitCode {
                 "error": { "code": -32601, "message": format!("method not found: {method}") }
             }),
         };
-        if writeln!(stdout, "{resp}").is_err() {
+        if !mcp_write(&mut stdout, &resp) {
             return ExitCode::FAILURE;
         }
-        stdout.flush().ok();
     }
     ExitCode::SUCCESS
 }
@@ -3302,6 +3467,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match name {
+        "server_info" => Ok(serde_json::to_string_pretty(&server_info_json()).unwrap()),
         "artifact_get" => {
             let id = args
                 .get("id")
@@ -3910,24 +4076,11 @@ fn call_tool(params: &Value) -> Result<String, String> {
             let mut follow_meta: Option<Value> = None;
             if follow_stub {
                 if let Some(stub) = classify_at(&prog, va) {
-                    if let Some(target) = follow_stub_target(&prog, &stub) {
-                        follow_meta = Some(json!({
-                            "status": "resolved",
-                            "from": format!("{va:#x}"),
-                            "to": format!("{target:#x}"),
-                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
-                            "icall_name": stub.icall_name,
-                        }));
-                        va = target;
-                    } else {
-                        follow_meta = Some(json!({
-                            "status": "runtime_unresolved",
-                            "from": format!("{va:#x}"),
-                            "slot_va": stub.slot_va.map(|s| format!("{s:#x}")),
-                            "icall_name": stub.icall_name,
-                            "note": "resolve slot empty or unmapped — filled at runtime",
-                        }));
+                    let (new_va, fm) = build_follow_stub_meta(&prog, va, &stub);
+                    if let Some(t) = new_va {
+                        va = t;
                     }
+                    follow_meta = Some(fm);
                 }
             }
             let conv = if prog.format.to_ascii_lowercase().contains("pe") {
