@@ -31,11 +31,13 @@ use icons::{m3_icon, m3_linear_progress, status_badge, M3Icon};
 use menu_actions::{
     address_table_hits, decompile_entry_for_va, listing_index_at_or_before, parse_address,
     parse_hex_pattern, processor_info, pseudo_c_for_stage, search_instruction_patterns,
+    stage1_pseudo_c_with_tokens,
     search_memory, search_program_text, search_scalars, stage0_pseudo_c, DecompStage,
     ListingSelection, MemoryHit, TextHit, STAGE0_MAX_INSNS,
 };
 use decomp_tokens::{
-    line_for_va as decomp_line_for_va, tokenize as tokenize_decomp, DecompLine, TokenKind,
+    emit_token_triples, from_emit_tokens, line_for_va as decomp_line_for_va,
+    tokenize as tokenize_decomp, DecompLine, TokenKind,
 };
 use debugger::{DebuggerAction, DebuggerPane, DebuggerState};
 use events::{EventBus, EventSource, GhidrustEvent, MutationKind};
@@ -323,7 +325,7 @@ pub struct GhidrustApp {
     /// small chip in the Decompiler pane header so users know how much of
     /// the emit came from real lifted IR vs Stage-0 scaffolding.
     decomp_lift_ratio: Option<f32>,
-    // ── Phase A (M1) — Ghidra CodeBrowser visible parity ────────────────
+    // ── Ghidra CodeBrowser visible parity ────────────────
     /// Open-state per-provider (Window menu toggles → floating egui::Window per pane).
     pane_open: BTreeMap<PaneKind, bool>,
     /// Ghidra `NavigationHistoryPlugin` analog (Back / Forward / Alt+Left / Alt+Right).
@@ -347,61 +349,61 @@ pub struct GhidrustApp {
     defined_strings_filter: String,
     /// Defined Strings encoding filter: `"all"` | `"ascii"` | `"utf16le"`.
     defined_strings_encoding: String,
-    /// Phase B (M2) — plugin-event bus (Ghidra `PluginEvent` analog).
+    /// plugin-event bus (Ghidra `PluginEvent` analog).
     event_bus: EventBus,
-    /// Phase B (M2) — tokenised decompiler cache (rebuilt after every refresh_decompiler_at).
+    /// tokenised decompiler cache (rebuilt after every refresh_decompiler_at).
     decomp_lines: Vec<DecompLine>,
-    /// Phase B (M2) — line index in `decomp_lines` cross-highlighted from Listing cursor.
+    /// line index in `decomp_lines` cross-highlighted from Listing cursor.
     decomp_cross_line: Option<usize>,
-    /// Phase B (M2) — middle-click "highlight all occurrences" state.
+    /// middle-click "highlight all occurrences" state.
     decomp_highlight_text: Option<String>,
-    /// Phase B (M2) — Symbol Tree ↔ Listing selection navigation toggle.
+    /// Symbol Tree ↔ Listing selection navigation toggle.
     symbol_tree_nav: bool,
-    /// Phase B (M2) — currently-focused function entry (for Symbol Tree highlight).
+    /// currently-focused function entry (for Symbol Tree highlight).
     focused_function_entry: Option<u64>,
-    /// Phase B (M2) — Program Tree fragment filter. `None` = full view; `Some({names})` = only those.
+    /// Program Tree fragment filter. `None` = full view; `Some({names})` = only those.
     listing_view_filter: Option<BTreeSet<String>>,
-    /// Phase C (M3) — Rename dialog state.
+    /// Rename dialog state.
     show_rename_dialog: bool,
     rename_dialog_target_va: Option<u64>,
     rename_dialog_old_name: String,
     rename_dialog_new_name: String,
-    /// Phase C (M3) — Retype dialog state.
+    /// Retype dialog state.
     show_retype_dialog: bool,
     retype_dialog_target_va: Option<u64>,
     retype_dialog_type: String,
-    /// Phase C (M3) — Comment dialog state.
+    /// Comment dialog state.
     show_comment_dialog: bool,
     comment_dialog_target_va: Option<u64>,
     comment_dialog_kind: CommentKind,
     comment_dialog_text: String,
-    /// Phase C (M3) — Function Signature dialog state.
+    /// Function Signature dialog state.
     show_fn_signature_dialog: bool,
     fn_signature_dialog_entry: Option<u64>,
     fn_signature_dialog_text: String,
-    /// Phase C (M3) — New Structure / Union / Enum dialog state.
+    /// New Structure / Union / Enum dialog state.
     show_new_type_dialog: bool,
     new_type_dialog_kind: NewTypeKind,
     new_type_dialog_name: String,
     new_type_dialog_body: String,
-    /// Phase C (M3) — Edit-existing-type dialog state (Ghidra structure /
+    /// Edit-existing-type dialog state (Ghidra structure /
     /// union / enum / typedef editor).
     show_edit_type_dialog: bool,
     edit_type_dialog_orig_name: String,
     edit_type_dialog_name: String,
     edit_type_dialog_body: String,
-    /// Phase C (M3) — Data Type Chooser dialog (`T` shortcut over Listing).
+    /// Data Type Chooser dialog (`T` shortcut over Listing).
     show_type_chooser_dialog: bool,
     type_chooser_target_va: Option<u64>,
     type_chooser_filter: String,
-    /// Phase C (M3) — DTM filter.
+    /// DTM filter.
     dtm_filter: String,
-    /// Phase C (M3) — Comment Window filters (Ghidra `CommentWindowPlugin`).
+    /// Comment Window filters (Ghidra `CommentWindowPlugin`).
     comment_window_filter: String,
     comment_window_kind_filter: Option<CommentKind>,
-    /// Phase B (M2) — Console severity per line (`Info`, `Warn`, `Error`).
+    /// Console severity per line (`Info`, `Warn`, `Error`).
     console_severity: Vec<ConsoleSeverity>,
-    // ── Phase D (M4) — tables & search state ────────────────────────────
+    // ── tables & search state ────────────────────────────
     /// Byte Viewer state (Ghidra `ByteViewerPlugin`).
     bytes_pane_va: Option<u64>,
     bytes_pane_bpr: usize,
@@ -440,7 +442,7 @@ pub struct GhidrustApp {
     show_search_address_tables_dialog: bool,
     /// Function Tags pane filter.
     function_tags_filter: String,
-    // ── Phase E (M5) — Graphs & maps ────────────────────────────────────
+    // ── Graphs & maps ────────────────────────────────────
     /// Function Graph / Call Graph / Call Trees session state.
     graph_state: GraphPaneState,
     /// Function Call Trees — top-level nodes (rebuilt on cursor change).
@@ -455,19 +457,19 @@ pub struct GhidrustApp {
     memory_map_new_r: bool,
     memory_map_new_w: bool,
     memory_map_new_x: bool,
-    // ── Phase F (M6) — Scripts ──────────────────────────────────────────
+    // ── Scripts ──────────────────────────────────────────
     /// Script Manager pane state.
     script_manager: ScriptManagerState,
     /// Text Editor multi-tab state.
     text_editor: TextEditorState,
     /// MCP REPL state.
     mcp_repl: MacropadReplState,
-    // ── Phase G (M7) — Debugger visibility ──────────────────────────────
+    // ── Debugger visibility ──────────────────────────────
     /// Debugger tool state (breakpoints, watches, session-only until backend).
     debugger: DebuggerState,
     /// Which debugger panes are open (Ghidra `Debugger` tool Window menu).
     debugger_open: BTreeMap<DebuggerPane, bool>,
-    // ── Phase H (M8) — Docking / layouts / Configure ───────────────────
+    // ── Docking / layouts / Configure ───────────────────
     /// Configure dialog (Ghidra `File → Configure` plugin picker).
     show_configure_dialog: bool,
     /// Layout preset save/load dialog state.
@@ -489,7 +491,7 @@ pub struct GhidrustApp {
     show_gpu_decompile_dialog: bool,
 }
 
-/// Phase D (M4) — Checksum Generator report (Ghidra `ComputeChecksumsPlugin`).
+/// Checksum Generator report (Ghidra `ComputeChecksumsPlugin`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecksumReport {
     pub target: String,
@@ -503,7 +505,7 @@ pub struct ChecksumReport {
     pub fletcher32: u64,
 }
 
-/// Phase B (M2) — severity tint for `Console` pane rows.
+/// severity tint for `Console` pane rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConsoleSeverity {
     Info,
@@ -511,7 +513,7 @@ enum ConsoleSeverity {
     Error,
 }
 
-/// Phase D (M4) — Checksum Generator scope (Ghidra `ComputeChecksumsPlugin`).
+/// Checksum Generator scope (Ghidra `ComputeChecksumsPlugin`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChecksumMode {
     /// Concatenation of every loaded memory block.
@@ -562,7 +564,7 @@ fn fletcher_pair(data: &[u8]) -> (u32, u64) {
     (f16, f32)
 }
 
-/// Phase C (M3) — Data Type Manager `New` submenu kinds.
+/// Data Type Manager `New` submenu kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NewTypeKind {
     Structure,
@@ -572,7 +574,7 @@ enum NewTypeKind {
     FunctionDefinition,
 }
 
-/// Phase B (M2) — one rendered Listing row (Ghidra `CodeUnit` columns).
+/// one rendered Listing row (Ghidra `CodeUnit` columns).
 #[derive(Debug, Clone)]
 struct ListingRow {
     idx: usize,
@@ -597,7 +599,7 @@ struct ListingRow {
     comment_repeat: Option<String>,
 }
 
-/// Phase B (M2) — Ghidra scalar hover popup content for a Listing operand string.
+/// Ghidra scalar hover popup content for a Listing operand string.
 ///
 /// Extracts the first hex/decimal literal and renders 1/2/4/8-byte dec/hex/ASCII
 /// interpretations (matches Ghidra's "Scalar popup").
@@ -647,7 +649,7 @@ fn scalar_hint_string(v: u64) -> String {
     )
 }
 
-/// Phase B (M2) — Ghidra address hover popup content for a Listing operand string.
+/// Ghidra address hover popup content for a Listing operand string.
 fn first_address_hint(operands: &str) -> Option<String> {
     let idx = operands.find("0x")?;
     let start = idx + 2;
@@ -662,7 +664,7 @@ fn first_address_hint(operands: &str) -> Option<String> {
     Some(format!("target addr {va:#x}"))
 }
 
-/// Phase B (M2) — Ghidra `ClangToken`-analog syntax colour picker for the Decompiler pane.
+/// Ghidra `ClangToken`-analog syntax colour picker for the Decompiler pane.
 fn token_style(kind: &TokenKind, base: Color32) -> (Color32, bool) {
     match kind {
         // Keywords: cyan (Ghidra "colors.decompiler.keyword").
@@ -829,7 +831,7 @@ impl GhidrustApp {
             decomp_entry: None,
             decomp_text: String::new(),
             decomp_status: String::new(),
-            // Phase F: Stage-1 is now the default GUI decompiler stage —
+            // Stage-1 is now the default GUI decompiler stage —
             // real SSA + structure + types instead of the mnemonic-scaffold
             // Stage-0 preview. Users can still pick Stage-0/Stage-0.5 from
             // the stage picker combo box.
@@ -1000,6 +1002,36 @@ impl GhidrustApp {
             return;
         }
         let stage = self.decomp_stage;
+        // R5: Stage-1 prefers emit-time tokens when present.
+        if stage == DecompStage::Stage1 {
+            if let Ok((entry, text, ratio, tokens)) =
+                stage1_pseudo_c_with_tokens(prog, va, STAGE0_MAX_INSNS)
+            {
+                self.decomp_entry = Some(entry);
+                let triples = emit_token_triples(&tokens);
+                let lines = from_emit_tokens(&triples);
+                self.decomp_lines = if lines.is_empty() {
+                    tokenize_decomp(&text)
+                } else {
+                    lines
+                };
+                self.decomp_cross_line = decomp_line_for_va(&self.decomp_lines, va);
+                self.decomp_text = text;
+                self.decomp_lift_ratio = Some(ratio);
+                let user_name = self
+                    .program
+                    .as_ref()
+                    .and_then(|p| p.display_function_name_at(entry));
+                self.decomp_status = match user_name {
+                    Some(name) => format!(
+                        "Stage-1 · {name} @ {entry:#x} · lift={:.1}%",
+                        ratio * 100.0
+                    ),
+                    None => format!("Stage-1 · {entry:#x} · lift={:.1}%", ratio * 100.0),
+                };
+                return;
+            }
+        }
         let attempt = pseudo_c_for_stage(prog, va, STAGE0_MAX_INSNS, stage);
         let (label, result) = match attempt {
             Ok(v) => (stage.label(), Ok(v)),
@@ -1238,7 +1270,7 @@ impl GhidrustApp {
         }
     }
 
-    // ── Phase C (M3) — user edits ───────────────────────────────────────
+    // ── user edits ───────────────────────────────────────
 
     /// Rename the symbol / function at `va` (persists into `Program::edits`).
     ///
@@ -1558,7 +1590,7 @@ impl GhidrustApp {
         Ok(name)
     }
 
-    // ── Phase D (M4) — equates, function tags, xrefs, checksums ──────────
+    // ── equates, function tags, xrefs, checksums ──────────
 
     /// Attach an equate `name` at `(va, op)` for scalar `value` (Ghidra
     /// `Convert → Equate`). Empty `name` clears the equate.
@@ -1880,7 +1912,7 @@ impl GhidrustApp {
         (imports, exports)
     }
 
-    /// Phase B (M2) — drain queued events and fan them out to subscribers.
+    /// drain queued events and fan them out to subscribers.
     ///
     /// This is intentionally minimal today: any ProgramMutated event invalidates
     /// the Decompiler cache so the next `refresh_decompiler_at` re-runs Stage-0.
@@ -2916,12 +2948,12 @@ impl GhidrustApp {
         self.log_with(msg, ConsoleSeverity::Info);
     }
 
-    /// Phase B (M2) — Console warning (amber tint).
+    /// Console warning (amber tint).
     fn log_warn(&mut self, msg: impl Into<String>) {
         self.log_with(msg, ConsoleSeverity::Warn);
     }
 
-    /// Phase B (M2) — Console error (red tint).
+    /// Console error (red tint).
     fn log_error(&mut self, msg: impl Into<String>) {
         self.log_with(msg, ConsoleSeverity::Error);
     }
@@ -3335,7 +3367,7 @@ impl GhidrustApp {
                 names.push(t);
             }
         }
-        // Ghidra Debugger tool providers (Phase G / M7 visibility parity).
+        // Ghidra Debugger tool providers (visibility parity).
         for p in DebuggerPane::ALL {
             let t = p.title();
             if !names.contains(&t) {
@@ -3609,7 +3641,7 @@ impl GhidrustApp {
         }
     }
 
-    /// Phase A (M1) — render every currently open floating provider pane.
+    /// render every currently open floating provider pane.
     ///
     /// Panes render either real Stage-0 content (Bookmarks, Memory Map, Functions,
     /// Symbol Table, Defined Strings, Relocations) or a clearly labelled "backend
@@ -3690,7 +3722,7 @@ impl GhidrustApp {
                 PaneKind::ChecksumGenerator => {
                     win.show(ctx, |ui| self.ui_checksum_generator(ui, muted));
                 }
-                // Phase E (M5) — Graphs & maps.
+                // Graphs & maps.
                 PaneKind::FunctionGraph => {
                     win.default_size(egui::vec2(760.0, 520.0))
                         .show(ctx, |ui| self.ui_function_graph_pane(ui, muted, primary));
@@ -3715,7 +3747,7 @@ impl GhidrustApp {
                     win.default_size(egui::vec2(560.0, 520.0))
                         .show(ctx, |ui| self.ui_register_manager_pane(ui, muted, primary));
                 }
-                // Phase F (M6) — Scripts & interpreters.
+                // Scripts & interpreters.
                 PaneKind::ScriptManager => {
                     win.default_size(egui::vec2(760.0, 480.0))
                         .show(ctx, |ui| self.ui_script_manager_pane(ui, muted, primary));
@@ -3773,11 +3805,11 @@ impl GhidrustApp {
             }
         }
 
-        // Phase G (M7) — Debugger tool provider windows.
+        // Debugger tool provider windows.
         self.draw_debugger_panes(ctx, muted);
     }
 
-    // ── Phase E (M5) — Graphs & maps ────────────────────────────────────
+    // ── Graphs & maps ────────────────────────────────────
 
     /// Ghidra `FunctionGraphPlugin` — CFG vertex/edge layout for the current function.
     fn ui_function_graph_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
@@ -4129,12 +4161,12 @@ impl GhidrustApp {
         register_manager::render(&mut self.register_manager, fmt.as_deref(), ui, muted, primary);
     }
 
-    // ── Phase F (M6) — Scripts & interpreters ───────────────────────────
+    // ── Scripts & interpreters ───────────────────────────
 
     fn ui_script_manager_pane(&mut self, ui: &mut egui::Ui, muted: Color32, primary: Color32) {
         if let Some(run) = render_script_manager(&mut self.script_manager, ui, muted, primary) {
             let msg = format!(
-                "Script Manager · run requested for `{run}` — full script host lands in Phase F backend"
+                "Script Manager · run requested for `{run}` — full script host not yet wired"
             );
             self.status = msg.clone();
             self.log(msg);
@@ -4180,7 +4212,7 @@ impl GhidrustApp {
         render_mcp_repl(&mut self.mcp_repl, ui, muted, primary);
     }
 
-    // ── Phase G (M7) — Debugger tool ──────────────────────────────────
+    // ── Debugger tool ──────────────────────────────────
 
     fn draw_debugger_panes(&mut self, ctx: &egui::Context, muted: Color32) {
         let open_list: Vec<DebuggerPane> = self
@@ -4206,7 +4238,7 @@ impl GhidrustApp {
         }
     }
 
-    // ── Phase H (M8) — Docking / layouts / Configure ────────────────
+    // ── Docking / layouts / Configure ────────────────
 
     fn snapshot_current_layout(&self, name: impl Into<String>) -> layouts::SavedLayout {
         let name = name.into();
@@ -4306,7 +4338,7 @@ impl GhidrustApp {
         Ok(())
     }
 
-    /// Phase C (M3) — draw all edit dialogs (rename / retype / comment / signature / new type).
+    /// draw all edit dialogs (rename / retype / comment / signature / new type).
     fn draw_edit_dialogs(&mut self, ctx: &egui::Context) {
         // Rename dialog (Ghidra `L` / Rename Variable).
         if self.show_rename_dialog {
@@ -4723,7 +4755,7 @@ impl GhidrustApp {
         }
     }
 
-    /// Phase C (M3) — Data Type Manager tree (Built-In archive + Program archive).
+    /// Data Type Manager tree (Built-In archive + Program archive).
     fn ui_dtm_pane(&mut self, ui: &mut egui::Ui) {
         ui.heading("Data Type Manager");
         ui.small(
@@ -4994,7 +5026,7 @@ impl GhidrustApp {
             egui::RichText::new(
                 "Right-click a type for Edit / Rename / Delete / Apply @ cursor / \
                  New Typedef on X / New Pointer to X. Docking-framework drag-and-drop \
-                 lands in Phase H.",
+                 not yet wired.",
             )
             .weak()
             .italics(),
@@ -5049,7 +5081,7 @@ impl GhidrustApp {
         }
     }
 
-    /// Phase B (M2) — Listing center pane with real fields, margin markers, and flow arrows.
+    /// Listing center pane with real fields, margin markers, and flow arrows.
     fn ui_listing_pane(&mut self, ui: &mut egui::Ui) {
         ui.heading("Listing");
         // Status strip.
@@ -5481,7 +5513,7 @@ impl GhidrustApp {
         }
     }
 
-    /// Phase B (M2) — tokenised Decompiler center pane with cross-highlight.
+    /// tokenised Decompiler center pane with cross-highlight.
     fn ui_decompiler_pane(&mut self, ui: &mut egui::Ui) {
         ui.heading("Decompiler");
         if self.program.is_none() {
@@ -6353,7 +6385,7 @@ impl GhidrustApp {
     fn ui_relocation_table(&mut self, ui: &mut egui::Ui, muted: Color32) {
         ui.heading("Relocation Table");
         ui.small(
-            egui::RichText::new("Ghidra RelocationTablePlugin · from Program::sections (Phase D fills)")
+            egui::RichText::new("Ghidra RelocationTablePlugin · from Program::sections")
                 .color(muted),
         );
         ui.separator();
@@ -6364,7 +6396,7 @@ impl GhidrustApp {
         ui.small(
             egui::RichText::new(
                 "Section metadata rendered here as a Stage-0 placeholder. Full PE reloc / ELF rela \
-                 parse lands in Phase D (M4).",
+                 parse lands in .",
             )
             .color(muted)
             .italics(),
@@ -6554,7 +6586,7 @@ impl GhidrustApp {
     fn ui_defined_data(&mut self, ui: &mut egui::Ui, muted: Color32) {
         ui.heading("Defined Data");
         ui.small(
-            egui::RichText::new("Ghidra DataWindowPlugin · session data (Phase D adds Program::data_items)")
+            egui::RichText::new("Ghidra DataWindowPlugin · session data (Program::data_items when available)")
                 .color(muted),
         );
         ui.separator();
@@ -6623,7 +6655,7 @@ impl GhidrustApp {
         }
     }
 
-    // ── Phase D (M4) — Byte Viewer / Symbol References / Equates / Tags ─
+    // ── Byte Viewer / Symbol References / Equates / Tags ─
 
     /// Ghidra `ByteViewerPlugin` parity — split hex / ASCII view of the
     /// program's memory around the current cursor. Bytes-per-line combo,
@@ -7369,7 +7401,7 @@ impl eframe::App for GhidrustApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.apply_theme(ctx);
 
-        // Phase B (M2) — drain event bus once per frame and fan out.
+        // drain event bus once per frame and fan out.
         self.drain_events();
 
         // Startup: choose project before the empty shell
@@ -7409,11 +7441,11 @@ impl eframe::App for GhidrustApp {
                         self.browse_and_load_binary();
                         ui.close_menu();
                     }
-                    if ui.button("Add To Program…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Add To Program…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("File → Add To Program");
                         ui.close_menu();
                     }
-                    if ui.button("Batch Import…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Batch Import…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("File → Batch Import");
                         ui.close_menu();
                     }
@@ -7425,11 +7457,11 @@ impl eframe::App for GhidrustApp {
                         }
                         ui.close_menu();
                     }
-                    if ui.button("Save As…").on_hover_text("Not yet implemented — Phase B").clicked() {
+                    if ui.button("Save As…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("File → Save As");
                         ui.close_menu();
                     }
-                    if ui.button("Export Program…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Export Program…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("File → Export Program");
                         ui.close_menu();
                     }
@@ -7438,16 +7470,16 @@ impl eframe::App for GhidrustApp {
                         self.nyi("File → Load PDB File");
                         ui.close_menu();
                     }
-                    if ui.button("Parse C Source…").on_hover_text("Not yet implemented — Phase C").clicked() {
+                    if ui.button("Parse C Source…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("File → Parse C Source");
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Configure…").on_hover_text("Plugin picker — Phase H").clicked() {
+                    if ui.button("Configure…").on_hover_text("Plugin picker — not yet implemented").clicked() {
                         self.nyi("File → Configure");
                         ui.close_menu();
                     }
-                    if ui.button("Print…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Print…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("File → Print");
                         ui.close_menu();
                     }
@@ -7477,19 +7509,19 @@ impl eframe::App for GhidrustApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Tool Options…").on_hover_text("Options tree — Phase H").clicked() {
+                    if ui.button("Tool Options…").on_hover_text("Options tree — not yet implemented").clicked() {
                         self.nyi("Edit → Tool Options");
                         ui.close_menu();
                     }
-                    if ui.button("Options for program…").on_hover_text("Program-level options — Phase C").clicked() {
+                    if ui.button("Options for program…").on_hover_text("Program-level options — not yet implemented").clicked() {
                         self.nyi("Edit → Options for program");
                         ui.close_menu();
                     }
-                    if ui.button("Plugin Path…").on_hover_text("Configure plugin paths — Phase H").clicked() {
+                    if ui.button("Plugin Path…").on_hover_text("Configure plugin paths — not yet implemented").clicked() {
                         self.nyi("Edit → Plugin Path");
                         ui.close_menu();
                     }
-                    if ui.button("Key Bindings…").on_hover_text("Rebind actions — Phase H").clicked() {
+                    if ui.button("Key Bindings…").on_hover_text("Rebind actions — not yet implemented").clicked() {
                         self.nyi("Edit → Key Bindings");
                         ui.close_menu();
                     }
@@ -7505,7 +7537,7 @@ impl eframe::App for GhidrustApp {
                         self.show_analysis_dialog = true;
                         ui.close_menu();
                     }
-                    if ui.button("Analyze All Open…").on_hover_text("Multi-program batch — Phase D").clicked() {
+                    if ui.button("Analyze All Open…").on_hover_text("Multi-program batch — not yet implemented").clicked() {
                         self.nyi("Analysis → Analyze All Open");
                         ui.close_menu();
                     }
@@ -7591,11 +7623,11 @@ impl eframe::App for GhidrustApp {
                         self.nav_prev_function();
                         ui.close_menu();
                     }
-                    if ui.button("Next Data").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Next Data").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Navigation → Next Data");
                         ui.close_menu();
                     }
-                    if ui.button("Next Undefined").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Next Undefined").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Navigation → Next Undefined");
                         ui.close_menu();
                     }
@@ -7640,15 +7672,15 @@ impl eframe::App for GhidrustApp {
                         self.show_search_insn_dialog = true;
                         ui.close_menu();
                     }
-                    if ui.button("For Direct References…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("For Direct References…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Search → For Direct References");
                         ui.close_menu();
                     }
-                    if ui.button("For Matching Instructions…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("For Matching Instructions…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Search → For Matching Instructions");
                         ui.close_menu();
                     }
-                    if ui.button("Repeat Search").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Repeat Search").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Search → Repeat Search");
                         ui.close_menu();
                     }
@@ -7658,7 +7690,7 @@ impl eframe::App for GhidrustApp {
                         self.select_all_listing();
                         ui.close_menu();
                     }
-                    if ui.button("All in View").on_hover_text("Not yet implemented — Phase B").clicked() {
+                    if ui.button("All in View").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → All in View");
                         ui.close_menu();
                     }
@@ -7666,45 +7698,45 @@ impl eframe::App for GhidrustApp {
                         self.edit_clear_selection();
                         ui.close_menu();
                     }
-                    if ui.button("Complement").on_hover_text("Not yet implemented — Phase B").clicked() {
+                    if ui.button("Complement").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Complement");
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Bytes").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Bytes").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Bytes");
                         ui.close_menu();
                     }
-                    if ui.button("Instructions").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Instructions").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Instructions");
                         ui.close_menu();
                     }
-                    if ui.button("Data").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Data").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Data");
                         ui.close_menu();
                     }
-                    if ui.button("Undefined").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Undefined").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Undefined");
                         ui.close_menu();
                     }
-                    if ui.button("Function").on_hover_text("Not yet implemented — Phase B").clicked() {
+                    if ui.button("Function").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Function");
                         ui.close_menu();
                     }
-                    if ui.button("Subroutine").on_hover_text("Not yet implemented — Phase B").clicked() {
+                    if ui.button("Subroutine").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Subroutine");
                         ui.close_menu();
                     }
-                    if ui.button("Forward Refs").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Forward Refs").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Forward Refs");
                         ui.close_menu();
                     }
-                    if ui.button("Backward Refs").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Backward Refs").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Backward Refs");
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Create Table From Selection").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Create Table From Selection").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Select → Create Table From Selection");
                         ui.close_menu();
                     }
@@ -7714,11 +7746,11 @@ impl eframe::App for GhidrustApp {
                         self.show_processor_dialog = true;
                         ui.close_menu();
                     }
-                    if ui.button("Compare Program…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Compare Program…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Tools → Compare Program");
                         ui.close_menu();
                     }
-                    if ui.button("Program Differences…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Program Differences…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Tools → Program Differences");
                         ui.close_menu();
                     }
@@ -7726,15 +7758,15 @@ impl eframe::App for GhidrustApp {
                         self.pane_open.insert(PaneKind::ChecksumGenerator, true);
                         ui.close_menu();
                     }
-                    if ui.button("Function Bit Patterns Explorer").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Function Bit Patterns Explorer").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Tools → Function Bit Patterns Explorer");
                         ui.close_menu();
                     }
-                    if ui.button("Instruction Table").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Instruction Table").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Tools → Instruction Table");
                         ui.close_menu();
                     }
-                    if ui.button("Processor Manual…").on_hover_text("Not yet implemented — Phase D").clicked() {
+                    if ui.button("Processor Manual…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Tools → Processor Manual");
                         ui.close_menu();
                     }
@@ -7753,19 +7785,19 @@ impl eframe::App for GhidrustApp {
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Block Flow").on_hover_text("Not yet implemented — Phase E").clicked() {
+                    if ui.button("Block Flow").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Graph → Block Flow");
                         ui.close_menu();
                     }
-                    if ui.button("Code Flow").on_hover_text("Not yet implemented — Phase E").clicked() {
+                    if ui.button("Code Flow").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Graph → Code Flow");
                         ui.close_menu();
                     }
-                    if ui.button("Calls").on_hover_text("Not yet implemented — Phase E").clicked() {
+                    if ui.button("Calls").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Graph → Calls");
                         ui.close_menu();
                     }
-                    if ui.button("Data Flow").on_hover_text("Not yet implemented — Phase E").clicked() {
+                    if ui.button("Data Flow").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Graph → Data Flow");
                         ui.close_menu();
                     }
@@ -7835,7 +7867,7 @@ impl eframe::App for GhidrustApp {
                         }
                     }
                     ui.separator();
-                    // Phase G (M7) — Debugger tool providers.
+                    // Debugger tool providers.
                     ui.label(egui::RichText::new("Debugger tool").small().weak());
                     let mut dbg = DebuggerPane::ALL.to_vec();
                     dbg.sort_by_key(|p| p.title());
@@ -7846,7 +7878,7 @@ impl eframe::App for GhidrustApp {
                         }
                     }
                     ui.separator();
-                    // Phase H (M8) — layout tools.
+                    // layout tools.
                     if ui.button("Configure plugins…").clicked() {
                         self.show_configure_dialog = true;
                         ui.close_menu();
@@ -7899,19 +7931,19 @@ impl eframe::App for GhidrustApp {
                     }
                 });
                 ui.menu_button("Help", |ui| {
-                    if ui.button("Contents (F1)").on_hover_text("Not yet implemented — Phase A").clicked() {
+                    if ui.button("Contents (F1)").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Help → Contents");
                         ui.close_menu();
                     }
-                    if ui.button("Help On…").on_hover_text("Not yet implemented — Phase A").clicked() {
+                    if ui.button("Help On…").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Help → Help On");
                         ui.close_menu();
                     }
-                    if ui.button("Ghidra API Help").on_hover_text("Not yet implemented — Phase A").clicked() {
+                    if ui.button("Ghidra API Help").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Help → Ghidra API Help");
                         ui.close_menu();
                     }
-                    if ui.button("User Preferences").on_hover_text("Not yet implemented — Phase H").clicked() {
+                    if ui.button("User Preferences").on_hover_text("Not yet implemented").clicked() {
                         self.nyi("Help → User Preferences");
                         ui.close_menu();
                     }
@@ -9139,13 +9171,13 @@ impl eframe::App for GhidrustApp {
             self.sync_center_from_dock();
         });
 
-        // Phase A (M1) — draw every open floating provider pane.
+        // draw every open floating provider pane.
         self.draw_provider_panes(ctx);
 
-        // Phase C (M3) — edit dialogs (rename / retype / comment / signature / new type).
+        // edit dialogs (rename / retype / comment / signature / new type).
         self.draw_edit_dialogs(ctx);
 
-        // Phase H (M8) — Configure plugins dialog.
+        // Configure plugins dialog.
         if self.show_configure_dialog {
             let mut close = false;
             egui::Window::new("Configure plugins")
@@ -9189,7 +9221,7 @@ impl eframe::App for GhidrustApp {
             }
         }
 
-        // Phase H (M8) — Layout save / load dialog.
+        // Layout save / load dialog.
         if self.show_layouts_dialog {
             let mut close = false;
             let mut do_save = false;
@@ -9897,13 +9929,13 @@ mod tests {
         );
     }
 
-    /// Phase A (M1) — every Ghidra CodeBrowser provider must be enumerated in
+    /// every Ghidra CodeBrowser provider must be enumerated in
     /// `shell_panes()` so the Window menu / structural tests can enforce visibility parity.
     #[test]
     fn shell_panes_enumerates_full_ghidra_codebrowser_catalog() {
         let panes = GhidrustApp::shell_panes();
         // 28 default `CodeBrowser.tool` providers + a few off-layout ones. See
-        // dev/UI_PARITY_PLAN.md § 1.1 / § 1.2 for the source of truth.
+        // internal UI notes § 1.1 / § 1.2 for the source of truth.
         for expected in [
             "Program Trees",
             "Symbol Tree",
@@ -9945,7 +9977,7 @@ mod tests {
         }
     }
 
-    /// Phase A (M1) — Back / Forward history is wired.
+    /// Back / Forward history is wired.
     #[test]
     fn nav_history_records_and_navigates() {
         let mut app = GhidrustApp::headless();
@@ -9978,7 +10010,7 @@ mod tests {
         assert_eq!(app.listing_focus_va, Some(second_va));
     }
 
-    /// Phase A (M1) — Bookmarks pane model is real (5 Ghidra kinds; add/delete flow).
+    /// Bookmarks pane model is real (5 Ghidra kinds; add/delete flow).
     #[test]
     fn bookmark_model_add_delete_and_nav() {
         let mut app = GhidrustApp::headless();
@@ -10009,7 +10041,7 @@ mod tests {
         }
     }
 
-    /// Phase B (M2) — plugin event bus emits CursorMoved on goto and Mutation on bookmark ops.
+    /// plugin event bus emits CursorMoved on goto and Mutation on bookmark ops.
     #[test]
     fn event_bus_publishes_cursor_and_mutation_events() {
         let mut app = GhidrustApp::headless();
@@ -10058,7 +10090,7 @@ mod tests {
         assert!(app.drain_events().is_empty());
     }
 
-    /// Phase A (M1) — provider pane toggles are per-kind and persist through frames.
+    /// provider pane toggles are per-kind and persist through frames.
     #[test]
     fn toggle_pane_state_persists() {
         let mut app = GhidrustApp::headless();
@@ -10180,7 +10212,7 @@ mod tests {
 
     #[test]
     fn headless_stage0_decompiler_wires_on_focus() {
-        // Phase F: Stage-1 is the GUI default. The old assertion demanded a
+        // Stage-1 is the GUI default. The old assertion demanded a
         // Stage-0-style `void foo()` / `block_N` marker; Stage-1 emits typed
         // return values (e.g. `uint32_t FUN_...(void)`) so we accept either
         // stage marker plus the Stage-1 self-identification header.
@@ -10346,7 +10378,7 @@ mod tests {
         assert!(info.language.contains("x86"));
     }
 
-    // ─── Phase B (M2) — token model, listing sync, view filter, next/prev fn ───
+    // ─── token model, listing sync, view filter, next/prev fn ───
 
     #[test]
     fn decompiler_tokens_are_populated_and_cross_highlight() {
@@ -10358,7 +10390,7 @@ mod tests {
             !app.decomp_lines.is_empty(),
             "token cache must be populated after refresh_decompiler_at"
         );
-        // Post Phase F the default GUI stage is Stage-1; the emitter drops
+        // Default GUI stage is Stage-1; the emitter drops
         // `block_N:` labels in favour of structured regions. Assert only
         // that we see at least one keyword token — the shape common to
         // every stage.
@@ -10465,7 +10497,7 @@ mod tests {
         }
     }
 
-    // ─── Phase C (M3) — rename / retype / comment / signature / type ───
+    // ─── rename / retype / comment / signature / type ───
 
     #[test]
     fn rename_persists_and_reflects_in_analysis() {
@@ -10594,7 +10626,7 @@ mod tests {
         assert!(first_scalar_hint("rax, rbx").is_none());
     }
 
-    // ─── Phase C (M3) polish — DTM editing / chooser / persistence ────
+    // ─── polish — DTM editing / chooser / persistence ────
 
     #[test]
     fn rename_and_delete_user_type_rewrites_applied_types() {
@@ -10830,7 +10862,7 @@ mod tests {
         );
     }
 
-    // ─── Phase D (M4) — tables, xrefs, equates, tags, search dialogs ────
+    // ─── tables, xrefs, equates, tags, search dialogs ────
 
     #[test]
     fn xrefs_to_and_from_return_honest_rows_on_fixture() {
@@ -10971,9 +11003,9 @@ mod tests {
         assert!(app.parse_scalar_input("").is_err());
     }
 
-    // ── Phase E (M5) — Graphs & maps ─────────────────────────────────────
+    // ── Graphs & maps ─────────────────────────────────────
 
-    /// Phase E — Function Graph derives Stage-0 blocks + edges from the
+    /// Function Graph derives Stage-0 blocks + edges from the
     /// currently-focused function's CFG (honest empty if the region has
     /// no recovered blocks).
     #[test]
@@ -11004,7 +11036,7 @@ mod tests {
         }
     }
 
-    /// Phase E — Function Call Graph roots at the current function with
+    /// Function Call Graph roots at the current function with
     /// level 0; expansion levels are session-only settings.
     #[test]
     fn call_graph_state_settings_persist_across_frames() {
@@ -11016,7 +11048,7 @@ mod tests {
         assert_eq!(app.graph_state.call_graph_levels_in, 2);
     }
 
-    /// Phase E — Editable Memory Map: RWX toggles + add + delete flow.
+    /// Editable Memory Map: RWX toggles + add + delete flow.
     #[test]
     fn memory_map_edit_flow_adds_and_deletes_blocks() {
         let mut app = GhidrustApp::headless();
@@ -11046,7 +11078,7 @@ mod tests {
         assert_eq!(app.program.as_ref().unwrap().blocks.len(), n0);
     }
 
-    /// Phase E — Register Manager lattice is present and set/clear works.
+    /// Register Manager lattice is present and set/clear works.
     #[test]
     fn register_manager_lattice_and_values() {
         let mut app = GhidrustApp::headless();
@@ -11063,7 +11095,7 @@ mod tests {
         assert_eq!(app.register_manager.values.len(), 1);
     }
 
-    /// Phase E — Entropy strip samples cover mapped bytes without fabricating.
+    /// Entropy strip samples cover mapped bytes without fabricating.
     #[test]
     fn entropy_samples_cover_mapped_blocks() {
         let mut app = GhidrustApp::headless();
@@ -11075,7 +11107,7 @@ mod tests {
         }
     }
 
-    // ── Phase F (M6) — Scripts ───────────────────────────────────────────
+    // ── Scripts ───────────────────────────────────────────
 
     #[test]
     fn script_manager_catalog_is_populated_from_mcp_surface() {
@@ -11105,7 +11137,7 @@ mod tests {
         assert!(!app.mcp_repl.transcript[1].prompt);
     }
 
-    // ── Phase G (M7) — Debugger visibility ──────────────────────────────
+    // ── Debugger visibility ──────────────────────────────
 
     #[test]
     fn debugger_panes_enumerated_in_shell_panes() {
@@ -11152,7 +11184,7 @@ mod tests {
         assert_eq!(app.debugger.watches.len(), 2);
     }
 
-    // ── Phase H (M8) — Docking / layouts ────────────────────────────────
+    // ── Docking / layouts ────────────────────────────────
 
     #[test]
     fn save_and_restore_layout_round_trip() {
@@ -11213,15 +11245,15 @@ mod tests {
     }
 
     #[test]
-    fn phase_e_f_g_h_menu_actions_wired_not_nyi() {
+    fn graph_debugger_configure_menu_actions_wired_not_nyi() {
         let src = include_str!("main.rs");
-        // Phase E — graph menu items open panes (not nyi).
+        // Graph menu items open panes (not nyi).
         assert!(!src.contains("nyi(\"Graph → Function Graph\""));
         assert!(!src.contains("nyi(\"Graph → Function Call Graph\""));
         assert!(!src.contains("nyi(\"Graph → Function Call Trees\""));
-        // Phase G — Debugger menu is registered.
+        // Debugger menu is registered.
         assert!(src.contains("ui.menu_button(\"Debugger\","));
-        // Phase H — Configure dialog + Save Tool Layout menu items are wired.
+        // Configure dialog + Save Tool Layout menu items are wired.
         assert!(src.contains("show_configure_dialog"));
         assert!(src.contains("show_layouts_dialog"));
     }

@@ -1,4 +1,4 @@
-//! Ghidrust GUI · Phase F (M6) — Script Manager, Text Editor, and
+//! Ghidrust GUI · Script Manager, Text Editor, and
 //! MCP REPL / interpreter panes.
 //!
 //! Ghidra's `GhidraScriptMgrPlugin` (Script Manager),
@@ -15,7 +15,7 @@
 //!   and echoes a "Backend pending" hint. Full REPL wires into the
 //!   `ghidrust-cli mcp` stdio host in a follow-up.
 //!
-//! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
+//! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, Ui};

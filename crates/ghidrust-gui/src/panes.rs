@@ -1,11 +1,11 @@
-//! Ghidra CodeBrowser provider catalog for Phase A (M1) visible parity.
+//! Ghidra CodeBrowser provider catalog for visible parity.
 //!
 //! Every provider bundled with Ghidra's default `CodeBrowser.tool`, plus commonly-reached
 //! providers from `Window` menu, is enumerated here with the exact Ghidra title so muscle
 //! memory transfers. Providers whose backing analysis is not yet implemented render a
 //! clearly labelled empty state that names the analyzer/model required — never fake data.
 //!
-//! Source anchors: see `dev/UI_PARITY_PLAN.md` § 1.1 and § 1.2.
+//! Source anchors: see internal UI notes § 1.1 and § 1.2.
 
 use eframe::egui::{self, Color32, RichText, Ui};
 
@@ -236,7 +236,7 @@ impl PaneKind {
                 | PaneKind::RelocationTable
                 | PaneKind::DisassembledView
                 | PaneKind::DefinedData
-                // Phase D (M4) — real backing added.
+                // real backing added.
                 | PaneKind::Bytes
                 | PaneKind::SymbolReferences
                 | PaneKind::EquatesTable
@@ -367,47 +367,47 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
             .italics(),
     );
     ui.add_space(4.0);
-    ui.small(RichText::new("Pane is present for Ghidra visibility parity (M1). Backing analysis \
+    ui.small(RichText::new("Pane is present for Ghidra visibility parity . Backing analysis \
                             and interactive actions land in later phases — see \
-                            dev/UI_PARITY_PLAN.md.").color(muted));
+                            internal UI notes.").color(muted));
 }
 
 /// One-liner hint pointing at which analyzer/model would fill this pane.
 pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
     match kind {
         PaneKind::AgentConsole => "",
-        PaneKind::Bookmarks => "Backend pending — Bookmarks model + margin markers land in Phase B (M2).",
+        PaneKind::Bookmarks => "Backend pending — Bookmarks model + margin markers land in .",
         PaneKind::Bytes => "",
         PaneKind::ChecksumGenerator => "",
-        PaneKind::CommentWindow => "Backend pending — comment model lands in Phase C (M3).",
+        PaneKind::CommentWindow => "Backend pending — comment model lands in .",
         PaneKind::Console => "",
-        PaneKind::DataTypeManager => "Backend pending — DTM tree (Built-In / Program / Archive) lands in Phase C (M3).",
+        PaneKind::DataTypeManager => "Backend pending — DTM tree (Built-In / Program / Archive) lands in .",
         PaneKind::DataTypePreview => "",
-        PaneKind::DecompiledView => "Stage-0 pseudo-C wired via ghidrust-decomp::decompile_at. Full tokens + rename land in Phase B/C.",
-        PaneKind::DefinedData => "Backend pending — Program::data_items model lands in Phase D (M4).",
+        PaneKind::DecompiledView => "Stage-1 SSA-C (expression fold + typed locals/params). Emit-time tokens when available; rename/commit wired.",
+        PaneKind::DefinedData => "Backend pending — Program::data_items model lands in .",
         PaneKind::DefinedStrings => "Uses ghidrust-core::analyzers::strings::run — session-only until Program::strings lands.",
-        PaneKind::DisassembledView => "Backend pending — virtual disassembly + pcode preview lands in Phase D (M4).",
-        PaneKind::Entropy => "Backend pending — GPU/CPU histogram lands in Phase E (M5).",
+        PaneKind::DisassembledView => "Backend pending — virtual disassembly + pcode preview lands in .",
+        PaneKind::Entropy => "Backend pending — GPU/CPU histogram lands in .",
         PaneKind::EquatesTable => "",
         PaneKind::ExternalPrograms => "",
-        PaneKind::FunctionCallGraph => "Backend pending — level-based directed graph lands in Phase E (M5).",
-        PaneKind::FunctionCallTrees => "Backend pending — incoming/outgoing GTree pair lands in Phase E (M5).",
-        PaneKind::FunctionGraph => "Backend pending — CFG vertex/edge layout lands in Phase E (M5).",
+        PaneKind::FunctionCallGraph => "Backend pending — level-based directed graph lands in .",
+        PaneKind::FunctionCallTrees => "Backend pending — incoming/outgoing GTree pair lands in .",
+        PaneKind::FunctionGraph => "Backend pending — CFG vertex/edge layout lands in .",
         PaneKind::FunctionTags => "",
         PaneKind::FunctionsWindow => "Uses Program::analysis.functions.",
         PaneKind::Listing => "",
-        PaneKind::MemoryMap => "Uses Program::blocks / Program::sections (read-only). Editable table lands in Phase E (M5).",
+        PaneKind::MemoryMap => "Uses Program::blocks / Program::sections (read-only). Editable table lands in .",
         PaneKind::Overview => "",
         PaneKind::ProgramTree => "",
         PaneKind::ProjectTree => "",
-        PaneKind::Python => "Backend pending — scripting host / MCP REPL lands in Phase F (M6).",
-        PaneKind::RegisterManager => "Backend pending — SLEIGH register lattice lands in Phase E (M5).",
-        PaneKind::RelocationTable => "Uses Program::sections metadata; full PE/ELF reloc parse lands in Phase D (M4).",
-        PaneKind::ScriptManager => "Backend pending — script catalog lands in Phase F (M6).",
+        PaneKind::Python => "Backend pending — scripting host / MCP REPL lands in .",
+        PaneKind::RegisterManager => "Backend pending — SLEIGH register lattice lands in .",
+        PaneKind::RelocationTable => "Uses Program::sections metadata; full PE/ELF reloc parse lands in .",
+        PaneKind::ScriptManager => "Backend pending — script catalog lands in .",
         PaneKind::SymbolReferences => "",
         PaneKind::SymbolTable => "Uses Program::analysis.symbols + functions (flat table).",
         PaneKind::SymbolTree => "",
-        PaneKind::TextEditor => "Backend pending — script editor lands in Phase F (M6).",
+        PaneKind::TextEditor => "Backend pending — script editor lands in .",
         PaneKind::Il2cppMetadata => "",
         PaneKind::Il2cppMethods => "",
         PaneKind::Il2cppIcalls => "",

@@ -379,10 +379,9 @@ mod tests {
     }
 
     #[test]
-    fn opcode_set_covers_phase_a_pcode_additions() {
-        // Phase A extensions from the P0 parity plan: division family,
-        // Trap for int3/hlt, and the Ghidra bit-manipulation ops
-        // (PIECE/SUBPIECE/PTRADD/CAST) that Stage-1 emit will need as
+    fn opcode_set_covers_division_trap_and_bitops() {
+        // Division family, Trap for int3/hlt, and Ghidra bit-manipulation
+        // ops (PIECE/SUBPIECE/PTRADD/CAST) that Stage-1 emit will need as
         // lift coverage grows.
         for op in [
             OpCode::IntDiv,

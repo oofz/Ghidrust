@@ -80,6 +80,12 @@ pub enum RustType {
     /// count of distinct constant-index touches we observed. `count == 0`
     /// means unknown / open-ended.
     ArrayPtr { elem_width: u32, count: u32 },
+    /// IEEE float/double (R4). Seeded from SSE/x87-shaped notes or explicit
+    /// float ops — never invented from integer arithmetic alone.
+    Float {
+        /// Width in bytes (4 = float, 8 = double).
+        width: u32,
+    },
     /// Conflicting observations (top).
     Any,
 }
@@ -153,6 +159,17 @@ impl RustType {
             | (IntN { width: 8 }, ArrayPtr { elem_width, count }) => {
                 ArrayPtr { elem_width, count }
             }
+            (Float { width: a }, Float { width: b }) => Float {
+                width: a.max(b),
+            },
+            // Same-width int + float observation prefers float (SSE move of
+            // a 4/8-byte slot that also saw integer Copy still prints as float).
+            (Float { width: fw }, IntN { width: iw })
+            | (IntN { width: iw }, Float { width: fw })
+                if fw == iw =>
+            {
+                Float { width: fw }
+            }
             _ => Any,
         }
     }
@@ -207,6 +224,11 @@ impl RustType {
                     format!("{base}*/*[{count}]*/")
                 }
             }
+            RustType::Float { width } => match width {
+                4 => "float".into(),
+                8 => "double".into(),
+                w => format!("float{}_t", w * 8),
+            },
             RustType::Any => "void*".into(),
         }
     }
@@ -216,7 +238,9 @@ impl RustType {
     pub fn scalar_width(&self) -> u32 {
         match self {
             RustType::Bool => 1,
-            RustType::IntN { width } | RustType::IntSigned { width } => *width,
+            RustType::IntN { width }
+            | RustType::IntSigned { width }
+            | RustType::Float { width } => *width,
             RustType::Ptr { .. } | RustType::StructPtr { .. } | RustType::ArrayPtr { .. } => 8,
             _ => 0,
         }
@@ -565,6 +589,25 @@ fn seed_op(op: &SsaOp, map: &mut TypeMap, flags: &BTreeSet<u64>) {
         }
         _ => {}
     }
+    // R4: SSE/x87 mnemonic notes → float/double (evidence-gated).
+    if let Some(note) = op.note.as_deref() {
+        let n = note.to_ascii_lowercase();
+        let is_ss = n.contains("movss")
+            || n.contains("addss")
+            || n.contains("mulss")
+            || n.contains("subss")
+            || n.contains("divss");
+        let is_sd = n.contains("movsd")
+            || n.contains("addsd")
+            || n.contains("mulsd")
+            || n.contains("subsd")
+            || n.contains("divsd");
+        if (is_ss || is_sd) && op.output.is_some() {
+            let out = op.output.unwrap();
+            let w = if is_sd { 8 } else { 4 };
+            map.set(out.space, out.offset, RustType::Float { width: w });
+        }
+    }
 }
 
 /// Recover stack locals by scanning `Stack`-space reads/writes across the
@@ -620,8 +663,9 @@ pub fn recover_locals(func: &SsaFunction, types: &TypeMap) -> LocalMap {
 ///
 /// Populates [`TypeRecovery::structs`] and refines [`TypeMap`] entries for
 /// the pointer register to [`RustType::StructPtr`] or
-/// [`RustType::ArrayPtr`] as appropriate. Conservative — we never seed a
-/// struct from a single access; two distinct offsets are the minimum.
+/// [`RustType::ArrayPtr`] as appropriate. Conservative — a single field is
+/// allowed only when the base is already typed as [`RustType::Ptr`] (R4);
+/// otherwise two distinct offsets remain the minimum.
 pub fn recover_structs(func: &SsaFunction, types: &mut TypeMap) -> BTreeMap<u32, StructSeed> {
     use ghidrust_ssa::SsaValue;
     let mut per_base: BTreeMap<SsaValue, BTreeMap<u64, u32>> = BTreeMap::new();
@@ -653,7 +697,11 @@ pub fn recover_structs(func: &SsaFunction, types: &mut TypeMap) -> BTreeMap<u32,
     let mut structs: BTreeMap<u32, StructSeed> = BTreeMap::new();
     let mut next_key: u32 = 1;
     for (base, fields) in per_base {
-        if fields.len() < 2 {
+        let base_is_ptr = matches!(
+            types.get(base.space, base.offset),
+            RustType::Ptr { .. } | RustType::StructPtr { .. }
+        );
+        if fields.len() < 2 && !(fields.len() == 1 && base_is_ptr) {
             continue;
         }
         // Array vs struct heuristic: if every field width is equal and the
@@ -1037,6 +1085,12 @@ mod tests {
         assert_eq!(a.clone().join(b), RustType::int(8));
         assert_eq!(RustType::Bool.join(RustType::int(1)), RustType::Any);
         assert_eq!(RustType::Bottom.join(a.clone()), a);
+    }
+
+    #[test]
+    fn c_style_float_and_double() {
+        assert_eq!(RustType::Float { width: 4 }.c_style(), "float");
+        assert_eq!(RustType::Float { width: 8 }.c_style(), "double");
     }
 
     #[test]

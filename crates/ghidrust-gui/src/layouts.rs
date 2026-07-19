@@ -1,4 +1,4 @@
-//! Ghidrust GUI · Phase H (M8) — layout persistence + Configure dialog.
+//! Ghidrust GUI · layout persistence + Configure dialog.
 //!
 //! Ghidra's `docking` framework lets users move / tab / float providers
 //! and save the result as a `.tool` XML preset. Ghidrust persists:
@@ -9,7 +9,7 @@
 //!   shim string for older layouts
 //! - a read-only Configure dialog listing every compile-time plugin
 //!
-//! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
+//! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
 use serde::{Deserialize, Serialize};
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_catalog_covers_new_phase_e_f_g_h_providers() {
+    fn plugin_catalog_covers_graph_debugger_configure_providers() {
         let names: Vec<&'static str> = PLUGIN_CATALOG.iter().map(|p| p.name).collect();
         for expected in [
             "FunctionGraphPlugin",

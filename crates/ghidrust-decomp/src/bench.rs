@@ -3,7 +3,7 @@
 //!
 //! The bench is the scaffolding for the roadmap's *"beat Ghidra wall-clock"*
 //! metric ([`docs/GPU_DECOMPILER_RESEARCH.md`] and the plan file
-//! `decompiler_superiority_roadmap`). It intentionally captures only what we
+//! `decompiler quality goals`). It intentionally captures only what we
 //! can *actually* measure today; head-to-head Ghidra timings are appended by a
 //! future scripted oracle.
 //!
@@ -242,7 +242,7 @@ pub fn bench_program_stage1_parallel(
 /// `entries` is optional: `None` = use `prog.analysis.functions` capped by
 /// `max_functions`; `Some(list)` = use exactly that entry list (in order).
 /// This is the API [`crate::ghidra_oracle::compare`] uses to enforce the
-/// "shared entry set" fairness rule from the P0 parity plan.
+/// "shared entry set" fairness rule for the Ghidra head-to-head.
 pub fn bench_program_stage1(
     prog: &Program,
     entries: Option<&[u64]>,

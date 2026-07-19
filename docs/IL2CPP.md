@@ -63,9 +63,9 @@ Launch: `ghidrust mcp` (or `target/release/ghidrust.exe mcp` after build). Stdio
 
 | Metadata version | Dialect | Status |
 |------------------|---------|--------|
-| 27.x | `V27` | P0 supported |
-| 29.x | `V29` | P0 supported |
-| 31.x | `V31` | P0 supported |
+| 27.x | `V27` | supported |
+| 29.x | `V29` | supported |
+| 31.x | `V31` | supported |
 | 24.x family | — | P1 (unsupported error with hint) |
 | 39 / 106 | — | P1 (sectioned / variable-width) |
 

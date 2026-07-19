@@ -1,4 +1,4 @@
-//! Center-pane docking via `egui_dock` (Phase H+).
+//! Center-pane docking via `egui_dock`.
 //!
 //! Default layout: horizontal split (~55% | ~45%) with Listing+Overview on the
 //! left and Decompiler on the right. Data Type Manager can be docked into

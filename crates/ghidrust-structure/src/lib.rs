@@ -383,10 +383,103 @@ pub fn structure_function_with_hints(
     let mut visited: HashSet<u32> = HashSet::new();
     let raw = ctx.build_region_from(ENTRY_BLOCK, None, &mut visited);
     let flattened = flatten_short_circuit(raw, ssa);
+    // R3: `if (cond) goto return_block` → `if (cond) return` when the
+    // target leaf is a Return region (early-exit polish).
+    let polished = promote_early_returns(flattened, ssa);
     StructureReport {
-        region: flattened,
+        region: polished,
         loops,
         post_dominators: pdom,
+    }
+}
+
+/// Rewrite `IfThen { h, Goto(t) }` / `IfThenElse` arms into `Return(t)` when
+/// block `t` is a return terminator. Reduces unstructured gotos on early-exit
+/// patterns common in real binaries.
+pub fn promote_early_returns(r: Region, ssa: &SsaFunction) -> Region {
+    match r {
+        Region::Seq(rs) => {
+            Region::Seq(rs.into_iter().map(|c| promote_early_returns(c, ssa)).collect())
+        }
+        Region::IfThen { header, then_branch } => Region::IfThen {
+            header,
+            then_branch: Box::new(promote_goto_to_return(
+                promote_early_returns(*then_branch, ssa),
+                ssa,
+            )),
+        },
+        Region::IfThenElse {
+            header,
+            then_branch,
+            else_branch,
+        } => Region::IfThenElse {
+            header,
+            then_branch: Box::new(promote_goto_to_return(
+                promote_early_returns(*then_branch, ssa),
+                ssa,
+            )),
+            else_branch: Box::new(promote_goto_to_return(
+                promote_early_returns(*else_branch, ssa),
+                ssa,
+            )),
+        },
+        Region::While { header, body } => Region::While {
+            header,
+            body: Box::new(promote_early_returns(*body, ssa)),
+        },
+        Region::DoWhile { header, body, latch } => Region::DoWhile {
+            header,
+            body: Box::new(promote_early_returns(*body, ssa)),
+            latch,
+        },
+        Region::Loop { header, body } => Region::Loop {
+            header,
+            body: Box::new(promote_early_returns(*body, ssa)),
+        },
+        Region::Switch {
+            header,
+            cases,
+            default,
+        } => Region::Switch {
+            header,
+            cases: cases
+                .into_iter()
+                .map(|c| SwitchCase {
+                    selector: c.selector,
+                    target: c.target,
+                    body: Box::new(promote_early_returns(*c.body, ssa)),
+                })
+                .collect(),
+            default: default.map(|d| Box::new(promote_early_returns(*d, ssa))),
+        },
+        Region::ShortCircuit {
+            parts,
+            then_branch,
+            else_branch,
+        } => Region::ShortCircuit {
+            parts,
+            then_branch: Box::new(promote_early_returns(*then_branch, ssa)),
+            else_branch: else_branch.map(|e| Box::new(promote_early_returns(*e, ssa))),
+        },
+        other => promote_goto_to_return(other, ssa),
+    }
+}
+
+fn promote_goto_to_return(r: Region, ssa: &SsaFunction) -> Region {
+    match r {
+        Region::Goto(t) => {
+            if ssa
+                .block(t)
+                .and_then(|b| b.ops.last())
+                .map(|o| o.opcode == OpCode::Return)
+                .unwrap_or(false)
+            {
+                Region::Return(t)
+            } else {
+                Region::Goto(t)
+            }
+        }
+        other => other,
     }
 }
 
@@ -1339,7 +1432,7 @@ pub fn loop_count(report: &StructureReport) -> usize {
 /// Count of `Region::Goto` leaves in the recovered structure tree — the
 /// primary "unstructured escape" indicator. Break/Continue don't count
 /// (they're structured escapes). Combined with [`region_leaf_count`] this
-/// yields the Phase D `goto_rate` metric.
+/// yields the `goto_rate` metric.
 pub fn goto_count(region: &Region) -> usize {
     match region {
         Region::Goto(_) => 1,
@@ -1404,7 +1497,7 @@ pub fn region_leaf_count(region: &Region) -> usize {
     }
 }
 
-/// `goto_rate = goto_count / max(1, region_leaf_count)`. The Phase D gate
+/// `goto_rate = goto_count / max(1, region_leaf_count)`. The goto_rate gate
 /// is < 0.15 on the lab fixture; consumers can also report this metric
 /// on shared-entry corpora.
 pub fn goto_rate(region: &Region) -> f32 {

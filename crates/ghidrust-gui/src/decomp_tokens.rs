@@ -1,10 +1,9 @@
 //! Decompiler token model — Ghidra `ClangToken` analog for cross-highlight and nav.
 //!
-//! **Design note.** The Stage-0 (or Stage-0.5) pseudo-C is produced by
-//! [`ghidrust_decomp`] and may be swapped out later for a real IR/SSA emitter.
-//! To avoid fighting with the decompiler crate over SSA internals, this module
-//! tokenises the **existing pseudo-C string** into a `Vec<Token>` with kinds
-//! and (optionally) a machine address so the GUI can:
+//! **Design note.** Stage-1 may supply emit-time tokens via
+//! [`from_emit_tokens`]; otherwise this module tokenises the **pseudo-C
+//! string** into a `Vec<Token>` with kinds and (optionally) a machine address
+//! so the GUI can:
 //!
 //! * cross-highlight the Listing line when a token is clicked;
 //! * navigate to a function/label on double-click;
@@ -122,6 +121,118 @@ pub fn tokenize(source: &str) -> Vec<DecompLine> {
         });
     }
     out
+}
+
+/// Adopt Stage-1 emit-time tokens (R5) into GUI [`DecompLine`]s.
+///
+/// Groups on `\n` text tokens. Falls back to string tokenisation when the
+/// stream is empty.
+pub fn from_emit_tokens(
+    emit: &[(String, Option<u64>, &'static str)],
+) -> Vec<DecompLine> {
+    // Simplified adapter: callers map EmitToken → (text, va, kind_name).
+    if emit.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<DecompLine> = Vec::new();
+    let mut cur = DecompLine {
+        line: 0,
+        machine_addr: None,
+        block_label: None,
+        tokens: Vec::new(),
+    };
+    for (text, va, kind) in emit {
+        let tk = match *kind {
+            "keyword" | "type" => TokenKind::Keyword,
+            "function" => TokenKind::Function,
+            "variable" => TokenKind::Variable,
+            "number" => TokenKind::Constant,
+            "comment" => TokenKind::Comment,
+            "address" => TokenKind::Address,
+            "label" => TokenKind::Label,
+            _ => TokenKind::Syntax,
+        };
+        if text == "\n" {
+            if cur.machine_addr.is_none() {
+                cur.machine_addr = cur.tokens.iter().find_map(|t| t.va);
+            }
+            lines.push(std::mem::replace(
+                &mut cur,
+                DecompLine {
+                    line: lines.len() + 1,
+                    machine_addr: None,
+                    block_label: None,
+                    tokens: Vec::new(),
+                },
+            ));
+            continue;
+        }
+        if text.contains('\n') {
+            for (i, part) in text.split('\n').enumerate() {
+                if i > 0 {
+                    if cur.machine_addr.is_none() {
+                        cur.machine_addr = cur.tokens.iter().find_map(|t| t.va);
+                    }
+                    lines.push(std::mem::replace(
+                        &mut cur,
+                        DecompLine {
+                            line: lines.len() + 1,
+                            machine_addr: None,
+                            block_label: None,
+                            tokens: Vec::new(),
+                        },
+                    ));
+                }
+                if !part.is_empty() {
+                    cur.tokens.push(Token {
+                        kind: tk,
+                        text: part.to_string(),
+                        va: *va,
+                    });
+                }
+            }
+            continue;
+        }
+        cur.tokens.push(Token {
+            kind: tk,
+            text: text.clone(),
+            va: *va,
+        });
+    }
+    if !cur.tokens.is_empty() {
+        if cur.machine_addr.is_none() {
+            cur.machine_addr = cur.tokens.iter().find_map(|t| t.va);
+        }
+        lines.push(cur);
+    }
+    lines
+}
+
+/// Map `ghidrust_decomp::EmitToken` kinds into the adapter used by
+/// [`from_emit_tokens`].
+pub fn emit_token_triples(
+    tokens: &[ghidrust_decomp::EmitToken],
+) -> Vec<(String, Option<u64>, &'static str)> {
+    tokens
+        .iter()
+        .map(|t| {
+            let kind = match t.kind {
+                ghidrust_decomp::EmitTokenKind::Keyword => "keyword",
+                ghidrust_decomp::EmitTokenKind::Type => "type",
+                ghidrust_decomp::EmitTokenKind::Function => "function",
+                ghidrust_decomp::EmitTokenKind::Variable => "variable",
+                ghidrust_decomp::EmitTokenKind::Number => "number",
+                ghidrust_decomp::EmitTokenKind::String => "number",
+                ghidrust_decomp::EmitTokenKind::Comment => "comment",
+                ghidrust_decomp::EmitTokenKind::Operator => "syntax",
+                ghidrust_decomp::EmitTokenKind::Punct => "syntax",
+                ghidrust_decomp::EmitTokenKind::Label => "label",
+                ghidrust_decomp::EmitTokenKind::Address => "address",
+                ghidrust_decomp::EmitTokenKind::Text => "syntax",
+            };
+            (t.text.clone(), t.va, kind)
+        })
+        .collect()
 }
 
 /// Parse a `block_N:` label at the start of a stripped line, else `None`.

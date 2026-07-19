@@ -6,7 +6,7 @@
 //! so cross‑window sync is centralised.
 //!
 //! This is a Stage‑1 skeleton: the bus is a plain `Vec<GhidrustEvent>` and consumers
-//! poll it. Fan‑out to individual providers is Phase B.
+//! poll it. Fan‑out to individual providers is still pending.
 
 use crate::nav::NavLocation;
 

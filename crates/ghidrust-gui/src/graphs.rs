@@ -1,4 +1,4 @@
-//! Ghidrust GUI · Phase E (M5) — Function Graph, Function Call Graph,
+//! Ghidrust GUI · Function Graph, Function Call Graph,
 //! Function Call Trees, and shared graph-layout helpers.
 //!
 //! These render Ghidra-analog dockable panes (`FunctionGraphPlugin`,
@@ -10,7 +10,7 @@
 //! program has no call references, panes render a clearly labelled empty
 //! state rather than fabricating structure.
 //!
-//! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
+//! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};

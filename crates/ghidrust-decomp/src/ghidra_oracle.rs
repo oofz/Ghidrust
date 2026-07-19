@@ -2,7 +2,7 @@
 //! shipped Ghidrust decompiler and a locally-installed Ghidra headless run
 //! (`analyzeHeadless`).
 //!
-//! Design goals (per `decompiler_superiority_roadmap`):
+//! Design goals (per `decompiler quality goals`):
 //!
 //! * **Never fabricate Ghidra timings.** If a Ghidra installation isn't
 //!   supplied, the harness emits a "methodology only" report that says so —
@@ -83,9 +83,9 @@ pub struct GhidraOracleConfig {
     /// treats a missing or non-numeric value as "no cap".
     pub ghidra_fn_cap: Option<usize>,
     /// Which Ghidrust emit stage to use for the per-entry rows. Stage-1
-    /// is the fair comparison (Phase E of the pcode parity plan) since
-    /// it goes head-to-head with Ghidra's `DecompInterface` output;
-    /// Stage-0 stays available as an oracle for regression checks.
+    /// is the fair Ghidra comparison since it goes head-to-head with
+    /// Ghidra's `DecompInterface` output; Stage-0 stays available as an
+    /// oracle for regression checks.
     #[serde(default)]
     pub ghidrust_stage: GhidrustStage,
     /// Calling convention used for Stage-1 recovery. Defaults to
@@ -108,8 +108,8 @@ pub enum GhidrustStage {
 
 impl Default for GhidrustStage {
     fn default() -> Self {
-        // Phase F flips the product default to Stage-1; the oracle
-        // follows so the head-to-head is fair by default.
+        // Product default is Stage-1; the oracle follows so the
+        // head-to-head is fair by default.
         GhidrustStage::Stage1
     }
 }
@@ -219,7 +219,7 @@ impl GhidraOracleReport {
 
     pub fn to_text(&self) -> String {
         let mut s = String::new();
-        s.push_str("=== Ghidrust ↔ Ghidra head-to-head oracle (Phase E, shared-entry, Stage-1) ===\n");
+        s.push_str("=== Ghidrust ↔ Ghidra head-to-head oracle (shared-entry, Stage-1) ===\n");
         s.push_str(&format!("image: {}\n", self.image));
         s.push_str(&format!(
             "ghidrust: functions={} stage0_wall_ms={:.3} stage0.5_wall_ms={:.3} stage1_wall_ms={:.3} lift_avg={:.1}%\n",
@@ -390,7 +390,7 @@ pub fn token_similarity(a: &str, b: &str) -> f32 {
 
 /// Run a head-to-head comparison.
 ///
-/// **Phase E fairness rules** (from the P0 pcode-parity plan):
+/// **Fairness rules** for the Ghidra head-to-head:
 ///
 /// 1. **Shared entry list.** When a Ghidra capture is available the
 ///    Ghidrust side re-runs on the intersection of Ghidra's decompiled
@@ -951,7 +951,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
 /// Return the runbook that ships with every oracle report so users know
 /// exactly how to point the harness at a real Ghidra install.
 pub fn methodology_text() -> &'static str {
-    "Ghidra head-to-head methodology (Phase C — capture-only, no fabricated timings):\n\
+    "Ghidra head-to-head methodology (capture-only, no fabricated timings):\n\
 \n\
 1. Install Ghidra 11.x on the same machine used for Ghidrust builds.\n\
 2. Locate `analyzeHeadless` (Linux/macOS: `<ghidraDir>/support/analyzeHeadless`;\n\

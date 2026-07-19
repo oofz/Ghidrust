@@ -120,6 +120,7 @@ fn print_help() {
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
            ghidrust decompile <path> [--addr HEX] [--count N] [--stage0|--stage05|--stage1]\n\
+             (Stage-1 default: expression-folded typed C; --json → folded_temps/token_count/goto_rate)\n\
                      [--follow-stub] [--verbose] [--out FILE] [--json]\n\
            ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--stage1] [--parallel] [--json]\n\
            ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]\n\
@@ -1941,7 +1942,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
     };
     let mut addr: Option<u64> = None;
     let mut count: usize = 64;
-    // Phase F: Stage-1 is the product default. `--stage0` / `--stage05`
+    // Stage-1 is the product default. `--stage0` / `--stage05`
     // opt out for oracle / regression comparisons; explicit `--stage1`
     // is accepted for symmetry.
     let mut stage05 = false;
@@ -2058,16 +2059,23 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                 };
                 match ghidrust_decomp::decompile_stage1_at(&prog, va, count, conv) {
                     Ok((d, s1)) => {
+                        let sum = s1.summary();
                         let mut obj = json!({
                             "decompile": d,
                             "resolve": resolve_meta,
                             "stage1": {
-                                "loops": s1.structure.loops.len(),
-                                "phis": s1.ssa.phi_count(),
-                                "locals": s1.types.locals.len(),
-                                "params": s1.types.params.len(),
-                                "lift_ratio": s1.coverage.ratio(),
+                                "loops": sum.loops,
+                                "phis": sum.phis,
+                                "locals": sum.locals,
+                                "params": sum.params,
+                                "structs": sum.structs,
+                                "lift_ratio": sum.lift_ratio,
+                                "goto_rate": sum.goto_rate,
+                                "folded_temps": s1.folded_temps,
+                                "token_count": s1.tokens.len(),
                                 "total_ops": s1.coverage.total_ops,
+                                "return_type": s1.types.signature.return_type.c_style(),
+                                "prototype": s1.types.signature.to_prototype(),
                             }
                         });
                         if let Some(fm) = &follow_meta {
@@ -2077,14 +2085,18 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                             print!("{}", d.pseudo_c);
                             if verbose {
                                 eprintln!(
-                                    "[{}] stage=1 blocks={} phis={} loops={} locals={} params={} lift={:.1}%",
+                                    "[{}] stage=1 blocks={} phis={} loops={} locals={} params={} structs={} fold={} tokens={} goto={:.2} lift={:.1}%",
                                     d.name,
                                     d.blocks.len(),
-                                    s1.ssa.phi_count(),
-                                    s1.structure.loops.len(),
-                                    s1.types.locals.len(),
-                                    s1.types.params.len(),
-                                    s1.coverage.ratio() * 100.0
+                                    sum.phis,
+                                    sum.loops,
+                                    sum.locals,
+                                    sum.params,
+                                    sum.structs,
+                                    s1.folded_temps,
+                                    s1.tokens.len(),
+                                    sum.goto_rate,
+                                    sum.lift_ratio * 100.0
                                 );
                             }
                         });
@@ -2179,7 +2191,7 @@ fn cmd_decompile_bench(args: &[String], json: bool) -> ExitCode {
     let mut max_functions: usize = 32;
     let mut count: usize = 128;
     let mut out_path: Option<PathBuf> = None;
-    // Phase F: `--stage1` opts into the Stage-1 bench (SSA + structure +
+    // `--stage1` opts into the Stage-1 bench (SSA + structure +
     // types) with per-entry pseudo-C text captured. `--parallel` runs the
     // per-entry Stage-1 pipeline across a rayon thread pool. Both default
     // off to keep back-compat with the shipped decompile-bench numbers.
@@ -2961,17 +2973,17 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "decompile",
-            description: "Decompile function to structured C. Defaults to Stage-1 (SSA + types + structure). Pass stage='stage0' or 'stage05' for oracle output. follow_stub follows IL2CPP resolve thunks when the slot target is mapped.",
+            description: "Decompile to Stage-1 expression-folded typed C (default): SSA + structure + types, named import/function calls, folded_temps/token_count/goto_rate in JSON. Pass stage='stage0'|'stage05' for oracles. follow_stub follows IL2CPP resolve thunks when mapped. Mid-body addr resolves to containing function.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "addr": { "type": "string", "description": "Function entry VA in hex (default: program entry)" },
+                    "addr": { "type": "string", "description": "VA in hex (entry or mid-body; resolves to containing function)" },
                     "count": { "type": "integer", "description": "Max instructions to decode (default: 64)" },
                     "stage": {
                         "type": "string",
                         "enum": ["stage0", "stage05", "stage1"],
-                        "description": "Emit stage. Default 'stage1' — full SSA + types + structure."
+                        "description": "Emit stage. Default stage1: expression-folded SSA+types+structure; JSON includes folded_temps, token_count, goto_rate."
                     },
                     "follow_stub": {
                         "type": "boolean",
@@ -3962,7 +3974,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                     Ok(serde_json::to_string_pretty(&obj).unwrap())
                 }
                 _ => {
-                    // Default (Phase F): Stage-1 full pipeline.
+                    // Default: Stage-1 full pipeline.
                     let (d, s1) = ghidrust_decomp::decompile_stage1_at(&prog, va, count, conv)
                         .map_err(|e| e.to_string())?;
                     let mut obj = json!({
@@ -3979,6 +3991,8 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         "structs": s1.types.structs.len(),
                         "lift_ratio": s1.coverage.ratio(),
                         "goto_rate": s1.summary().goto_rate,
+                        "folded_temps": s1.folded_temps,
+                        "token_count": s1.tokens.len(),
                         "return_type": s1.types.signature.return_type.c_style(),
                         "prototype": s1.types.signature.to_prototype(),
                         "pseudo_c": d.pseudo_c,

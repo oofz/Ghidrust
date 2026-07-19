@@ -18,7 +18,7 @@ fn fixture(name: &str) -> PathBuf {
 
 #[test]
 fn decompile_tiny_pe_nonempty_structure() {
-    // Phase F: the CLI default is Stage-1. JSON now nests under
+    // the CLI default is Stage-1. JSON now nests under
     // `decompile.*` with an extra `stage1` sibling. Assert against the
     // Stage-1 shape but accept either nesting so ports of this test
     // that override with `--stage0` still pass.

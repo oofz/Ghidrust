@@ -966,7 +966,7 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
         // don't (yet) have `INDIRECT`, materialize as `dst = cond ? src : dst`
         // via `BoolNegate` + two IntAnd-style guards is overkill: keep it
         // simple with a Copy + Unimplemented "predicated" note so DCE can
-        // still walk it. Ghidra's real MULTIEQUAL is a Phase B follow-up.
+        // still walk it. Ghidra's real MULTIEQUAL is a follow-up.
         m if is_cmov(m) => {
             let jcc_form = format!("j{}", &m[4..]);
             let (mut cond_ops, _cond_vn) = jcc_condition(&jcc_form, &mut ctx.unique_id);
@@ -1638,7 +1638,7 @@ mod tests {
 
     #[test]
     fn lift_int3_becomes_trap_not_unimplemented() {
-        // Baseline was `int3` → OpCode::Unimplemented; Phase A models it
+        // Baseline was `int3` → OpCode::Unimplemented; lift models it
         // as a proper Trap op so lift coverage counts it.
         let insns = decode_bytes(&[0xcc], 0xa000, 4).unwrap();
         let seq = lift_instructions(&insns);

@@ -46,7 +46,7 @@ pub struct SavedAnalysis {
     pub rtti: RttiReport,
     pub listing: Vec<Instruction>,
     pub saved_analyzers: Vec<String>,
-    /// Phase C (M3) — user edits (rename / retype / comments / signatures /
+    /// user edits (rename / retype / comments / signatures /
     /// user types / applied types). Round-trip through save/load so a user's
     /// work survives project reopen. `#[serde(default)]` keeps older snapshots
     /// deserializable (they land with `ProgramEdits::default()`).
@@ -254,7 +254,7 @@ impl Project {
         if let Some(ref s) = saved {
             prog.analysis = s.analysis.clone();
             prog.rtti = s.rtti.clone();
-            // Phase C (M3) — replay every user edit into the fresh program so
+            // replay every user edit into the fresh program so
             // renames / retypes / comments / signatures / user types /
             // applied-types survive project reopen. Mirror renames into
             // `analysis.functions[i].name` so every downstream pane picks
@@ -666,7 +666,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // Phase C (M3) — ProgramEdits must round-trip through save/load so a
+    // ProgramEdits must round-trip through save/load so a
     // user's renames / comments / retypes / signatures / user types /
     // applied-types survive a project reopen.
     #[test]
@@ -707,7 +707,7 @@ mod tests {
         prog.edits
             .set_user_type("Widget", "struct Widget { int id; }");
         prog.edits.set_applied_type(va, "Widget");
-        // Phase D (M4) — equates and function tags must also round-trip.
+        // equates and function tags must also round-trip.
         prog.edits.set_equate(va, 1, "SW_HIDE", 0);
         prog.edits.set_equate(va + 0x10, 1, "SW_HIDE", 0);
         prog.edits.add_function_tag(va, "MALLOC");
@@ -748,7 +748,7 @@ mod tests {
             prog2.function_at(va).map(|f| f.name.as_str()),
             Some("my_main")
         );
-        // Phase D (M4) — equates and function tags survive save/load.
+        // equates and function tags survive save/load.
         assert_eq!(
             prog2.edits.equate_at(va, 1).map(|e| e.name.as_str()),
             Some("SW_HIDE")

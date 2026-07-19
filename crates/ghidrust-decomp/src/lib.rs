@@ -8,9 +8,9 @@
 //!
 //! | Stage | What it emits | Status |
 //! |-------|----------------|--------|
-//! | **Stage-0** | Linear insns → basic blocks + branch edges → mnemonic-style pseudo-C. | Current default; remains the regression oracle. |
+//! | **Stage-0** | Linear insns → basic blocks + branch edges → mnemonic-style pseudo-C. | Regression oracle (not the product default). |
 //! | **Stage-0.5** ([`ir_emit`]) | Same block/edge shape but statements come from lifted [`ghidrust_ir`] ops via [`ghidrust_lift`]. Recognises `xor a,a`, `mov reg,reg`, augmented-assign, `push`/`pop`, direct `call`, and flag-driven `jcc`. Unlifted instructions fall back to Stage-0 scaffolding — never fabricated. | Opt-in via [`decompile_instructions_ir`] / [`decompile_ir_at`]. |
-//! | **Stage-1 (SSA-C)** ([`stage1`]) | Full pipeline: [`ghidrust_ssa::build_ssa`] rename → [`ghidrust_structure::structure_function`] regions (`if`/`while`/`do-while`/`loop`) → [`ghidrust_types::recover`] locals/params → SSA-versioned pseudo-C. Falls back to `goto` or Stage-0.5-shaped scaffolding for irreducible/unlifted regions. | Opt-in via [`decompile_instructions_stage1`] / [`decompile_stage1_at`]. |
+//! | **Stage-1 (SSA-C)** ([`stage1`]) | Full pipeline: [`ghidrust_ssa::build_ssa`] rename → [`ghidrust_structure::structure_function`] regions (`if`/`while`/`do-while`/`loop`) → [`ghidrust_types::recover`] locals/params → expression-folded typed pseudo-C + emit tokens. Falls back to `goto` for irreducible/unlifted regions. | **Product default** via [`decompile_instructions_stage1`] / [`decompile_stage1_at`]. |
 //!
 //! ## GPU-resident path (`gpu_decompile`)
 //! Multi-pass SIMT kernels keep Stage-0 IR/CFG/emit buffers in **VRAM**; host only
@@ -18,8 +18,12 @@
 //! CPU roadmap. See `docs/GPU_DECOMPILE_PROCESS.md`.
 
 pub mod bench;
+pub mod emit_hints;
+pub mod emit_tokens;
+pub mod expr_fold;
 pub mod ghidra_oracle;
 pub mod gpu_decompile;
+pub mod goto_histogram;
 pub mod ir_emit;
 pub mod stage1;
 
@@ -27,12 +31,18 @@ pub use bench::{
     bench_functions, bench_program, bench_program_stage1, bench_program_stage1_parallel,
     BenchReport, FunctionBench,
 };
+pub use emit_hints::EmitHints;
+pub use emit_tokens::{EmitToken, EmitTokenKind};
 pub use ghidra_oracle::{
     compare as ghidra_headtohead, shared_entry_list, spawn_ghidra_headless, token_similarity,
     CapturedGhidraDecompile, GhidraOracleConfig, GhidraOracleReport, GhidraSpawnError,
     GhidrustCallConv, GhidrustStage, MatchKind, StructuralMatch,
 };
-pub use stage1::{emit_stage1, emit_stage1_with_hints, is_structured, Stage1Result, Stage1Summary};
+pub use goto_histogram::{goto_rate_histogram, GotoHistogram};
+pub use stage1::{
+    emit_stage1, emit_stage1_full, emit_stage1_with_hints, is_structured, Stage1Result,
+    Stage1Summary,
+};
 
 use ghidrust_core::{disassemble_range, Instruction, Program};
 use ghidrust_lift::{coverage as lift_coverage, lift_instructions, LiftCoverage};
@@ -266,26 +276,40 @@ pub fn decompile_instructions_stage1_with_hints(
     conv: CallConv,
     hints: &StructureHints,
 ) -> (DecompileResult, Stage1Result) {
+    decompile_instructions_stage1_full(name, entry, insns, conv, hints, &EmitHints::default())
+}
+
+/// Stage-1 with structure + naming/OO emit hints.
+pub fn decompile_instructions_stage1_full(
+    name: impl Into<String>,
+    entry: u64,
+    insns: &[Instruction],
+    conv: CallConv,
+    hints: &StructureHints,
+    emit_hints: &EmitHints,
+) -> (DecompileResult, Stage1Result) {
     let mut result = decompile_instructions(name, entry, insns);
     let flat_insns: Vec<Instruction> = result
         .blocks
         .iter()
         .flat_map(|b| b.instructions.iter().cloned())
         .collect();
-    let stage1 = emit_stage1_with_hints(
+    let stage1 = emit_stage1_full(
         &result.name,
         result.entry,
         &result.blocks,
         &flat_insns,
         conv,
         hints,
+        emit_hints,
     );
     result.pseudo_c = stage1.pseudo_c.clone();
     (result, stage1)
 }
 
 /// Program-level Stage-1 convenience mirroring [`decompile_at`]. Consumes
-/// any switch-analysis hints already attached to `prog.analysis.switches`.
+/// any switch-analysis hints already attached to `prog.analysis.switches`,
+/// plus import/RTTI naming hints for call sites.
 pub fn decompile_stage1_at(
     prog: &Program,
     va: u64,
@@ -294,15 +318,37 @@ pub fn decompile_stage1_at(
 ) -> ghidrust_core::Result<(DecompileResult, Stage1Result)> {
     let insns = disassemble_range(prog, va, max_insns)?;
     let name = prog
-        .analysis
-        .functions
-        .iter()
-        .find(|f| f.entry == va)
-        .map(|f| f.name.clone())
+        .display_function_name_at(va)
+        .or_else(|| {
+            prog.analysis
+                .functions
+                .iter()
+                .find(|f| f.entry == va)
+                .map(|f| f.name.clone())
+        })
         .unwrap_or_else(|| format!("FUN_{va:016x}"));
     let hints = structure_hints_from(prog);
-    Ok(decompile_instructions_stage1_with_hints(
-        name, va, &insns, conv, &hints,
+    let mut emit_hints = EmitHints::from_program(prog);
+    // R6: if this function's name looks like Class::Method, enable `this`.
+    if let Some((cls, _)) = name.split_once("::") {
+        emit_hints = emit_hints.with_method_this(cls);
+    } else if emit_hints.vtable_classes.values().any(|c| name.contains(c.as_str())) {
+        if let Some(cls) = emit_hints
+            .vtable_classes
+            .values()
+            .find(|c| name.contains(c.as_str()))
+            .cloned()
+        {
+            emit_hints = emit_hints.with_method_this(cls);
+        }
+    }
+    Ok(decompile_instructions_stage1_full(
+        name,
+        va,
+        &insns,
+        conv,
+        &hints,
+        &emit_hints,
     ))
 }
 
@@ -629,12 +675,12 @@ mod tests {
         assert!(d.pseudo_c.contains("return;"));
     }
 
-    /// Phase A gate: median lift ratio across the fixture corpus must be
+    /// median lift ratio across the fixture corpus must be
     /// ≥ 98%. This test enumerates every function the analyzer recovered
     /// in the shipped fixtures (analysis_lab.pe, tiny_x64.pe, tiny_x64.elf)
     /// and averages the per-function `LiftCoverage.ratio()`.
     #[test]
-    fn fixture_corpus_lift_ratio_meets_phase_a_gate() {
+    fn fixture_corpus_lift_ratio_meets_lab_target() {
         use ghidrust_core::run_analyzers;
         use ghidrust_lift::{coverage as lift_coverage, lift_instructions};
         let fixtures = [
@@ -689,7 +735,7 @@ mod tests {
         eprintln!("  overall               avg={:.3}  samples={}", avg, samples);
         assert!(
             avg >= 0.98,
-            "Phase A gate: fixture-corpus average lift ratio {avg:.3} < 0.98"
+            "fixture-corpus average lift ratio {avg:.3} < 0.98"
         );
     }
 

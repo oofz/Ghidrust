@@ -33,7 +33,7 @@ impl MetadataDialect {
             }),
             v => Err(Error::UnsupportedVersion {
                 version: v,
-                hint: "supported P0 versions: 27, 29, 31".into(),
+                hint: "supported versions: 27, 29, 31".into(),
             }),
         }
     }
@@ -260,7 +260,7 @@ fn parse_header(data: &[u8], version: i32, dialect: MetadataDialect) -> Result<M
     let (_vt_off, _vt_sz) = read_u32_pair(data, &mut off)?;
     let (_io_off, _io_sz) = read_u32_pair(data, &mut off)?;
     let (type_definitions_offset, type_definitions_size) = read_u32_pair(data, &mut off)?;
-    // rgctx only <= 24.1 — skipped for P0 dialects
+    // rgctx only <= 24.1 — skipped for supported dialects
     let (images_offset, images_size) = read_u32_pair(data, &mut off)?;
     let (assemblies_offset, assemblies_size) = read_u32_pair(data, &mut off)?;
     // metadataUsage only < 27 — skipped

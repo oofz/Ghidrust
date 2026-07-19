@@ -14,8 +14,8 @@ These stay in-tree. Do **not** take iced-x86, Zydis, Capstone, goblin, rsleigh, 
 | **`ghidrust-lift`** | x86-64 → IR semantics (reg/imm/mem operands, ALU + shifts + neg/not + call/jmp/jcc + push/pop/leave/lea), flag varnode model (`ZF`/`CF`/`SF`/`OF`/`PF`), `LiftCoverage` reporting | Shipped |
 | **`ghidrust-ssa`** | CFG-on-IR partition, Cooper–Harvey–Kennedy dominators, Cytron dominance frontiers, phi placement + full **SSA rename pass** (`ssa::build_ssa`) with copy-propagation | Shipped |
 | **`ghidrust-types`** | Type lattice (`Bottom`→`Bool`/`IntN`/`Ptr`→`Any`), stack-local recovery, x86-64 SysV/Windows integer-register parameter recovery | Shipped |
-| **`ghidrust-structure`** | Region structuring: `IfThen`/`IfThenElse`/`While`/`DoWhile`/`Loop`/`Return`/`Goto`; natural-loop detection + iterative post-dominators; `switch` structuring is later work | Shipped (switch pending) |
-| **`ghidrust-decomp`** | Pipeline orchestration + emit: **Stage-0** CFG→pseudo-C (regression oracle), **Stage-0.5** IR-informed emit (`ir_emit`), **Stage-1** SSA-structured typed-C emit (`stage1`), plus **Ghidra head-to-head oracle** (`ghidra_oracle`) — capture-only, no fabricated Ghidra timings | Stage-0 · Stage-0.5 · Stage-1 |
+| **`ghidrust-structure`** | Region structuring: `IfThen`/`IfThenElse`/`While`/`DoWhile`/`Loop`/`Return`/`Goto`/`Switch`/short-circuit; natural loops; early-return polish; `goto_rate` | Shipped |
+| **`ghidrust-decomp`** | Pipeline + emit: Stage-0/0.5 oracles; **Stage-1 product default** with expression fold, emit tokens, naming/OO hints; Ghidra head-to-head + goto histogram | Stage-1 default |
 
 Open-source RE sources (Ghidra Decompiler / SLEIGH, iced-x86, academic papers) may be **read as reference** only; logic is reimplemented here.
 

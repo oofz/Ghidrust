@@ -1,14 +1,13 @@
-//! Ghidrust GUI · Phase G (M7) — Debugger tool visibility.
+//! Ghidrust GUI · Debugger tool visibility.
 //!
 //! Ghidra ships a separate `Debugger` tool with a distinct catalog of
 //! `ComponentProvider`s (Targets, Threads, Modules, Regions, Registers,
 //! Stack, Breakpoints, Memory Bytes, Watches, Console). Ghidrust doesn't
-//! have a live debugger yet, but per `dev/UI_PARITY_PLAN.md` § 6 Phase G
-//! (M7) every debugger provider must be **visible** — a real pane with a
-//! labelled empty state pointing at the backend gap. This module owns
-//! that surface.
+//! have a live debugger yet, but every debugger provider must still be
+//! **visible** — a real pane with a labelled empty state pointing at the
+//! backend gap. This module owns that surface.
 //!
-//! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
+//! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, RichText, Ui};
@@ -590,7 +589,7 @@ fn render_empty_table(pane: DebuggerPane, ui: &mut Ui, muted: Color32) {
     );
     ui.add_space(4.0);
     ui.small(
-        RichText::new("Pane is present for Ghidra Debugger visibility parity (M7). Real content lands with backend P12.")
+        RichText::new("Pane is present for Ghidra Debugger visibility parity . Real content lands with backend P12.")
             .color(muted),
     );
 }

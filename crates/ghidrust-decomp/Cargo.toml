@@ -19,7 +19,7 @@ ghidrust-structure = { workspace = true }
 ghidrust-types = { workspace = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Parallel per-function decompile (Phase F). Already a workspace dep via
+# Parallel per-function decompile (Stage-1 bench). Already a workspace dep via
 # ghidrust-core; kept explicit here so `bench_program_stage1_parallel`
 # builds without pulling core.
 rayon = "1"

@@ -1,14 +1,13 @@
 # Ghidrust ↔ Ghidra head-to-head oracle
 
-**Status:** Phase E · **shared-entry set** · **Stage-1 default** ·
+**Status:** **shared-entry set** · **Stage-1 default** ·
 **token/AST similarity metric** · **no fabricated timings**.
 
 This document is the runbook for the `ghidrust ghidra-headtohead` subcommand
 and the underlying [`ghidrust_decomp::ghidra_oracle`] library API. It aligns
-with the decompiler pcode-parity plan (Phase F / Stage-1 product default) —
-specifically **Phase E** ("Fair Ghidra parity measurement"), which replaced the earlier
-brace-count proxy and stage-mismatched comparison with a shared-entry,
-Stage-1-vs-`DecompInterface`, normalized-token metric.
+with Stage-1 as the product default and a fair Ghidra comparison methodology —
+shared-entry intersection, Stage-1-vs-`DecompInterface`, normalized-token
+similarity (replacing the earlier brace-count proxy and stage-mismatched comparison).
 
 `ghidra-headtohead --ghidra <DIR>` auto-spawns `analyzeHeadless` with an
 embedded `DecompileAndReport.java` post-script (see
@@ -19,7 +18,7 @@ a Stage-1 wall-time and a token-similarity score.
 
 ---
 
-## Design contract (Phase E, current)
+## Design contract
 
 1. **Shared entry list.** When a Ghidra capture is available the Ghidrust
    side re-runs on the intersection of Ghidra's captured entries and the
@@ -35,7 +34,10 @@ a Stage-1 wall-time and a token-similarity score.
    (identifiers, integer literals, control-flow keywords, with
    local/param/temp names folded to canonical buckets). This is the
    published quality metric, and it is `None` when either side is
-   missing output rather than fabricated.
+   missing output rather than fabricated. For human readability
+   (expression nesting, named calls, fewer `sub_`/`goto`), also use
+   [`docs/READABILITY_RUBRIC.md`](READABILITY_RUBRIC.md)  alongside
+   Stage-1 JSON fields `folded_temps`, `token_count`, and `goto_rate`.
 4. **No invented Ghidra timings.** When Ghidra isn't available (no
    `--ghidra` flag, no `--captured` JSON), the report is explicitly
    *methodology-only*: it enumerates every Ghidrust row but leaves the
@@ -169,7 +171,7 @@ intersection. The oracle refuses to emit such tables in the default
 Stage-1 configuration; Stage-0 rows must be explicitly opted into and
 should carry a note stating they aren't for external comparison.
 
-**Publishable table shape (Phase E):** for each shared entry, one row
+**Publishable table shape:** for each shared entry, one row
 with `entry`, `ghidrust_stage1_us`, `ghidra_wall_us`, `token_similarity`,
 `match_kind`. Aggregate: mean/median similarity, mean speed ratio,
 `goto_rate` on the Ghidrust Stage-1 side. All numbers come from the

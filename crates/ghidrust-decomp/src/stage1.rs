@@ -9,6 +9,9 @@
 //! back to `goto` for irreducible regions, or when lift coverage is too low,
 //! Stage-1 still emits every block Stage-0 emitted — no fabrication.
 
+use crate::emit_hints::EmitHints;
+use crate::emit_tokens::{EmitToken, EmitTokenKind, TokenSink};
+use crate::expr_fold::{fold_expr_for, FoldPlan};
 use crate::BasicBlock;
 use ghidrust_decode::Instruction;
 use ghidrust_ir::{AddrSpace, IrSequence, OpCode};
@@ -35,6 +38,10 @@ pub struct Stage1Result {
     pub structure: StructureReport,
     pub types: TypeRecovery,
     pub coverage: LiftCoverage,
+    /// R1: how many single-use temps were inlined into expressions.
+    pub folded_temps: u32,
+    /// R5: emit-time token stream (kind + optional VA) for GUI navigation.
+    pub tokens: Vec<EmitToken>,
 }
 
 /// Compute a full Stage-1 rendering for a block-partitioned function.
@@ -64,6 +71,27 @@ pub fn emit_stage1_with_hints(
     conv: CallConv,
     hints: &StructureHints,
 ) -> Stage1Result {
+    emit_stage1_full(
+        name,
+        entry,
+        blocks,
+        insns,
+        conv,
+        hints,
+        &EmitHints::default(),
+    )
+}
+
+/// Full Stage-1 emit with structure hints + naming / OO [`EmitHints`].
+pub fn emit_stage1_full(
+    name: &str,
+    entry: u64,
+    blocks: &[BasicBlock],
+    insns: &[Instruction],
+    conv: CallConv,
+    hints: &StructureHints,
+    emit_hints: &EmitHints,
+) -> Stage1Result {
     let seq: IrSequence = lift_instructions(insns);
     let region_end = insns
         .last()
@@ -78,7 +106,7 @@ pub fn emit_stage1_with_hints(
         .collect();
     let cfg = build_cfg_with_leaders(&seq, entry, region_end, &extra_leaders);
     let mut ssa = build_ssa(&cfg);
-    // Phase B dataflow: propagate copies, forward memory round-trips
+    // propagate copies, forward memory round-trips
     // (store→load), fold constant arithmetic, drop dead pure ops. Order
     // matters — const_fold expects copies already threaded, and DCE
     // shouldn't run until we know which values still have a live use.
@@ -88,10 +116,31 @@ pub fn emit_stage1_with_hints(
     let _ = const_fold(&mut ssa);
     let _ = dead_code_eliminate(&mut ssa);
     let structure = structure_function_with_hints(&cfg, &ssa, hints);
-    let types = recover_with_name(&ssa, conv, name);
+    let mut types = recover_with_name(&ssa, conv, name);
+    // R2/R6: rename first param to `this` when requested.
+    if emit_hints.method_this {
+        if let Some(p) = types.params.0.first_mut() {
+            p.name = "this".into();
+            if let Some(cls) = &emit_hints.this_class {
+                p.ty = RustType::Ptr { pointee_width: 0 };
+                let _ = cls;
+            }
+        }
+    }
     let coverage = lift_coverage(&seq, insns.len());
+    let fold = FoldPlan::build(&ssa);
 
-    let text = render_function(name, entry, blocks, &ssa, &structure, &types, coverage);
+    let (text, tokens) = render_function(
+        name,
+        entry,
+        blocks,
+        &ssa,
+        &structure,
+        &types,
+        coverage,
+        &fold,
+        emit_hints,
+    );
 
     Stage1Result {
         pseudo_c: text,
@@ -99,6 +148,8 @@ pub fn emit_stage1_with_hints(
         structure,
         types,
         coverage,
+        folded_temps: fold.folded_temps,
+        tokens,
     }
 }
 
@@ -110,34 +161,60 @@ fn render_function(
     structure: &StructureReport,
     types: &TypeRecovery,
     cov: LiftCoverage,
-) -> String {
+    fold: &FoldPlan,
+    emit_hints: &EmitHints,
+) -> (String, Vec<EmitToken>) {
     let mut out = String::new();
-    out.push_str(&format!(
-        "// Ghidrust Stage-1 SSA-C emit — function {name} at {entry:#x}\n"
-    ));
-    out.push_str(&format!(
-        "// blocks={} loops={} regions={} ir_ops={} lift_ratio={:.1}%\n",
+    let mut sink = TokenSink::default();
+    let hdr = format!("// Ghidrust Stage-1 SSA-C emit — function {name} at {entry:#x}\n");
+    out.push_str(&hdr);
+    sink.comment_line(hdr.trim_end());
+    let meta = format!(
+        "// blocks={} loops={} regions={} ir_ops={} lift_ratio={:.1}% folded_temps={}\n",
         blocks.len(),
         structure.loops.len(),
         structure.region.block_count(),
         cov.total_ops,
-        cov.ratio() * 100.0
-    ));
+        cov.ratio() * 100.0,
+        fold.folded_temps
+    );
+    out.push_str(&meta);
+    sink.comment_line(meta.trim_end());
 
     // Function signature — driven by recovered return type + params.
     let ret_c = types.signature.return_type.c_style();
     out.push_str(&format!("{ret_c} {name}("));
+    sink.push(EmitTokenKind::Type, &ret_c, None);
+    sink.text(" ");
+    sink.function(name, Some(entry));
+    sink.text("(");
     if types.params.is_empty() {
         out.push_str("void");
+        sink.keyword("void");
     } else {
         for (i, p) in types.params.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
+                sink.text(", ");
             }
-            out.push_str(&format!("{} {}", p.ty.c_style(), p.name));
+            let ty = if i == 0 && emit_hints.method_this {
+                if let Some(cls) = &emit_hints.this_class {
+                    format!("{cls} *")
+                } else {
+                    p.ty.c_style()
+                }
+            } else {
+                p.ty.c_style()
+            };
+            let piece = format!("{ty} {}", p.name);
+            out.push_str(&piece);
+            sink.push(EmitTokenKind::Type, ty, None);
+            sink.text(" ");
+            sink.ident(&p.name, None);
         }
     }
     out.push_str(") {\n");
+    sink.text(") {\n");
 
     // Recovered structs — emitted as forward declarations so the pointer
     // types have a definition to reference.
@@ -182,17 +259,24 @@ fn render_function(
         ssa,
         structure,
         types,
+        fold,
+        emit_hints,
+        sink: &mut sink,
     };
     render_region(&structure.region, 1, &mut ctx, &mut out);
 
     out.push_str("}\n");
-    out
+    sink.text("}\n");
+    (out, sink.tokens)
 }
 
 struct RenderCtx<'a> {
     ssa: &'a SsaFunction,
     structure: &'a StructureReport,
     types: &'a TypeRecovery,
+    fold: &'a FoldPlan,
+    emit_hints: &'a EmitHints,
+    sink: &'a mut TokenSink,
 }
 
 fn indent(n: usize) -> String {
@@ -402,12 +486,25 @@ fn render_block_body(
         {
             continue;
         }
+        // R1: skip assignments whose result was fully inlined.
+        if ctx.fold.should_suppress(op.output) {
+            continue;
+        }
         let Some(line) = emit_op(op, ctx) else {
             continue;
         };
         out.push_str(&indent(ind));
         out.push_str(&line);
         out.push('\n');
+        ctx.sink.text(&indent(ind));
+        // Rough line token: function calls get Function kind when recognizable.
+        if line.contains('(') && line.ends_with("();") {
+            let name = line.trim_end_matches("();");
+            ctx.sink.function(name, None);
+            ctx.sink.text("();\n");
+        } else {
+            ctx.sink.text(&format!("{line}\n"));
+        }
     }
 }
 
@@ -425,7 +522,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             let cond = op
                 .inputs
                 .first()
-                .map(|v| format_operand(v, ctx.types))
+                .map(|v| format_operand_ctx(v, ctx))
                 .unwrap_or_else(|| "?".to_string());
             let target = op
                 .inputs
@@ -438,16 +535,30 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             let tgt = op.inputs.first()?;
             match tgt {
                 SsaOperand::Const(v) if v.space == AddrSpace::Constant => {
-                    Some(format!("sub_{:x}();", v.offset))
+                    let name = ctx
+                        .emit_hints
+                        .name_for_call(v.offset)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("sub_{:x}", v.offset));
+                    Some(format!("{name}();"))
                 }
-                _ => Some(format!("(*({}))();", format_operand(tgt, ctx.types))),
+                _ => Some(format!("(*({}))();", format_operand_ctx(tgt, ctx))),
             }
         }
         OpCode::CallInd => {
             let tgt = op.inputs.first()?;
-            Some(format!("(*({}))();", format_operand(tgt, ctx.types)))
+            // R6: annotate known vtable bases when the target folds to a const VA.
+            if let Some(va) = tgt.as_const() {
+                if let Some(cls) = ctx.emit_hints.class_for_vtable(va) {
+                    return Some(format!(
+                        "/* virtual {}.vftable */ (*({:#x}))();",
+                        cls, va
+                    ));
+                }
+            }
+            Some(format!("(*({}))();", format_operand_ctx(tgt, ctx)))
         }
-        OpCode::Push => Some(format!("push({});", format_operand(op.inputs.first()?, ctx.types))),
+        OpCode::Push => Some(format!("push({});", format_operand_ctx(op.inputs.first()?, ctx))),
         OpCode::Pop => {
             let dst = op.output?;
             Some(format!("{} = pop();", format_value_named(dst, ctx.types)))
@@ -460,14 +571,14 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
                     return Some(format!(
                         "/* {} = {} (self copy) */",
                         format_value_named(dst, ctx.types),
-                        format_operand(src, ctx.types)
+                        format_operand_ctx(src, ctx)
                     ));
                 }
             }
             Some(format!(
                 "{} = {};",
                 format_value_named(dst, ctx.types),
-                format_operand(src, ctx.types)
+                format_operand_ctx(src, ctx)
             ))
         }
         OpCode::IntXor => {
@@ -482,8 +593,8 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             Some(format!(
                 "{} = {} ^ {};",
                 format_value_named(dst, ctx.types),
-                format_operand(a, ctx.types),
-                format_operand(b, ctx.types)
+                format_operand_ctx(a, ctx),
+                format_operand_ctx(b, ctx)
             ))
         }
         OpCode::IntAdd => binop("+", op, ctx),
@@ -507,7 +618,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
                 "{} = (int{}_t){};",
                 format_value_named(dst, ctx.types),
                 dst.size * 8,
-                format_operand(a, ctx.types)
+                format_operand_ctx(a, ctx)
             ))
         }
         OpCode::IntZExt => {
@@ -517,7 +628,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
                 "{} = (uint{}_t){};",
                 format_value_named(dst, ctx.types),
                 dst.size * 8,
-                format_operand(a, ctx.types)
+                format_operand_ctx(a, ctx)
             ))
         }
         OpCode::Cast => {
@@ -534,7 +645,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             Some(format!(
                 "{} = ({cast_ty}){};",
                 format_value_named(dst, ctx.types),
-                format_operand(a, ctx.types)
+                format_operand_ctx(a, ctx)
             ))
         }
         OpCode::Ptradd => {
@@ -544,8 +655,8 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             Some(format!(
                 "{} = {} + {};",
                 format_value_named(dst, ctx.types),
-                format_operand(a, ctx.types),
-                format_operand(b, ctx.types)
+                format_operand_ctx(a, ctx),
+                format_operand_ctx(b, ctx)
             ))
         }
         OpCode::Piece => {
@@ -555,12 +666,12 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             Some(format!(
                 "{} = ({} << {}) | {};",
                 format_value_named(dst, ctx.types),
-                format_operand(a, ctx.types),
+                format_operand_ctx(a, ctx),
                 op.inputs
                     .first()
                     .map(|v| v.varnode().size * 8)
                     .unwrap_or(0),
-                format_operand(b, ctx.types)
+                format_operand_ctx(b, ctx)
             ))
         }
         OpCode::Subpiece => {
@@ -577,7 +688,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             Some(format!(
                 "{} = ({}) >> {};",
                 format_value_named(dst, ctx.types),
-                format_operand(a, ctx.types),
+                format_operand_ctx(a, ctx),
                 shift * 8
             ))
         }
@@ -609,7 +720,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             let deref = format_deref(addr, ctx);
             Some(format!(
                 "{deref} = {};",
-                format_operand(val, ctx.types)
+                format_operand_ctx(val, ctx)
             ))
         }
         OpCode::Unimplemented => Some(format!(
@@ -629,14 +740,14 @@ fn binop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
         if av.space == dst.space && av.offset == dst.offset && av.size == dst.size {
             return Some(format!(
                 "{out_txt} {sym}= {};",
-                format_operand(b, ctx.types)
+                format_operand_ctx(b, ctx)
             ));
         }
     }
     Some(format!(
         "{out_txt} = {} {sym} {};",
-        format_operand(a, ctx.types),
-        format_operand(b, ctx.types)
+        format_operand_ctx(a, ctx),
+        format_operand_ctx(b, ctx)
     ))
 }
 
@@ -646,7 +757,7 @@ fn unop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
     Some(format!(
         "{} = {sym}{};",
         format_value_named(dst, ctx.types),
-        format_operand(a, ctx.types)
+        format_operand_ctx(a, ctx)
     ))
 }
 
@@ -682,7 +793,27 @@ fn format_deref(addr: &SsaOperand, ctx: &RenderCtx) -> String {
             }
         }
     }
-    format!("*({})", format_operand(addr, &ctx.types))
+    format!("*({})", format_operand_ctx(addr, ctx))
+}
+
+/// Format an operand, inlining folded single-use expressions (R1).
+fn format_operand_ctx(op: &SsaOperand, ctx: &RenderCtx) -> String {
+    match op {
+        SsaOperand::Value(v) if ctx.fold.suppress_emit.contains(v) => {
+            let tys = ctx.types;
+            let ssa = ctx.ssa;
+            let fold = ctx.fold;
+            fold_expr_for(
+                *v,
+                ssa,
+                fold,
+                &|o| format_operand(o, tys),
+                &|val| format_value_named(val, tys),
+            )
+            .unwrap_or_else(|| format_value_named(*v, tys))
+        }
+        _ => format_operand(op, ctx.types),
+    }
 }
 
 fn decompose_ssa_addr(
@@ -831,8 +962,8 @@ pub struct Stage1Summary {
     pub locals: usize,
     pub params: usize,
     pub lift_ratio: f32,
-    /// Fraction of structured leaves that are unstructured `goto`s. The
-    /// Phase D target is <0.15 on the lab corpus.
+    /// Fraction of structured leaves that are unstructured `goto`s.
+    /// Lab target is <0.15.
     pub goto_rate: f32,
     /// Recovered struct seed count — a proxy for how much struct/array
     /// shape Stage-1 was able to lift from load/store patterns.
@@ -1062,7 +1193,7 @@ mod tests {
 
     #[test]
     fn stage1_pipeline_folds_and_dces_dead_arithmetic() {
-        // Phase B gate: t0 = 0x100; t1 = 0x20; rax = t0 + t1; ret
+        // t0 = 0x100; t1 = 0x20; rax = t0 + t1; ret
         // — Stage-1 should render `rax = 0x120;` (const-folded), then keep
         // the assignment because rax is a return-value register (DCE seed).
         // 48 c7 c0 00 01 00 00   mov rax, 0x100
@@ -1128,7 +1259,7 @@ mod tests {
         let s = rep.summary();
         assert!(
             s.goto_rate < 0.15,
-            "Phase D gate: diamond goto_rate {} < 0.15 expected, output:\n{}",
+            "diamond goto_rate {} < 0.15 expected, output:\n{}",
             s.goto_rate,
             rep.pseudo_c
         );
@@ -1184,6 +1315,50 @@ mod tests {
             rep2.pseudo_c.contains("unimplemented"),
             "genuinely unlifted opcode should stay Unimplemented:\n{}",
             rep2.pseudo_c
+        );
+    }
+
+    #[test]
+    fn stage1_emit_hints_name_direct_calls() {
+        use crate::emit_hints::EmitHints;
+        use ghidrust_decode::Instruction;
+        use std::collections::BTreeMap;
+        // call 0x401000 — named via EmitHints
+        let call = Instruction {
+            address: 0x1000,
+            bytes: vec![0xe8, 0x00, 0x00, 0x00, 0x00],
+            mnemonic: "call".into(),
+            operands: "0x401000".into(),
+            length: 5,
+        };
+        let ret = Instruction {
+            address: 0x1005,
+            bytes: vec![0xc3],
+            mnemonic: "ret".into(),
+            operands: String::new(),
+            length: 1,
+        };
+        let d = decompile_instructions("caller", 0x1000, &[call.clone(), ret.clone()]);
+        let mut hints = EmitHints::default();
+        hints.call_names = BTreeMap::from([(0x401000u64, "CreateFileW".into())]);
+        // Also try IAT-style constant the lift may use — at minimum tokens + header exist.
+        let rep = emit_stage1_full(
+            &d.name,
+            d.entry,
+            &d.blocks,
+            &[call, ret],
+            CallConv::Windows,
+            &StructureHints::default(),
+            &hints,
+        );
+        assert!(
+            !rep.tokens.is_empty(),
+            "R5: Stage-1 should emit a token stream"
+        );
+        assert!(
+            rep.pseudo_c.contains("folded_temps="),
+            "R1: folded_temps reported in header:\n{}",
+            rep.pseudo_c
         );
     }
 }

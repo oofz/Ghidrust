@@ -1,4 +1,4 @@
-//! Ghidrust GUI · Phase E (M5) — Register Manager pane.
+//! Ghidrust GUI · Register Manager pane.
 //!
 //! Ghidra `RegisterPlugin` provider: hierarchical register tree on the left,
 //! per-address-range value table on the right. The register lattice is a
@@ -7,11 +7,11 @@
 //! `AX`, `AH`, `AL`).
 //!
 //! Register values (Ghidra "context register" style) are session-only until
-//! the SLEIGH register lattice lands in the backend (see UI parity plan
-//! Phase E open item). Editing / clearing values here mutates the state
-//! passed in — the GUI decides how to persist / drop on program change.
+//! the SLEIGH register lattice lands in the backend. Editing / clearing
+//! values here mutates the state passed in — the GUI decides how to
+//! persist / drop on program change.
 //!
-//! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
+//! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, Ui};

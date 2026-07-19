@@ -489,11 +489,21 @@ pub fn stage1_pseudo_c(
     va: u64,
     max_insns: usize,
 ) -> Result<(u64, String, f32), String> {
+    let (entry, text, ratio, _tokens) = stage1_pseudo_c_with_tokens(prog, va, max_insns)?;
+    Ok((entry, text, ratio))
+}
+
+/// Stage-1 with emit-time tokens for GUI navigation (R5).
+pub fn stage1_pseudo_c_with_tokens(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+) -> Result<(u64, String, f32, Vec<ghidrust_decomp::EmitToken>), String> {
     let entry = decompile_entry_for_va(prog, va);
     let (_d, rep) =
         ghidrust_decomp::decompile_stage1_at(prog, entry, max_insns, ghidrust_types::CallConv::Windows)
             .map_err(|e| e.to_string())?;
-    Ok((entry, rep.pseudo_c, rep.coverage.ratio()))
+    Ok((entry, rep.pseudo_c, rep.coverage.ratio(), rep.tokens))
 }
 
 /// Dispatcher used by the GUI to render whichever stage the user selected.

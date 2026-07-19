@@ -1,11 +1,11 @@
-//! Ghidrust GUI · Phase E (M5) — Entropy strip + Overview banner.
+//! Ghidrust GUI · Entropy strip + Overview banner.
 //!
 //! Renders the Ghidra `EntropyPlugin` and `OverviewPlugin` header strips as
 //! horizontal color bars sampled from executable memory blocks. Entropy is
 //! computed via `ghidrust-core::bulk_scan::entropy_windows_seq` (Shannon
 //! bits/byte, 0..8) so the strip is real, not fabricated.
 //!
-//! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
+//! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};

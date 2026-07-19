@@ -50,7 +50,7 @@ impl CommentKind {
 /// One record for a function-signature edit (Ghidra's `Edit Function Signature`).
 ///
 /// Values are captured as strings so Stage-0 doesn't need to depend on a real
-/// C parser; the plan (Phase C+) is to attach a parsed `FunctionPrototype`
+/// C parser; the plan is to attach a parsed `FunctionPrototype`
 /// once the DTM has real types.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FunctionSignatureEdit {
@@ -105,7 +105,7 @@ pub struct ProgramEdits {
     #[serde(default)]
     pub function_signatures: BTreeMap<u64, FunctionSignatureEdit>,
     /// User-defined data types (name → Ghidra-C style description).
-    /// Stage-0 stores as strings; Phase D+ upgrades to a parsed structure.
+    /// Stage-0 stores as strings; later upgrades to a parsed structure.
     #[serde(default)]
     pub user_types: BTreeMap<String, String>,
     /// User-applied types at specific VAs (Listing "Data Type" apply).
