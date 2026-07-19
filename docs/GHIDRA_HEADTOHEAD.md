@@ -5,9 +5,8 @@
 
 This document is the runbook for the `ghidrust ghidra-headtohead` subcommand
 and the underlying [`ghidrust_decomp::ghidra_oracle`] library API. It aligns
-with the decompiler pcode-parity plan
-(`.cursor/plans/decompiler_pcode_parity_9377412d.plan.md`) — specifically
-**Phase E** ("Fair Ghidra parity measurement"), which replaced the earlier
+with the decompiler pcode-parity plan (Phase F / Stage-1 product default) —
+specifically **Phase E** ("Fair Ghidra parity measurement"), which replaced the earlier
 brace-count proxy and stage-mismatched comparison with a shared-entry,
 Stage-1-vs-`DecompInterface`, normalized-token metric.
 

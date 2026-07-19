@@ -53,6 +53,19 @@ pub enum PaneKind {
     TextEditor,
     // Project Window providers (Ghidrust fuses Project + CodeBrowser today).
     ProjectTree,
+    // ── Agent Friction Closure §13 — tool panes (real backends, no stubs) ──
+    /// `global-metadata.dat` parser (ghidrust-il2cpp) — types / methods / images.
+    Il2cppMetadata,
+    /// CodeRegistration correlation (metadata method index → binary VA).
+    Il2cppMethods,
+    /// Unity native icall name‖fn table pairing.
+    Il2cppIcalls,
+    /// Folder → PE inventory (VERSIONINFO catalog) via `ghidrust_core::inventory`.
+    InstallInventory,
+    /// Bounded directory tree browser via `ghidrust_core::tree_index`.
+    FileSystemBrowser,
+    /// Spilled analysis artifact catalog + preview via `ghidrust_core::artifacts`.
+    AnalysisArtifacts,
 }
 
 impl PaneKind {
@@ -96,6 +109,13 @@ impl PaneKind {
         PaneKind::SymbolReferences,
         PaneKind::SymbolTable,
         PaneKind::TextEditor,
+        // Agent Friction Closure §13 — tool panes.
+        PaneKind::Il2cppMetadata,
+        PaneKind::Il2cppMethods,
+        PaneKind::Il2cppIcalls,
+        PaneKind::InstallInventory,
+        PaneKind::FileSystemBrowser,
+        PaneKind::AnalysisArtifacts,
     ];
 
     /// Ghidra display title (Window menu label / provider `TITLE`).
@@ -134,6 +154,12 @@ impl PaneKind {
             PaneKind::SymbolTable => "Symbol Table",
             PaneKind::SymbolTree => "Symbol Tree",
             PaneKind::TextEditor => "Text Editor",
+            PaneKind::Il2cppMetadata => "IL2CPP Metadata",
+            PaneKind::Il2cppMethods => "IL2CPP Methods",
+            PaneKind::Il2cppIcalls => "IL2CPP ICalls",
+            PaneKind::InstallInventory => "Install Inventory",
+            PaneKind::FileSystemBrowser => "File System Browser",
+            PaneKind::AnalysisArtifacts => "Analysis Artifacts",
         }
     }
 
@@ -181,6 +207,12 @@ impl PaneKind {
             PaneKind::SymbolTable => "SymbolTablePlugin",
             PaneKind::SymbolTree => "SymbolTreePlugin",
             PaneKind::TextEditor => "TextEditorManagerPlugin",
+            PaneKind::Il2cppMetadata => "Il2cppMetadataPlugin",
+            PaneKind::Il2cppMethods => "Il2cppMethodMapPlugin",
+            PaneKind::Il2cppIcalls => "Il2cppICallsPlugin",
+            PaneKind::InstallInventory => "InstallInventoryPlugin",
+            PaneKind::FileSystemBrowser => "FileSystemBrowserPlugin",
+            PaneKind::AnalysisArtifacts => "AnalysisArtifactsPlugin",
         }
     }
 
@@ -214,6 +246,14 @@ impl PaneKind {
                 | PaneKind::ChecksumGenerator
                 // Grok agent console (ghidrust-agent crate).
                 | PaneKind::AgentConsole
+                // Agent Friction Closure §13 — real backends via ghidrust-core /
+                // ghidrust-il2cpp (no empty stubs).
+                | PaneKind::Il2cppMetadata
+                | PaneKind::Il2cppMethods
+                | PaneKind::Il2cppIcalls
+                | PaneKind::InstallInventory
+                | PaneKind::FileSystemBrowser
+                | PaneKind::AnalysisArtifacts
         )
     }
 
@@ -253,6 +293,12 @@ impl PaneKind {
             PaneKind::SymbolTable => "pane_symbol_table",
             PaneKind::SymbolTree => "pane_symbol_tree_win",
             PaneKind::TextEditor => "pane_text_editor",
+            PaneKind::Il2cppMetadata => "pane_il2cpp_metadata",
+            PaneKind::Il2cppMethods => "pane_il2cpp_methods",
+            PaneKind::Il2cppIcalls => "pane_il2cpp_icalls",
+            PaneKind::InstallInventory => "pane_install_inventory",
+            PaneKind::FileSystemBrowser => "pane_fs_browser",
+            PaneKind::AnalysisArtifacts => "pane_analysis_artifacts",
         }
     }
 }
@@ -362,6 +408,12 @@ pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
         PaneKind::SymbolTable => "Uses Program::analysis.symbols + functions (flat table).",
         PaneKind::SymbolTree => "",
         PaneKind::TextEditor => "Backend pending — script editor lands in Phase F (M6).",
+        PaneKind::Il2cppMetadata => "",
+        PaneKind::Il2cppMethods => "",
+        PaneKind::Il2cppIcalls => "",
+        PaneKind::InstallInventory => "",
+        PaneKind::FileSystemBrowser => "",
+        PaneKind::AnalysisArtifacts => "",
     }
 }
 

@@ -905,7 +905,7 @@ fn write_report(rows: &[EvalRow], env: &Value, report_md: &Path, report_json: &P
 
     md.push_str("## How to re-run\n\n");
     md.push_str("```powershell\n");
-    md.push_str("cd F:/Repos/Ghidrust\n");
+    md.push_str("cd /path/to/Ghidrust\n");
     md.push_str("cargo test -p ghidrust-cli --test eval_analysis_decompile -- --nocapture\n");
     md.push_str("# release profile (honest timings):\n");
     md.push_str("cargo test -p ghidrust-cli --test eval_analysis_decompile --release -- --nocapture\n");

@@ -15,22 +15,34 @@ pub fn disassemble_at(prog: &Program, va: u64) -> Result<Instruction> {
 }
 
 pub fn disassemble_range(prog: &Program, start: u64, max_insns: usize) -> Result<Vec<Instruction>> {
-    disassemble_range_opts(prog, start, max_insns, false)
+    disassemble_range_opts(prog, start, max_insns, false).map(|r| r.insns)
+}
+
+/// Result of a continuity-aware disassembly pass.
+#[derive(Debug, Clone)]
+pub struct DisasmRangeResult {
+    pub insns: Vec<Instruction>,
+    /// Number of undecodable byte positions skipped (soft-fail holes).
+    pub decode_gaps: usize,
+    /// First gap VA when any gaps were skipped.
+    pub first_gap_va: Option<u64>,
 }
 
 /// Disassemble up to `max_insns` instructions from `start`.
 ///
 /// When `skip_bad` is true, undecodable bytes advance by one and continue
-/// (listing continuity across sparse decode holes).
+/// (listing continuity across sparse decode holes). `decode_gaps` counts skips.
 pub fn disassemble_range_opts(
     prog: &Program,
     start: u64,
     max_insns: usize,
     skip_bad: bool,
-) -> Result<Vec<Instruction>> {
+) -> Result<DisasmRangeResult> {
     let mut out = Vec::new();
     let mut va = start;
     let mut steps = 0usize;
+    let mut decode_gaps = 0usize;
+    let mut first_gap_va = None;
     let max_steps = if skip_bad {
         max_insns.saturating_mul(8).max(max_insns)
     } else {
@@ -46,6 +58,10 @@ pub fn disassemble_range_opts(
             }
             Err(_) => {
                 if skip_bad {
+                    if first_gap_va.is_none() {
+                        first_gap_va = Some(va);
+                    }
+                    decode_gaps += 1;
                     va = va.wrapping_add(1);
                     continue;
                 }
@@ -56,7 +72,11 @@ pub fn disassemble_range_opts(
     if out.is_empty() {
         return Err(Error::Decode(format!("no instructions at {start:#x}")));
     }
-    Ok(out)
+    Ok(DisasmRangeResult {
+        insns: out,
+        decode_gaps,
+        first_gap_va,
+    })
 }
 
 #[cfg(test)]
@@ -101,7 +121,13 @@ mod tests {
             executable: true,
         });
         let listing = disassemble_range_opts(&prog, 0x1000, 8, true).unwrap();
-        assert!(listing.iter().any(|i| i.mnemonic == "xor"), "{listing:?}");
-        assert!(listing.iter().any(|i| i.mnemonic == "ret"));
+        assert!(listing.decode_gaps >= 1);
+        assert_eq!(listing.first_gap_va, Some(0x1000));
+        assert!(
+            listing.insns.iter().any(|i| i.mnemonic == "xor"),
+            "{:?}",
+            listing.insns
+        );
+        assert!(listing.insns.iter().any(|i| i.mnemonic == "ret"));
     }
 }

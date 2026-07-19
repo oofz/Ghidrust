@@ -15,6 +15,46 @@ enum HostCmd {
     Shutdown,
 }
 
+/// Host-side drag selection over the painted grid (for clipboard copy).
+#[derive(Debug, Clone, Copy)]
+pub struct TermSelection {
+    pub anchor: (usize, usize),
+    pub focus: (usize, usize),
+}
+
+impl TermSelection {
+    pub fn normalized(&self) -> ((usize, usize), (usize, usize)) {
+        let a = self.anchor;
+        let b = self.focus;
+        if (a.1, a.0) <= (b.1, b.0) {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
+
+    pub fn contains(&self, col: usize, row: usize) -> bool {
+        let ((c0, r0), (c1, r1)) = self.normalized();
+        if row < r0 || row > r1 {
+            return false;
+        }
+        if r0 == r1 {
+            return col >= c0 && col <= c1;
+        }
+        if row == r0 {
+            return col >= c0;
+        }
+        if row == r1 {
+            return col <= c1;
+        }
+        true
+    }
+
+    pub fn is_empty_cell(&self) -> bool {
+        self.anchor == self.focus
+    }
+}
+
 /// Live embedded Grok TUI.
 pub struct GrokTermSession {
     grid: Arc<Mutex<TerminalGrid>>,
@@ -24,6 +64,11 @@ pub struct GrokTermSession {
     last_cols: u16,
     last_rows: u16,
     pub project_root: PathBuf,
+    /// Active click-drag selection for copy-to-clipboard.
+    pub selection: Option<TermSelection>,
+    selecting: bool,
+    /// egui time until which we show a brief "Copied" toast on the terminal.
+    copied_flash_until: Option<f64>,
 }
 
 impl GrokTermSession {
@@ -64,6 +109,9 @@ impl GrokTermSession {
             last_cols: cols,
             last_rows: rows,
             project_root,
+            selection: None,
+            selecting: false,
+            copied_flash_until: None,
         })
     }
 
@@ -73,6 +121,83 @@ impl GrokTermSession {
 
     pub fn write_bytes(&self, data: &[u8]) {
         let _ = self.cmd_tx.send(HostCmd::Write(data.to_vec()));
+    }
+
+    /// Copy current host selection to the system clipboard. Returns `true` if
+    /// non-empty text was copied.
+    pub fn copy_selection_to_clipboard(&self, ctx: &Context) -> bool {
+        let Some(sel) = self.selection else {
+            return false;
+        };
+        if sel.is_empty_cell() {
+            return false;
+        }
+        let (start, end) = sel.normalized();
+        let text = match self.grid.lock() {
+            Ok(g) => g.text_in_range(start, end),
+            Err(_) => return false,
+        };
+        if text.is_empty() {
+            return false;
+        }
+        ctx.copy_text(text);
+        true
+    }
+
+    /// Copy selection, show "Copied", and clear the highlight so it cannot
+    /// stick to the wrong cells after the TUI scrolls.
+    pub fn copy_selection_and_clear(&mut self, ctx: &Context) -> bool {
+        if !self.copy_selection_to_clipboard(ctx) {
+            self.clear_selection();
+            return false;
+        }
+        self.flash_copied(ctx);
+        self.clear_selection();
+        true
+    }
+
+    pub fn flash_copied(&mut self, ctx: &Context) {
+        self.copied_flash_until = Some(ctx.input(|i| i.time) + 1.25);
+        ctx.request_repaint();
+    }
+
+    pub fn copied_flash_visible(&self, ctx: &Context) -> bool {
+        let Some(until) = self.copied_flash_until else {
+            return false;
+        };
+        ctx.input(|i| i.time) < until
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.selecting = false;
+    }
+
+    pub fn begin_selection(&mut self, col: usize, row: usize) {
+        self.selecting = true;
+        self.selection = Some(TermSelection {
+            anchor: (col, row),
+            focus: (col, row),
+        });
+    }
+
+    pub fn update_selection(&mut self, col: usize, row: usize) {
+        if let Some(sel) = &mut self.selection {
+            sel.focus = (col, row);
+        }
+    }
+
+    pub fn end_selection(&mut self) {
+        self.selecting = false;
+        if let Some(sel) = self.selection {
+            if sel.is_empty_cell() {
+                self.selection = None;
+            }
+        }
+    }
+
+    pub fn is_selecting(&self) -> bool {
+        self.selecting
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
@@ -157,9 +282,45 @@ fn read_loop(
 }
 
 /// Encode egui key events into bytes for the PTY (xterm-ish).
+///
+/// Tuned for Grok Build TUI chords (`Ctrl+P/C/D/L/V…`, `Shift+Arrow`, `Alt+V`,
+/// `Ctrl+Enter`, `Shift+Tab`) — see grok-build `03-keyboard-shortcuts.md`.
+/// Plain printable characters are left to [`egui::Event::Text`].
 pub fn encode_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<u8>> {
     use egui::Key;
-    if modifiers.ctrl {
+    let ctrl = modifiers.ctrl || modifiers.command;
+    let alt = modifiers.alt;
+    let shift = modifiers.shift;
+
+    match key {
+        Key::Enter => {
+            if ctrl {
+                // modifyOtherKeys-style Ctrl+Enter (Grok send-now)
+                return Some(b"\x1b[27;5;13~".to_vec());
+            }
+            if alt || shift {
+                // Shift/Alt+Enter — newline / multiline send in Grok
+                return Some(b"\x1b\r".to_vec());
+            }
+            return Some(vec![b'\r']);
+        }
+        Key::Tab => {
+            if shift {
+                return Some(b"\x1b[Z".to_vec()); // Backtab — cycle mode
+            }
+            return Some(vec![b'\t']);
+        }
+        Key::Backspace => return Some(vec![0x7f]),
+        Key::Escape => return Some(vec![0x1b]),
+        _ => {}
+    }
+
+    if let Some(bytes) = encode_nav_key(key, ctrl, alt, shift) {
+        return Some(bytes);
+    }
+
+    // Ctrl+letter → classic C0 (Grok: Ctrl+P palette, Ctrl+C cancel, Ctrl+D scroll, …)
+    if ctrl && !alt {
         if let Some(c) = key_to_char(key) {
             let b = (c.to_ascii_uppercase() as u8).wrapping_sub(b'@');
             if (1..=26).contains(&b) {
@@ -170,34 +331,76 @@ pub fn encode_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<u8>>
             return Some(vec![0]);
         }
     }
-    match key {
-        Key::Enter => Some(vec![b'\r']),
-        Key::Tab => Some(vec![b'\t']),
-        Key::Backspace => Some(vec![0x7f]),
-        Key::Escape => Some(vec![0x1b]),
-        Key::ArrowUp => Some(b"\x1b[A".to_vec()),
-        Key::ArrowDown => Some(b"\x1b[B".to_vec()),
-        Key::ArrowRight => Some(b"\x1b[C".to_vec()),
-        Key::ArrowLeft => Some(b"\x1b[D".to_vec()),
-        Key::Home => Some(b"\x1b[H".to_vec()),
-        Key::End => Some(b"\x1b[F".to_vec()),
-        Key::PageUp => Some(b"\x1b[5~".to_vec()),
-        Key::PageDown => Some(b"\x1b[6~".to_vec()),
-        Key::Insert => Some(b"\x1b[2~".to_vec()),
-        Key::Delete => Some(b"\x1b[3~".to_vec()),
-        Key::F1 => Some(b"\x1bOP".to_vec()),
-        Key::F2 => Some(b"\x1bOQ".to_vec()),
-        Key::F3 => Some(b"\x1bOR".to_vec()),
-        Key::F4 => Some(b"\x1bOS".to_vec()),
-        Key::F5 => Some(b"\x1b[15~".to_vec()),
-        Key::F6 => Some(b"\x1b[17~".to_vec()),
-        Key::F7 => Some(b"\x1b[18~".to_vec()),
-        Key::F8 => Some(b"\x1b[19~".to_vec()),
-        Key::F9 => Some(b"\x1b[20~".to_vec()),
-        Key::F10 => Some(b"\x1b[21~".to_vec()),
-        Key::F11 => Some(b"\x1b[23~".to_vec()),
-        Key::F12 => Some(b"\x1b[24~".to_vec()),
-        _ => None,
+
+    // Alt+letter → ESC + char (Grok Windows image paste: Alt+V)
+    if alt && !ctrl {
+        if let Some(c) = key_to_char(key) {
+            let ch = if shift {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            };
+            return Some(vec![0x1b, ch as u8]);
+        }
+    }
+
+    // Function keys (optionally with modifiers via CSI)
+    encode_fn_key(key, ctrl, alt, shift)
+}
+
+fn xterm_mod_param(ctrl: bool, alt: bool, shift: bool) -> u8 {
+    // xterm: 1 + shift(1) + alt(2) + ctrl(4)
+    1 + (u8::from(shift)) + (u8::from(alt) * 2) + (u8::from(ctrl) * 4)
+}
+
+fn encode_nav_key(key: egui::Key, ctrl: bool, alt: bool, shift: bool) -> Option<Vec<u8>> {
+    use egui::Key;
+    let mod_n = xterm_mod_param(ctrl, alt, shift);
+    let (plain, final_ch, tilde_code): (&[u8], Option<char>, Option<u8>) = match key {
+        Key::ArrowUp => (b"\x1b[A", Some('A'), None),
+        Key::ArrowDown => (b"\x1b[B", Some('B'), None),
+        Key::ArrowRight => (b"\x1b[C", Some('C'), None),
+        Key::ArrowLeft => (b"\x1b[D", Some('D'), None),
+        Key::Home => (b"\x1b[H", Some('H'), None),
+        Key::End => (b"\x1b[F", Some('F'), None),
+        Key::PageUp => (b"\x1b[5~", None, Some(5)),
+        Key::PageDown => (b"\x1b[6~", None, Some(6)),
+        Key::Insert => (b"\x1b[2~", None, Some(2)),
+        Key::Delete => (b"\x1b[3~", None, Some(3)),
+        _ => return None,
+    };
+    if mod_n == 1 {
+        return Some(plain.to_vec());
+    }
+    if let Some(code) = tilde_code {
+        return Some(format!("\x1b[{code};{mod_n}~").into_bytes());
+    }
+    let ch = final_ch?;
+    Some(format!("\x1b[1;{mod_n}{ch}").into_bytes())
+}
+
+fn encode_fn_key(key: egui::Key, ctrl: bool, alt: bool, shift: bool) -> Option<Vec<u8>> {
+    use egui::Key;
+    let mod_n = xterm_mod_param(ctrl, alt, shift);
+    let (plain, code): (&[u8], u8) = match key {
+        Key::F1 => (b"\x1bOP", 11),
+        Key::F2 => (b"\x1bOQ", 12),
+        Key::F3 => (b"\x1bOR", 13),
+        Key::F4 => (b"\x1bOS", 14),
+        Key::F5 => (b"\x1b[15~", 15),
+        Key::F6 => (b"\x1b[17~", 17),
+        Key::F7 => (b"\x1b[18~", 18),
+        Key::F8 => (b"\x1b[19~", 19),
+        Key::F9 => (b"\x1b[20~", 20),
+        Key::F10 => (b"\x1b[21~", 21),
+        Key::F11 => (b"\x1b[23~", 23),
+        Key::F12 => (b"\x1b[24~", 24),
+        _ => return None,
+    };
+    if mod_n == 1 {
+        Some(plain.to_vec())
+    } else {
+        Some(format!("\x1b[{code};{mod_n}~").into_bytes())
     }
 }
 
@@ -232,4 +435,50 @@ fn key_to_char(key: egui::Key) -> Option<char> {
         Key::Z => 'z',
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+    use egui::{Key, Modifiers};
+
+    #[test]
+    fn ctrl_letters_are_c0() {
+        let m = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(encode_key(Key::P, m), Some(vec![0x10])); // Ctrl+P palette
+        assert_eq!(encode_key(Key::C, m), Some(vec![0x03]));
+        assert_eq!(encode_key(Key::D, m), Some(vec![0x04])); // scroll, not "signal"
+        assert_eq!(encode_key(Key::L, m), Some(vec![0x0c]));
+        assert_eq!(encode_key(Key::V, m), Some(vec![0x16])); // paste chord
+    }
+
+    #[test]
+    fn shift_arrow_uses_xterm_modifier() {
+        let m = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(encode_key(Key::ArrowRight, m), Some(b"\x1b[1;2C".to_vec()));
+    }
+
+    #[test]
+    fn alt_v_is_esc_v() {
+        let m = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(encode_key(Key::V, m), Some(b"\x1bv".to_vec()));
+    }
+
+    #[test]
+    fn shift_tab_is_backtab() {
+        let m = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(encode_key(Key::Tab, m), Some(b"\x1b[Z".to_vec()));
+    }
 }

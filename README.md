@@ -16,7 +16,7 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 | **Ghidra-shaped workflow** | Familiar labels and surfaces (Auto Analysis names, project import/analyze/export, listing + click FUN → decompile) without depending on the Ghidra JVM stack |
 | **Hand-rolled core** | PE/ELF, x86-64 decode, RTTI, analyzers, and the IR → SSA → structure → typed-C pipeline implemented in Rust — third-party RE libraries are avoided at runtime ([DEPENDENCIES.md](DEPENDENCIES.md)); Ghidra sources are reference-only |
 | **CPU-correct first** | CPU paths are the oracle; optional GPU paths must match or enrich them, not replace honesty with speed claims |
-| **Agent-ready** | Headless CLI + stdio MCP so coding agents can load, disassemble, analyze, look up strings/xrefs/imports/functions, inventory Unity/IL2CPP, and decompile without a GUI or ad-hoc PE scripts |
+| **Agent-ready** | Headless CLI + stdio MCP with artifact spill/drain, program identity (`path` or `project`+`file_id`), PE install inventory, RTTI catalog query, UTF-16 xref parity, live process bridge (Windows), and egui panes for every surface |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
 
 **Current maturity (Phase F, pcode-parity plan):** **Stage-1 is the product default** on CLI, GUI, and MCP. It runs the full hand-rolled pipeline: `ghidrust-ssa` builds CFG + dominators + Cytron phi placement + rename + copy/const/load-store propagation + DCE; `ghidrust-structure` recovers gotoless `if`/`while`/`do-while`/`loop`/`switch`/short-circuit regions with `break;` / `continue;` inside natural loops (goto rate <0.15 on lab fixture); `ghidrust-types` supplies a lattice covering `Bool` / `IntN` / `IntSigned` / `Ptr` / `StructPtr` / `ArrayPtr` / `Void` / `Any`, recovers return type + Windows/SysV prototypes (register + stack params), stack locals, and struct/array pointer seeds from load/store patterns rendered as `p->field_<off>` / `p[i]`. **Stage-0** (`decompile --stage0`) and **Stage-0.5** (`--stage05`) remain as regression oracles; the Phase-E head-to-head oracle enforces a shared-entry set and Stage-1-vs-Ghidra normalized-token similarity metric so no unfair comparison ships. **Never fabricates C**: irreducible regions or lift ratios <50% — again, no fabricated C. Head-to-head timings against Ghidra headless are captured (never fabricated) via `ghidrust ghidra-headtohead` and [`docs/GHIDRA_HEADTOHEAD.md`](docs/GHIDRA_HEADTOHEAD.md). Hex-Rays-class quality remains a later phase after the Ghidra bar is met. **Non-goals (today):** multi-ISA SLEIGH runtime, switch-statement structuring, debugger integration, or "GPU is always faster."
@@ -181,13 +181,21 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 
 | Command | Purpose | Key flags |
 |---------|---------|-----------|
+| `ghidrust load <path\|--project DIR --file-id ID>` | Load PE/ELF; JSON includes `resolved_path`, `sections`, informational `section_notes` | `--json`, `--out` |
 | `ghidrust strings <path>` | Scan ASCII and/or UTF-16LE strings (PE/ELF or `--raw` blob) | `--encoding`, `--filter`, `--match substr\|token\|whole\|glob`, `--limit N`, `--out FILE`, `--raw`, `--json` |
-| `ghidrust xrefs <path>` | Cross-references (absolute operand hex **and** RIP-relative `LEA`/`call`/`jmp`) | Exactly one of: `--to` / `--from` / `--string` / `--import`; `--skip-stubs` / `--classify` for IL2CPP |
+| `ghidrust xrefs <path>` | Cross-references (absolute + RIP-relative; string encoding parity) | Exactly one of: `--to` / `--from` / `--string` / `--import`; `--encoding ascii\|utf16le\|all`; `--skip-stubs` / `--classify` |
 | `ghidrust imports <path>` | PE import directory → DLL + symbol + IAT VA | `--dll NAME`, `--name NAME`, `--json` |
 | `ghidrust function-at <path> --addr HEX` | Containing analyzed function for a body VA (runs Function Start Search if needed) | `--json` |
-| `ghidrust il2cpp meta\|map\|stubs` | IL2CPP metadata + method map + resolve stubs | See [docs/IL2CPP.md](docs/IL2CPP.md) |
-| `ghidrust unity-inventory <dir>` | Unity player layout inventory (assemblies, plugins, metadata peek) | `--json`, `--out FILE` |
-| `ghidrust disasm <path>` | Listing; optional continuity across undecodable bytes | `--addr HEX`, `--count N`, `--skip-bad`, `--json` |
+| `ghidrust decompile <path>` | Containing-fn resolve + Stage-1 pseudo-C | `--addr` (mid-body ok), `--follow-stub`, `--json` |
+| `ghidrust gpu-decompile <path>` | GPU multipass at resolved entry; metrics JSON primary; `.gdecomp` opaque | `--addr`, `--metrics`, `--json` |
+| `ghidrust rtti <path>` | RTTI catalog (filter/exact/match; multi-vtable honest) | `--filter`/`--name`/`--exact`, `--match`, `--json` |
+| `ghidrust inventory <dir>` | Generic PE install inventory (exe/dll + VERSIONINFO; artifact if large) | `--max-depth`, `--hash`, `--json` |
+| `ghidrust tree <path>` | Bounded file tree index (existence/size; no unpack) | `--max-depth`, `--ext`, `--name`, `--json` |
+| `ghidrust artifact get\|query\|list` | Drain spilled analysis artifacts (`next_offset`) | `--offset`, `--limit`, `--json` |
+| `ghidrust process list\|attach\|detach\|modules\|read\|resolve\|regions` | Live Process Bridge (Windows; read-only MVP) | session_id / `--addr` / `--module` / `--rva` / `--max` |
+| `ghidrust il2cpp meta\|map\|stubs\|icalls` | IL2CPP metadata + method map + resolve stubs + icalls | See [docs/IL2CPP.md](docs/IL2CPP.md) |
+| `ghidrust unity-inventory <dir>` | Unity player layout (reuses PE VERSIONINFO helpers) | `--json`, `--out FILE` |
+| `ghidrust disasm <path>` | Listing; `decode_gaps` when `--skip-bad` | `--addr HEX`, `--count N`, `--skip-bad`, `--json` |
 
 ```bash
 # Wide + ASCII string search (token match + limit; BOM-free --out)
@@ -223,7 +231,7 @@ ghidrust decompile /path/to/GameAssembly.dll --addr 0x180012345 --follow-stub
 | **Stage-0.5 IR** (oracle) | `ghidrust decompile <path> --stage05 [--addr HEX] [--count N] [--verbose]` | IR-informed emit from the hand-rolled x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, `add/sub/or/and/xor/shl/shr` augmented-assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 scaffolding for uncovered ops. | stdout: `pseudo_c`. Metrics on stderr only with `--verbose`. `--json`: `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
 | **decompile-bench** | `ghidrust decompile-bench <path> [--functions N] [--count N] [--stage1] [--parallel] [--out FILE]` | Runs default analyzers, then benches Stage-0/0.5 (default) or Stage-1 (`--stage1`) across every discovered function; `--parallel` fans out per-entry Stage-1 across a rayon thread pool. | Text table (or JSON via `--json`); optional `--out FILE`. Report carries per-function `stage0_us`, `stage05_us`, `stage1_us`, `stage1_goto_count`, `stage1_leaf_count`, and per-function `pseudo_c` when Stage-1 is on. |
 | **ghidra-headtohead** (Phase E, fair) | `ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE]` | Fair Ghidra oracle: shared-entry intersection with Ghidra `DecompInterface` output, per-row Stage-1 vs Ghidra normalized-token similarity, per-entry Stage-1 wall time. Without `--ghidra` / `--captured` the report is methodology-only. | Text or JSON; each row carries `token_similarity`, `ghidrust_stage1_us`, `ghidra_wall_us`. See [`docs/GHIDRA_HEADTOHEAD.md`](docs/GHIDRA_HEADTOHEAD.md). |
-| **gpu-decompile** | `ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE]` | Full **GPU-resident** VRAM multipass decompile of the entry function: decode → leaders → blocks → emit kernels; single final download; asserts `mid_pipeline_host_reads == 0` and multipass-CPU equivalence. | `.gdecomp` binary dump at `--out`. stdout: pseudo-C. `--json` / `--metrics FILE` produces `{gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit if equivalence fails or a mid-pipeline host read is observed. |
+| **gpu-decompile** | `ghidrust gpu-decompile <path> [--addr HEX] [--out FILE] [--metrics FILE]` | Full **GPU-resident** VRAM multipass decompile at containing-fn resolve (mid-body `addr` ok): decode → leaders → blocks → emit kernels; single final download; asserts `mid_pipeline_host_reads == 0` and multipass-CPU equivalence. Metrics JSON is primary; `.gdecomp` is opaque. | `.gdecomp` binary dump at `--out`. stdout: pseudo-C. `--json` / `--metrics FILE` produces `{resolve, resolved_entry, gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit if equivalence fails or a mid-pipeline host read is observed. |
 | **re-bench** | `ghidrust re-bench <path> [--out FILE]` | CPU decompile of the entry + bulk RE on a padded haystack, once on CPU (parallel) and once on GPU / fallback; asserts equal bulk hit counts. | Text report to stdout (or JSON with `--json` / `--out`). Fields: `decompile_cpu {backend, ms, entry, name, blocks, edges, insns, lines, chars, pseudo_c_head}`, `bulk_cpu`, `bulk_gpu` (each: `mode, backend, ms, hits, haystack_bytes`), plus `note` explaining that decompile stays on CPU. |
 
 Two more benches are shipped and callable from the CLI even though they are not part of the analyzer/decompile eval sweep — they measure how the analyzer and RTTI GPU strategies compare against their CPU oracles:
@@ -273,8 +281,13 @@ The CLI is the `ghidrust` binary from `ghidrust-cli`. Prefer **absolute paths** 
 ### Everyday commands
 
 ```bash
-# Map a binary
+# Map a binary (path OR project + file_id)
 ghidrust load /path/to/app.exe --json
+ghidrust load --project ./MyProject --file-id <id> --json
+
+# Install / tree inventory (no OS shell needed)
+ghidrust inventory /path/to/InstallRoot --max-depth 8 --json
+ghidrust tree /path/to/GameDir --ext dll,dat --name "*meta*" --json
 
 # Listing (optional --skip-bad for undecodable holes)
 ghidrust disasm /path/to/app.exe --count 32
@@ -283,17 +296,32 @@ ghidrust disasm /path/to/app.exe --addr 0x140001000 --count 64 --skip-bad
 # Strings / xrefs / imports / containing function
 ghidrust strings /path/to/app.exe --encoding all --filter SomeName --match token --limit 50 --json
 ghidrust strings /path/to/blob.dat --raw --filter Camera --out camera.json --json
-ghidrust xrefs /path/to/app.exe --string SomeName --skip-stubs --classify --json
+ghidrust xrefs /path/to/app.exe --string SomeName --encoding all --skip-stubs --classify --json
 ghidrust xrefs /path/to/app.exe --to 0x140002010 --json
 ghidrust imports /path/to/app.exe --json
 ghidrust xrefs /path/to/app.exe --import CreateFileW --json
 ghidrust function-at /path/to/app.exe --addr 0x140001234 --json
+ghidrust rtti /path/to/app.exe --filter Widget --json
+
+# Artifacts (drain large spilled dumps)
+ghidrust artifact list --json
+ghidrust artifact query <id> --offset 0 --limit 64 --json
+
+# Live process (Windows; read-only)
+ghidrust process list --json
+ghidrust process attach <pid>
+ghidrust process modules <session_id> --json
+ghidrust process resolve <session_id> --module app.exe --rva 0x1234 --json
+ghidrust process read <session_id> --addr 0x7ff… --size 64 --json
+ghidrust process regions <session_id> --json
+ghidrust process detach <session_id>
 
 # Unity player inventory + IL2CPP metadata / stubs / method map
 ghidrust unity-inventory /path/to/GameDir --json
 ghidrust il2cpp meta /path/to/Game_Data/il2cpp_data/Metadata/global-metadata.dat --filter Camera --json
 ghidrust il2cpp map --binary /path/to/GameAssembly.dll --meta /path/to/.../global-metadata.dat --json
 ghidrust il2cpp stubs --binary /path/to/GameAssembly.dll --json
+ghidrust il2cpp icalls --binary /path/to/UnityPlayer.dll --filter Camera --json
 
 # List Auto Analysis names (Ghidra-compatible labels)
 ghidrust analyzers
@@ -312,8 +340,8 @@ ghidrust decompile /path/to/GameAssembly.dll --addr 0x180012345 --follow-stub
 # Wall-clock + lift-coverage bench across all discovered functions
 ghidrust decompile-bench /path/to/app.exe --functions 32 --count 128 --out bench.txt
 
-# Experimental GPU decompile → greppable dump
-ghidrust gpu-decompile /path/to/app.exe --out entry.gdecomp --metrics metrics.log --json
+# Experimental GPU decompile (mid-body addr resolves to containing entry)
+ghidrust gpu-decompile /path/to/app.exe --addr 0x140001234 --out entry.gdecomp --metrics metrics.log --json
 ```
 
 **`--gpu` on `analyze`** turns on GPU bulk strings (when available) and per-analyzer GPU seed enrichment. It is **not** the same as `gpu-decompile` (full VRAM multipass decompile).
@@ -348,20 +376,25 @@ MyProject/
 
 | Command | What it does |
 |---------|----------------|
-| `ghidrust load <path> [--json]` | Load PE/ELF, show map (PE also parses import/IAT directory into the program model) |
+| `ghidrust load <path\|--project DIR --file-id ID> [--json]` | Load PE/ELF; JSON includes `resolved_path`, `sections`, informational `section_notes` |
 | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--json]` | x86-64 listing; `--skip-bad` advances one byte on decode failure |
+| `ghidrust bytes <path> --addr HEX [--count N] [--json]` | Raw VA hex dump |
 | `ghidrust strings <path> [--raw] [--encoding …] [--filter SUB] [--match MODE] [--limit N] [--out FILE] [--json]` | String scan (blob-capable) |
-| `ghidrust xrefs <path> (--to\|--from\|--string\|--import) [--skip-stubs] [--classify] [--json]` | RIP-aware xrefs |
+| `ghidrust xrefs <path> (--to\|--from\|--string\|--import) [--encoding ascii\|utf16le\|all] [--skip-stubs] [--classify] [--json]` | RIP-aware xrefs; string encoding parity |
 | `ghidrust imports <path> [--dll NAME] [--name NAME] [--json]` | PE import / IAT slots |
 | `ghidrust function-at <path> --addr HEX [--json]` | Containing function for a body VA |
-| `ghidrust il2cpp meta\|map\|stubs …` | IL2CPP metadata / RVA map / resolve stubs ([docs/IL2CPP.md](docs/IL2CPP.md)) |
+| `ghidrust inventory <dir> [--max-depth N] [--hash] [--json]` | Generic PE install inventory (exe/dll + VERSIONINFO) |
+| `ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB] [--json]` | Bounded file tree index (existence/size; no unpack) |
+| `ghidrust artifact get\|query\|list …` | Drain / list spilled analysis artifacts (`next_offset`) |
+| `ghidrust process list\|attach\|detach\|modules\|read\|resolve\|regions …` | Live Process Bridge (Windows; read-only MVP) |
+| `ghidrust il2cpp meta\|map\|stubs\|icalls …` | IL2CPP metadata / RVA map / resolve stubs / engine icalls ([docs/IL2CPP.md](docs/IL2CPP.md)) |
 | `ghidrust unity-inventory <dir> [--out FILE] [--json]` | Unity player install inventory |
-| `ghidrust rtti <path> [--json]` | RTTI recovery only |
+| `ghidrust rtti <path> [--filter\|--name\|--exact] [--match MODE] [--json]` | RTTI catalog (filter/exact; multi-vtable honest) |
 | `ghidrust analyzers [--json]` | List Auto Analysis names |
 | `ghidrust analyze <path> [--analyzers a,b \| --analyzer NAME …] [--gpu] [--json]` | Run analyzers; `--gpu` = bulk strings + seed enrich |
-| `ghidrust decompile <path> [--addr HEX] [--count N] [--stage0\|--stage05\|--stage1] [--follow-stub] [--verbose] [--json]` | **CPU** decompile (**Stage-1** default; `--follow-stub` for IL2CPP resolve thunks) |
+| `ghidrust decompile <path> [--addr HEX] [--count N] [--stage0\|--stage05\|--stage1] [--follow-stub] [--verbose] [--json]` | **CPU** decompile (**Stage-1** default; containing-fn resolve; `--follow-stub` for IL2CPP) |
 | `ghidrust decompile-bench <path> [--functions N] [--count N] [--stage1] [--parallel] [--out F]` | Per-function wall-clock + lift-coverage across stages |
-| `ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE]` | **GPU-resident** multipass → `.gdecomp` |
+| `ghidrust gpu-decompile <path> [--addr HEX] [--out FILE] [--metrics FILE]` | **GPU-resident** multipass at resolved entry; metrics JSON; `.gdecomp` opaque |
 | `ghidrust bulk-bench <path>` | Seq / parallel CPU / GPU bulk string timings |
 | `ghidrust re-bench <path> [--out FILE]` | CPU decompile + bulk CPU then GPU metrics |
 | `ghidrust analyzer-bench <path> [--large] [--out FILE]` | All analyzers + decompile: CPU vs GPU |
@@ -407,7 +440,7 @@ The GUI is for humans. Agents should use the **CLI** or **MCP**, not drive the U
 cargo build -p ghidrust-cli --release
 ```
 
-Note the absolute path to the binary, e.g. `F:\Repos\Ghidrust\target\release\ghidrust.exe` on Windows or `/home/you/Ghidrust/target/release/ghidrust` on Linux/macOS.
+Note the absolute path to the binary, e.g. `C:\path\to\Ghidrust\target\release\ghidrust.exe` on Windows or `/path/to/Ghidrust/target/release/ghidrust` on Linux/macOS.
 
 ### 2. Register it in your client
 
@@ -417,7 +450,7 @@ Note the absolute path to the binary, e.g. `F:\Repos\Ghidrust\target\release\ghi
 {
   "mcpServers": {
     "ghidrust": {
-      "command": "F:/Repos/Ghidrust/target/release/ghidrust.exe",
+      "command": "C:/path/to/Ghidrust/target/release/ghidrust.exe",
       "args": ["mcp"]
     }
   }
@@ -430,7 +463,7 @@ Note the absolute path to the binary, e.g. `F:\Repos\Ghidrust\target\release\ghi
 {
   "mcpServers": {
     "ghidrust": {
-      "command": "F:/Repos/Ghidrust/target/release/ghidrust.exe",
+      "command": "C:/path/to/Ghidrust/target/release/ghidrust.exe",
       "args": ["mcp"]
     }
   }
@@ -439,13 +472,13 @@ Note the absolute path to the binary, e.g. `F:\Repos\Ghidrust\target\release\ghi
 
 **Other MCP clients** — same pattern: command = absolute path to `ghidrust` / `ghidrust.exe`, args = `["mcp"]`. Restart the client after editing config.
 
-On Linux/macOS you can use a shell wrapper if needed:
+On Linux/macOS:
 
 ```json
 {
   "mcpServers": {
     "ghidrust": {
-      "command": "/home/you/Ghidrust/target/release/ghidrust",
+      "command": "/path/to/Ghidrust/target/release/ghidrust",
       "args": ["mcp"]
     }
   }
@@ -456,26 +489,53 @@ On Linux/macOS you can use a shell wrapper if needed:
 
 | Tool | Args | Purpose |
 |------|------|---------|
-| `load` | `path` | Load PE/ELF, return map / sections |
-| `disassemble` | `path`, optional `addr`, `count` | x86-64 listing |
-| `rtti` | `path` | Recover RTTI class names / vtables |
+| `load` | `path` **or** `project`+`file_id` | Load PE/ELF; `resolved_path`, `sections`, `section_notes` |
+| `disassemble` | `path`, optional `addr`, `count` | Listing + containing-fn resolve + `decode_gaps` |
+| `rtti` | `path` | Full RTTI recover dump |
+| `rtti_query` | `path`, optional `filter`, `exact`, `match` | Catalog query; multi-vtable; artifact if large |
+| `artifact_get` / `artifact_query` / `artifact_list` | `id` / optional `offset`/`limit` / optional `max` | Drain or list spilled results (`next_offset`) |
+| `inventory` | `path`, optional `max_depth`, `hash` | Generic PE dir inventory + VERSIONINFO |
+| `list_tree` | `path`, optional `max_depth`, `extensions`, `name_glob` | Bounded tree index |
 | `list_analyzers` | — | Auto Analysis option names |
 | `analyze` | `path`, optional `analyzers[]`, optional `gpu` | Run analyzers (+ GPU enrich if `gpu: true`) |
 | `list_strings` / `search_strings` | `path`, optional `encoding` (`ascii`\|`utf16`\|`all`), `filter`, `match` (`substr`\|`token`\|`whole`\|`glob`), `min`, `limit`, `raw` | ASCII / UTF-16LE strings; `raw:true` for non-PE/ELF blobs |
 | `get_xrefs_to` | `path`, `addr`, optional `skip_stubs`, `classify` | Xrefs **to** a VA; IL2CPP resolve-stub filter/label |
 | `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs **from** a VA |
-| `get_string_xrefs` | `path`, `filter` | Resolve matching strings, then xrefs to each |
+| `get_string_xrefs` | `path`, `filter`, optional `encoding` | String xrefs with `ascii`\|`utf16le`\|`all` |
 | `list_imports` | `path`, optional `dll` / `name` | PE IAT slots |
 | `get_import_xrefs` | `path`, `name` | Code sites that reference an import IAT slot |
 | `function_at` / `get_function_by_address` | `path`, `addr` | Containing function for a body VA |
+| `read_bytes` | `path`, `addr`, optional `count` | Raw VA hex dump |
 | `il2cpp_meta` | `path`, optional `filter` | Parse `global-metadata.dat` (v27/29/31); fail closed if encrypted |
 | `il2cpp_map` | `binary`, `meta`, optional `filter` | Metadata ↔ RVA map (`rva` null when unproven) |
 | `il2cpp_stubs` | `binary`, optional `filter`, `max` | List IL2CPP resolve stubs by icall name |
-| `unity_inventory` | `path` | Unity player dir → assemblies, plugins, metadata, XR-related inventory |
-| `decompile` | `path`, optional `addr`, `count`, `stage`, `follow_stub` | Stage-1 default; `follow_stub` follows IL2CPP resolve thunks |
+| `il2cpp_icalls` | `binary`, optional `filter` | Engine icall name↔fn tables |
+| `unity_inventory` | `path` | Unity player dir → assemblies, plugins, metadata, PE versions |
+| `decompile` | `path`, optional `addr`, `count`, `stage`, `follow_stub` | Containing-fn resolve + Stage-1; returns `resolve` meta |
 | `list_gpu_strategies` | — | Per-analyzer GPU strategy matrix |
-| `gpu_decompile` | `path`, optional `out` | GPU-resident multipass decompile |
+| `gpu_decompile` | `path`, optional `addr`, `out` | GPU decompile at VA; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI with PCIe/device split |
+| `process_list` / `process_attach` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | session / pid / module / rva / max | Live Process Bridge (Windows; no write in MVP) |
+
+#### Live process (Windows)
+
+Attach read-only (`PROCESS_VM_READ`): `process list` → `attach <pid>` → `modules` → `resolve --module NAME --rva HEX` (`static_to_live`) → `read --addr LIVE --size N` → optional `regions` / `detach`. Short reads and access denied are explicit errors. Bytes ≠ recovered types — do not invent structs from live reads. GUI: Debugger → Targets / Modules / Memory Bytes / Regions / Static Mappings.
+
+#### Analysis artifacts
+
+Large MCP/CLI dumps spill to `%TEMP%/ghidrust-artifacts/`. Tool envelopes include `entry_count`, preview, `artifact_id`, and `next_offset`. Drain with `artifact_query` until `next_offset` is null — never treat truncated host UI text as complete.
+
+#### GUI Window homes (§13)
+
+| Capability | Window / pane |
+|---|---|
+| IL2CPP meta / methods / icalls | **IL2CPP Metadata**, **IL2CPP Methods**, **IL2CPP ICalls** |
+| PE / Unity inventory | **Install Inventory** |
+| Tree index | **File System Browser** |
+| Artifact spill | **Analysis Artifacts** |
+| GPU decompile | Analysis → **GPU Decompile…** |
+| Encoding / xrefs / RTTI / notes | Defined Strings, Symbol References, Symbol Tree Classes, Memory Map |
+| Live process | Debugger Targets / Modules / Memory Bytes / Regions |
 
 IL2CPP version matrix and Unity inventory schema: [docs/IL2CPP.md](docs/IL2CPP.md).
 
@@ -494,6 +554,13 @@ Example agent-facing call shapes (conceptual):
 { "name": "il2cpp_stubs", "arguments": { "binary": "…/GameAssembly.dll", "filter": "Camera" } }
 { "name": "decompile", "arguments": { "path": "…/GameAssembly.dll", "addr": "0x180012345", "follow_stub": true } }
 { "name": "analyze", "arguments": { "path": "…/app.exe", "analyzers": ["ASCII Strings", "Unicode Strings"], "gpu": true } }
+{ "name": "inventory", "arguments": { "path": "…/InstallRoot", "max_depth": 8 } }
+{ "name": "list_tree", "arguments": { "path": "…/GameDir", "extensions": "dll,dat" } }
+{ "name": "rtti_query", "arguments": { "path": "…/app.exe", "filter": "Widget" } }
+{ "name": "artifact_query", "arguments": { "id": "<artifact_id>", "offset": 0, "limit": 64 } }
+{ "name": "process_list", "arguments": {} }
+{ "name": "process_attach", "arguments": { "pid": 1234 } }
+{ "name": "process_resolve", "arguments": { "session_id": "…", "module": "app.exe", "rva": "0x1234" } }
 ```
 
 ### 4. Optional: agent skill

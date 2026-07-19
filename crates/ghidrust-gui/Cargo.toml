@@ -11,14 +11,22 @@ path = "src/main.rs"
 
 [dependencies]
 ghidrust-core = { workspace = true, features = ["gpu"] }
-# CPU Stage-0 (CFG → pseudo-C); do not call GPU decompile APIs from the GUI.
+# CPU Stage-0 (CFG → pseudo-C) is the default GUI decompiler. `gpu_decompile_to_file`
+# is also used by the Analysis → GPU Decompile dialog; it falls back to the CPU
+# multipass pipeline here because ghidrust-decomp's own `gpu` feature is not enabled
+# for this crate (no wgpu device requirement in the GUI process).
 ghidrust-decomp = { path = "../ghidrust-decomp" }
 ghidrust-types = { workspace = true }
+# §13 tool panes (IL2CPP Metadata/Methods/ICalls) — hand-rolled parser, no
+# Il2CppDumper/Cpp2IL at runtime.
+ghidrust-il2cpp = { workspace = true }
 # Grok Build glue (install + MCP/skill/context). The TUI itself is hosted via
 # an in-tree hand-rolled PTY (`src/grok_term/`) — no crates.io terminal stacks.
 ghidrust-agent = { workspace = true }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
+# Pin: egui 0.31 ↔ egui_dock 0.16 (do not bump egui just for newer egui_dock).
+egui_dock = { version = "0.16", features = ["serde"] }
 rfd = "0.15"
 # Phase H (M8) — layout persistence (`.tool.json`) via serde_json.
 serde = { version = "1", features = ["derive"] }

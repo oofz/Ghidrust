@@ -1,18 +1,13 @@
 //! Ghidrust GUI · Phase H (M8) — layout persistence + Configure dialog.
 //!
 //! Ghidra's `docking` framework lets users move / tab / float providers
-//! and save the result as a `.tool` XML preset. Ghidrust ships with
-//! floating `egui::Window` panes today (full `egui_dock` docking is a
-//! separate Phase H+ landing); this module gives users maximum-visible
-//! parity by:
+//! and save the result as a `.tool` XML preset. Ghidrust persists:
 //!
-//! - persisting per-pane visibility + tool preferences to
+//! - per-pane visibility + tool preferences to
 //!   `%APPDATA%/ghidrust/layouts/<name>.tool.json`
-//! - listing every plugin (all compile-time in Ghidrust) in a Configure
-//!   dialog so users can see the parity surface
-//!
-//! Full drag-tabbed-floating docking arrives with `egui_dock` — the plan
-//! documents that as the residual deferral for M8.
+//! - the center `egui_dock` tree (`dock_tree`) plus a legacy `center`
+//!   shim string for older layouts
+//! - a read-only Configure dialog listing every compile-time plugin
 //!
 //! Extracted per `dev/MODULARIZATION_PLAN.md` — new UI panes land here
 //! instead of piling into `main.rs`.
@@ -25,15 +20,20 @@ use std::path::PathBuf;
 ///
 /// `open_panes` uses pane ids (short strings) so old snapshots decode after
 /// panes are renamed (unknown ids are ignored on load).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SavedLayout {
     pub name: String,
     /// Pane-id → open bit.
     pub open_panes: BTreeMap<String, bool>,
     /// Dock checkbox states (`project_tree`, `program_tree`, `symbol_tree`, `console`).
     pub docks: BTreeMap<String, bool>,
-    /// Center tab (`overview` / `listing` / `decompiler` / `datatypes`).
+    /// Legacy center-tab shim (`overview` / `listing` / `decompiler` / `datatypes`).
+    /// Still written so older readers / tests keep working; prefer `dock_tree`.
     pub center: String,
+    /// Serialized `egui_dock::DockState<DockTab>` (serde feature). Absent on
+    /// layouts saved before center docking landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dock_tree: Option<serde_json::Value>,
     /// Theme (`dark` / `light`).
     pub theme: String,
     /// Free-form comment shown in Configure dialog.
@@ -305,12 +305,28 @@ mod tests {
             open_panes: [("pane_bookmarks".to_string(), true)].into_iter().collect(),
             docks: [("console".to_string(), true)].into_iter().collect(),
             center: "listing".into(),
+            dock_tree: None,
             theme: "dark".into(),
             comment: String::new(),
         };
         let text = serde_json::to_string(&l).unwrap();
         let back: SavedLayout = serde_json::from_str(&text).unwrap();
         assert_eq!(back, l);
+    }
+
+    #[test]
+    fn legacy_layout_without_dock_tree_still_deserializes() {
+        let text = r#"{
+            "name": "old",
+            "open_panes": {},
+            "docks": {},
+            "center": "decompiler",
+            "theme": "dark",
+            "comment": ""
+        }"#;
+        let back: SavedLayout = serde_json::from_str(text).unwrap();
+        assert_eq!(back.center, "decompiler");
+        assert!(back.dock_tree.is_none());
     }
 
     #[test]

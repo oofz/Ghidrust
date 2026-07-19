@@ -877,6 +877,25 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                         ("movaps".into(), format!("{rm}, {xmm}"))
                     }
                 }
+                // MOVDQA xmm, xmm/m128  /  MOVDQA xmm/m128, xmm (66 0F 6F / 7F)
+                0x6F | 0x7F if pfx.op_size => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    if op2 == 0x6F {
+                        ("movdqa".into(), format!("{xmm}, {rm}"))
+                    } else {
+                        ("movdqa".into(), format!("{rm}, {xmm}"))
+                    }
+                }
+                // XORPS xmm, xmm/m128
+                0x57 => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    ("xorps".into(), format!("{xmm}, {rm}"))
+                }
+                // PXOR xmm, xmm/m128 (66 0F EF)
+                0xEF if pfx.op_size => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    ("pxor".into(), format!("{xmm}, {rm}"))
+                }
                 // Jcc rel32
                 0x80..=0x8F => {
                     let names = [
@@ -1238,5 +1257,25 @@ mod tests {
         let i = decode_one(&[0x0f, 0x28, 0xc1], 0).unwrap();
         assert_eq!(i.mnemonic, "movaps");
         assert_eq!(i.operands, "xmm0, xmm1");
+    }
+
+    #[test]
+    fn decode_xorps_zeroing() {
+        // 0f 57 c0  xorps xmm0, xmm0
+        let i = decode_one(&[0x0f, 0x57, 0xc0], 0).unwrap();
+        assert_eq!(i.mnemonic, "xorps");
+        assert_eq!(i.operands, "xmm0, xmm0");
+    }
+
+    #[test]
+    fn decode_pxor_and_movdqa() {
+        // 66 0f ef c9  pxor xmm1, xmm1
+        let i = decode_one(&[0x66, 0x0f, 0xef, 0xc9], 0).unwrap();
+        assert_eq!(i.mnemonic, "pxor");
+        assert_eq!(i.operands, "xmm1, xmm1");
+        // 66 0f 6f c1  movdqa xmm0, xmm1
+        let m = decode_one(&[0x66, 0x0f, 0x6f, 0xc1], 0).unwrap();
+        assert_eq!(m.mnemonic, "movdqa");
+        assert_eq!(m.operands, "xmm0, xmm1");
     }
 }

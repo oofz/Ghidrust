@@ -23,6 +23,9 @@ pub struct XRef {
     pub kind: &'static str,
     /// Ghidra "From Preview" — mnemonic/operand text where computable.
     pub preview: String,
+    /// String encoding when this xref targets a string (`ascii`, `utf16le`); omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// Compute references **to** `target`.
@@ -43,6 +46,7 @@ pub fn xrefs_to(
                 to: r.to,
                 kind: static_kind(&r.kind),
                 preview: r.kind.clone(),
+                encoding: None,
             });
         }
     }
@@ -56,6 +60,7 @@ pub fn xrefs_to(
                     to: target,
                     kind: "ptr_table",
                     preview: format!("[{}] {:#x}", i, target),
+                    encoding: None,
                 });
             }
         }
@@ -102,6 +107,7 @@ fn scan_data_pointer_refs(prog: &Program, target: u64, out: &mut Vec<XRef>) {
                     to: target,
                     kind: "ptr",
                     preview: format!("dq {target:#x}"),
+                    encoding: None,
                 });
                 found += 1;
             }
@@ -124,6 +130,7 @@ pub fn xrefs_from(prog: &Program, source: u64, max_insns: usize) -> Vec<XRef> {
                     to: tgt,
                     kind: mnemonic_kind(&insn.mnemonic),
                     preview: format!("{} {}", insn.mnemonic, insn.operands),
+                    encoding: None,
                 });
             }
         }
@@ -166,19 +173,77 @@ pub fn xrefs_to_import(prog: &Program, import_name: &str) -> Vec<XRef> {
 
 /// Resolve string VA(s) by filter, then gather xrefs to each.
 pub fn xrefs_to_string_filter(prog: &Program, filter: &str) -> Vec<XRef> {
-    let Ok(strings) = crate::analyzers::collect_strings(prog, "all", 4, Some(filter)) else {
+    xrefs_to_string_filter_opts(prog, filter, "all", true)
+}
+
+/// String xrefs with encoding filter: `ascii` | `utf16` | `utf16le` | `all`.
+/// When `include_interior` is true, also match pointers into `[va, end_va)`.
+pub fn xrefs_to_string_filter_opts(
+    prog: &Program,
+    filter: &str,
+    encoding: &str,
+    include_interior: bool,
+) -> Vec<XRef> {
+    let enc = match encoding.to_ascii_lowercase().as_str() {
+        "ascii" => "ascii",
+        "utf16" | "utf16le" => "utf16",
+        _ => "all",
+    };
+    let Ok(strings) = crate::analyzers::collect_strings(prog, enc, 4, Some(filter)) else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for s in strings {
+        let enc_tag = normalize_encoding_tag(&s.encoding);
+        // Primary: xrefs to string start.
         let mut refs = xrefs_to(prog, s.va, None);
         for r in &mut refs {
             r.preview = format!("{}  ; \"{}\"", r.preview, truncate(&s.value, 48));
+            r.encoding = Some(enc_tag.clone());
         }
         out.extend(refs);
+        // Interior: code may LEA into mid-string (wide concatenation).
+        if include_interior {
+            let byte_len = if enc_tag == "utf16le" {
+                (s.length as u64).saturating_mul(2)
+            } else {
+                s.length as u64
+            };
+            let end = s.va.saturating_add(byte_len);
+            if end > s.va.saturating_add(1) {
+                // Sample a few interior VAs (every 2 bytes for utf16, else every 4).
+                let step = if enc_tag == "utf16le" { 2u64 } else { 4u64 };
+                let mut va = s.va.saturating_add(step);
+                let mut n = 0usize;
+                while va < end && n < 8 {
+                    let mut refs = xrefs_to(prog, va, None);
+                    for r in &mut refs {
+                        r.preview = format!(
+                            "{}  ; \"{}\" +{:#x}",
+                            r.preview,
+                            truncate(&s.value, 32),
+                            va - s.va
+                        );
+                        r.encoding = Some(enc_tag.clone());
+                        r.to = s.va; // normalize to string start for agent UX
+                    }
+                    out.extend(refs);
+                    va = va.saturating_add(step);
+                    n += 1;
+                }
+            }
+        }
     }
     finalize(&mut out);
     out
+}
+
+fn normalize_encoding_tag(raw: &str) -> String {
+    match raw.to_ascii_lowercase().as_str() {
+        "utf16" | "utf-16" | "utf16le" | "utf-16le" => "utf16le".into(),
+        "ascii" | "utf8" | "utf-8" => "ascii".into(),
+        other => other.to_string(),
+    }
 }
 
 /// Absolute hex literals in operands plus RIP-relative effective addresses.
@@ -304,6 +369,7 @@ fn scan_exec_xrefs_to(prog: &Program, target: u64, out: &mut Vec<XRef>) {
                             to: target,
                             kind: mnemonic_kind(&insn.mnemonic),
                             preview: format!("{} {}", insn.mnemonic, insn.operands),
+                            encoding: None,
                         });
                     }
                     off += insn.length.max(1) as usize;
@@ -326,6 +392,7 @@ fn push_listing_xrefs_to(
                 to: target,
                 kind: mnemonic_kind(&insn.mnemonic),
                 preview: format!("{} {}", insn.mnemonic, insn.operands),
+                encoding: None,
             });
         }
     }
@@ -428,6 +495,56 @@ mod tests {
         let refs = xrefs_to(&prog, entry, None);
         assert!(refs.iter().any(|r| r.kind == "ptr_table"));
         assert!(refs.iter().any(|r| r.kind == "call"));
+    }
+
+    #[test]
+    fn utf16_string_xrefs_tagged_encoding() {
+        let mut prog = Program::new("t".into(), "PE32+");
+        // UTF-16LE "WideLab\0" (min scan length is 4 code units)
+        let str_va = 0x140002000u64;
+        let mut wide = Vec::new();
+        for c in "WideLab".encode_utf16() {
+            wide.extend_from_slice(&c.to_le_bytes());
+        }
+        wide.extend_from_slice(&[0, 0]);
+        let insn_va = 0x140001000u64;
+        let next = insn_va + 7;
+        let disp = (str_va as i64) - (next as i64);
+        let disp_bytes = (disp as i32).to_le_bytes();
+        let mut code = vec![0x48, 0x8d, 0x05];
+        code.extend_from_slice(&disp_bytes);
+        code.push(0xc3);
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: insn_va,
+            size: code.len() as u64,
+            bytes: code,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog.blocks.push(MemoryBlock {
+            name: ".rdata".into(),
+            va: str_va,
+            size: wide.len() as u64,
+            bytes: wide,
+            readable: true,
+            writable: false,
+            executable: false,
+        });
+        let refs = xrefs_to_string_filter_opts(&prog, "WideLab", "utf16le", false);
+        assert!(
+            refs.iter().any(|r| {
+                r.from == insn_va
+                    && r.encoding.as_deref() == Some("utf16le")
+            }),
+            "{refs:?}"
+        );
+        let ascii_only = xrefs_to_string_filter_opts(&prog, "WideLab", "ascii", false);
+        assert!(
+            ascii_only.is_empty(),
+            "ascii filter should not match wide-only literal: {ascii_only:?}"
+        );
     }
 
     #[test]

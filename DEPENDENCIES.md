@@ -24,6 +24,7 @@ Open-source RE sources (Ghidra Decompiler / SLEIGH, iced-x86, academic papers) m
 | Crate | Why |
 |-------|-----|
 | **egui / eframe** (and their transitive deps) | Interactive CodeBrowser shell with Material 3–inspired Dark/Light chrome (not a full Material library). |
+| **egui_dock** `0.16` (feature `serde`) | IDE-style tab docking for the CodeBrowser center panes. Pin matches **egui 0.31 ↔ egui_dock 0.16** (newer egui_dock tracks newer egui; do not bump egui solely for docking). |
 | **serde / serde_json** | Minimal JSON for CLI `--json` and MCP JSON-RPC framing (stdio agent protocol). |
 | **rayon** | Work-stealing CPU pool for bulk RE scans and parallel analyze/decomp. |
 | **bincode** | Fast binary analysis persistence (`analysis.bin`) — multi-100MB pretty JSON is not viable for UI reopen. |

@@ -7,8 +7,9 @@
 use crate::grok_term::{self, GrokTermSession};
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_agent::{
-    grok_binary_path, install_command_for_platform, register_mcp_with_grok_cli,
-    write_project_mcp_config, write_project_skill, ProgramFacts, SystemPromptBuilder,
+    ensure_project_skill, grok_binary_path, install_command_for_platform,
+    register_mcp_with_grok_cli, start_checklist, write_project_mcp_config, ProgramFacts,
+    SystemPromptBuilder,
 };
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,10 @@ pub struct GrokPaneState {
     pub keyboard_captured: bool,
     /// Set after Start/Restart so the next paint focuses the terminal.
     pub request_term_focus: bool,
+    /// Project root we last attempted to auto-wire skill for (avoids per-frame retries).
+    pub skill_wired_root: Option<PathBuf>,
+    /// Fail-loud skill wire error (shown above the checklist when auto-install fails).
+    pub skill_wire_error: Option<String>,
 }
 
 impl GrokPaneState {
@@ -52,6 +57,8 @@ impl GrokPaneState {
             status: None,
             keyboard_captured: false,
             request_term_focus: false,
+            skill_wired_root: None,
+            skill_wire_error: None,
         }
     }
 
@@ -99,10 +106,18 @@ pub fn start_pty_session(
     write_project_mcp_config(project_root, ghidrust_bin).map_err(|e| e.to_string())?;
     // Best-effort CLI registry sync (files above are the source of truth).
     let _ = register_mcp_with_grok_cli(grok_bin, project_root, ghidrust_bin);
-    if let Some(src) = skill_source {
-        let _ = write_project_skill(project_root, src);
-    }
+    // Fail-loud skill: prefer disk source, else embedded SKILL.md (release installs).
+    ensure_project_skill(project_root, skill_source).map_err(|e| {
+        let dest = ghidrust_agent::project_skill_path(project_root);
+        format!(
+            "skill write failed ({e}); expected destination {}",
+            dest.display()
+        )
+    })?;
     write_ghidrust_agent_files(project_root, facts)?;
+    // Checklist is fail-loud in the Grok pane UI (red rows); do not abort Start
+    // after files were written — agents still need the TUI.
+    let _ = start_checklist(project_root);
 
     GrokTermSession::start(
         grok_bin.to_path_buf(),
@@ -135,7 +150,8 @@ fn write_ghidrust_agent_files(project_root: &Path, facts: &ProgramFacts) -> Resu
          Read `.grok/ghidrust-context.md` for live program facts and \
          `.grok/skills/ghidrust/SKILL.md` for the full tool catalog.\n\n\
          If a project file has saved analysis but nothing is loaded in the GUI, \
-         say so and use MCP `load` with the file id from the facts JSON.\n"
+         say so and use MCP `load` with `project` + `file_id` (or absolute `path`) \
+         from the facts JSON — never invent addresses.\n"
     );
     std::fs::write(project_root.join("AGENTS.md"), agents).map_err(|e| e.to_string())?;
     Ok(())
@@ -145,6 +161,7 @@ fn write_ghidrust_agent_files(project_root: &Path, facts: &ProgramFacts) -> Resu
 pub fn render_grok_pane(
     ui: &mut Ui,
     state: &mut GrokPaneState,
+    project_root: Option<&Path>,
     primary: Color32,
     muted: Color32,
     on_start: &mut dyn FnMut(u16, u16) -> Result<(), String>,
@@ -228,12 +245,26 @@ pub fn render_grok_pane(
 
     ui.separator();
 
+    // Start checklist — fail-loud rows for mcp/skill/agents/context so a
+    // broken setup is visible immediately instead of a silently toolless agent.
+    if let Some(root) = project_root {
+        // Auto-place embedded skill as soon as a project is visible in the Grok
+        // pane (not only on Start). Idempotent; fail-loud on write errors.
+        ensure_skill_for_project(state, root, None);
+        if let Some(err) = &state.skill_wire_error {
+            ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
+        }
+        render_start_checklist(ui, root, muted);
+        ui.separator();
+    }
+
     if state.session.is_none() {
         state.keyboard_captured = false;
         ui.small(
             RichText::new(
                 "Start embeds the real Grok Build TUI here (slash commands, /goal, /model, \
-                 sessions). On first Start we auto-wire project MCP (ghidrust), skill, and AGENTS.md.",
+                 sessions). Opening a project auto-installs `.grok/skills/ghidrust/SKILL.md` \
+                 from the embedded skill; Start also wires MCP, AGENTS.md, and context.",
             )
             .color(muted),
         );
@@ -251,6 +282,89 @@ pub fn render_grok_pane(
         if want_focus {
             state.request_term_focus = false;
         }
+    }
+}
+
+/// One fail-loud row in the Start checklist (mcp / skill / agents / context).
+pub struct StartChecklistRow {
+    pub label: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+fn checklist_label(id: &str) -> &'static str {
+    match id {
+        "mcp" => "MCP config",
+        "mcp_grok" => "MCP config (.grok)",
+        "skill" => "Skill",
+        "skill_hash" => "Skill hash",
+        "agents" => "Agents (AGENTS.md)",
+        "context" => "Context",
+        _ => "Check",
+    }
+}
+
+/// Verify the on-disk artifacts project-open / Start write actually exist —
+/// fail-loud rather than silently trusting that wiring succeeded.
+pub fn pane_start_checklist(project_root: &Path) -> Vec<StartChecklistRow> {
+    start_checklist(project_root)
+        .into_iter()
+        // Hash is included in the Skill detail string; skip the extra row.
+        .filter(|item| item.id != "skill_hash")
+        .map(|item| StartChecklistRow {
+            label: checklist_label(item.id).into(),
+            ok: item.ok,
+            detail: item.detail,
+        })
+        .collect()
+}
+
+/// Ensure `.grok/skills/ghidrust/SKILL.md` exists for `project_root`.
+///
+/// Called on project open and again from the Grok pane (once per root) so the
+/// Skill checklist row turns green without requiring Start first.
+pub fn ensure_skill_for_project(
+    state: &mut GrokPaneState,
+    project_root: &Path,
+    skill_source: Option<&Path>,
+) {
+    // One attempt per project root (success or fail-loud). Re-open clears this.
+    if state.skill_wired_root.as_deref() == Some(project_root) {
+        return;
+    }
+    match ensure_project_skill(project_root, skill_source) {
+        Ok(path) => {
+            state.skill_wired_root = Some(project_root.to_path_buf());
+            state.skill_wire_error = None;
+            let _ = path;
+        }
+        Err(e) => {
+            state.skill_wired_root = Some(project_root.to_path_buf());
+            let dest = ghidrust_agent::project_skill_path(project_root);
+            state.skill_wire_error = Some(format!(
+                "Skill auto-install failed ({e}); looked/wrote {}",
+                dest.display()
+            ));
+        }
+    }
+}
+
+/// Render the Start checklist as fail-loud rows (red text + actionable detail
+/// on failure) so a broken Grok session setup is visible before the user
+/// wonders why the agent has no MCP tools.
+pub fn render_start_checklist(ui: &mut Ui, project_root: &Path, muted: Color32) {
+    ui.small(RichText::new("Start checklist").color(muted).strong());
+    for row in pane_start_checklist(project_root) {
+        let color = if row.ok {
+            Color32::from_rgb(0x66, 0xBB, 0x6A)
+        } else {
+            Color32::from_rgb(0xE5, 0x39, 0x35)
+        };
+        ui.horizontal(|ui| {
+            ui.label(if row.ok { "✓" } else { "✗" });
+            ui.label(RichText::new(&row.label).color(color));
+            ui.small(RichText::new(&row.detail).color(muted));
+        });
     }
 }
 
@@ -288,5 +402,24 @@ mod tests {
         let s = GrokPaneState::new();
         assert!(s.session.is_none());
         assert_eq!(s.tab, BottomTab::Grok);
+    }
+
+    #[test]
+    fn ensure_skill_turns_checklist_skill_green() {
+        let dir = std::env::temp_dir().join(format!(
+            "ghidrust-gui-skill-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut state = GrokPaneState::new();
+        ensure_skill_for_project(&mut state, &dir, None);
+        assert!(state.skill_wire_error.is_none(), "{:?}", state.skill_wire_error);
+        let skill = pane_start_checklist(&dir)
+            .into_iter()
+            .find(|r| r.label == "Skill")
+            .expect("Skill row");
+        assert!(skill.ok, "detail={}", skill.detail);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

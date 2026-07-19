@@ -1,6 +1,7 @@
 //! Ghidrust analysis core — program model, PE/ELF, x86-64, RTTI, analyzer registry.
 
 pub mod analyzers;
+pub mod artifacts;
 pub mod bulk_scan;
 pub mod edits;
 pub mod gpu_analyzers;
@@ -8,12 +9,18 @@ pub mod disasm;
 pub mod elf;
 pub mod error;
 pub mod imports;
+pub mod inventory;
 pub mod io_util;
 pub mod pe;
+pub mod process;
 pub mod program;
 pub mod project;
+pub mod resolve;
 pub mod rtti;
+pub mod rtti_catalog;
+pub mod section_notes;
 pub mod theme;
+pub mod tree_index;
 pub mod xrefs;
 
 pub use analyzers::{
@@ -35,11 +42,32 @@ pub use gpu_analyzers::{
     merge_seeds_into_program, pad_large, seeds_equal, strategy_matrix, AnalyzerBenchRow,
     GpuStrategyClass,
 };
+pub use artifacts::{
+    artifact_get, artifact_query, envelope_or_spill, list_artifacts, spill_artifact,
+    ArtifactEnvelope, ArtifactMeta, DEFAULT_PREVIEW_LIMIT,
+};
 pub use disasm::{
-    decode_one, disassemble_at, disassemble_range, disassemble_range_opts, Instruction,
+    decode_one, disassemble_at, disassemble_range, disassemble_range_opts, DisasmRangeResult,
+    Instruction,
 };
 pub use imports::{filter_imports, load_imports, parse_pe_imports};
+pub use inventory::{
+    inventory_pe_dir, parse_version_info, version_info_for_file, version_info_path, PeInventory,
+    PeInventoryEntry, VersionInfo, PE_INVENTORY_SCHEMA,
+};
 pub use io_util::{sanitize_path_component, sanitized_out_name, write_json_no_bom};
+pub use process::{
+    process_attach, process_detach, process_list, process_modules, process_read, process_regions,
+    process_resolve, static_to_live, ModuleInfo, ProcessInfo, ProcessSession, ReadResult,
+    RegionInfo, ResolveLive,
+};
+pub use resolve::{resolve_function, resolve_result_json, ResolveResult, ResolveStatus};
+pub use rtti_catalog::{
+    clear_rtti_cache, enrich_class, rtti_catalog, rtti_query, RttiCatalogEntry, RttiMatchMode,
+    RttiQueryResult,
+};
+pub use section_notes::{section_notes_for, SectionNote};
+pub use tree_index::{list_tree, TreeEntry, TreeListOpts, TreeListResult};
 pub use edits::{
     CommentKind, EquateEdit, FunctionSignatureEdit, ProgramEditTotals, ProgramEdits, RetypeEdit,
     BUILTIN_TYPES,
@@ -59,7 +87,7 @@ pub use rtti::{recover_rtti, RttiClass, RttiReport};
 pub use theme::{m3_tokens, ThemeMode, M3Tokens};
 pub use xrefs::{
     instruction_targets, operand_addresses, rip_relative_targets, xrefs_from, xrefs_to,
-    xrefs_to_import, xrefs_to_string_filter, XRef,
+    xrefs_to_import, xrefs_to_string_filter, xrefs_to_string_filter_opts, XRef,
 };
 
 use std::path::{Path, PathBuf};

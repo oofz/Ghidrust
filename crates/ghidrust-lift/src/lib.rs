@@ -767,6 +767,13 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                 return ops;
             }
         }
+        // SSE moves / zeroing — continuity for XMM paths (16-byte unique slots).
+        "movups" | "movaps" | "movdqa" if parts.len() == 2 => {
+            return lift_xmm_move(ctx, parts[0], parts[1], addr, len, mnem, &insn.operands);
+        }
+        "xorps" | "pxor" if parts.len() == 2 => {
+            return lift_xmm_xor(ctx, parts[0], parts[1], mnem, &insn.operands);
+        }
         "lea" if parts.len() == 2 => {
             if let Some((dst, dsz)) = parse_reg(parts[0]) {
                 if let Some(mem) = parse_mem(parts[1]) {
@@ -1134,6 +1141,102 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
         "{} {}",
         insn.mnemonic, insn.operands
     ))]
+}
+
+fn xmm_slot(ctx: &mut LiftCtx, name: &str) -> Varnode {
+    // Stable-ish unique per xmm name within a lift session.
+    let id = match name.trim() {
+        "xmm0" => 0x100,
+        "xmm1" => 0x101,
+        "xmm2" => 0x102,
+        "xmm3" => 0x103,
+        "xmm4" => 0x104,
+        "xmm5" => 0x105,
+        "xmm6" => 0x106,
+        "xmm7" => 0x107,
+        "xmm8" => 0x108,
+        "xmm9" => 0x109,
+        "xmm10" => 0x10a,
+        "xmm11" => 0x10b,
+        "xmm12" => 0x10c,
+        "xmm13" => 0x10d,
+        "xmm14" => 0x10e,
+        "xmm15" => 0x10f,
+        _ => {
+            let u = ctx.take_unique(16);
+            return u;
+        }
+    };
+    Varnode {
+        space: AddrSpace::Unique,
+        offset: id,
+        size: 16,
+    }
+}
+
+fn is_xmm_name(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with("xmm") && t.len() <= 5
+}
+
+fn lift_xmm_move(
+    ctx: &mut LiftCtx,
+    dst: &str,
+    src: &str,
+    addr: u64,
+    len: u8,
+    mnem: &str,
+    raw: &str,
+) -> Vec<PcodeOp> {
+    if is_xmm_name(dst) && is_xmm_name(src) {
+        let d = xmm_slot(ctx, dst);
+        let s = xmm_slot(ctx, src);
+        return vec![PcodeOp::new(OpCode::Copy, Some(d), vec![s]).with_note(format!("{mnem} {raw}"))];
+    }
+    if is_xmm_name(dst) {
+        if let Some(mem) = parse_mem(src) {
+            let (mut ops, val) = load_from(ctx, &mem, 16, addr, len);
+            let d = xmm_slot(ctx, dst);
+            ops.push(PcodeOp::new(OpCode::Copy, Some(d), vec![val]).with_note(format!("{mnem} {raw}")));
+            return ops;
+        }
+    }
+    if is_xmm_name(src) {
+        if let Some(mem) = parse_mem(dst) {
+            let s = xmm_slot(ctx, src);
+            return store_to(ctx, &mem, s, addr, len)
+                .into_iter()
+                .map(|op| op.with_note(format!("{mnem} {raw}")))
+                .collect();
+        }
+    }
+    vec![PcodeOp::unimplemented(format!("{mnem} {raw}"))]
+}
+
+fn lift_xmm_xor(
+    ctx: &mut LiftCtx,
+    dst: &str,
+    src: &str,
+    mnem: &str,
+    raw: &str,
+) -> Vec<PcodeOp> {
+    if is_xmm_name(dst) && dst.trim() == src.trim() {
+        // xorps/pxor same reg → zero
+        let d = xmm_slot(ctx, dst);
+        return vec![PcodeOp::new(
+            OpCode::Copy,
+            Some(d),
+            vec![Varnode::constant(0, 16)],
+        )
+        .with_note(format!("{mnem} {raw} ; zero"))];
+    }
+    if is_xmm_name(dst) && is_xmm_name(src) {
+        let d = xmm_slot(ctx, dst);
+        let s = xmm_slot(ctx, src);
+        return vec![PcodeOp::new(OpCode::IntXor, Some(d.clone()), vec![d, s])
+            .with_note(format!("{mnem} {raw}"))];
+    }
+    vec![PcodeOp::unimplemented(format!("{mnem} {raw}"))]
 }
 
 fn lift_mov(

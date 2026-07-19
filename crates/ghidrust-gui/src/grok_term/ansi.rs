@@ -328,6 +328,53 @@ impl TerminalGrid {
         self.active().get(col, row)
     }
 
+    /// Extract visible text from an inclusive cell range (row-major).
+    ///
+    /// Skips wide-glyph continuations; trims trailing spaces per line.
+    pub fn text_in_range(
+        &self,
+        start: (usize, usize),
+        end: (usize, usize),
+    ) -> String {
+        let cols = self.cols();
+        let rows = self.rows();
+        if cols == 0 || rows == 0 {
+            return String::new();
+        }
+        let (c0, r0) = start;
+        let (c1, r1) = end;
+        let (sc, sr, ec, er) = if (r0, c0) <= (r1, c1) {
+            (c0.min(cols - 1), r0.min(rows - 1), c1.min(cols - 1), r1.min(rows - 1))
+        } else {
+            (c1.min(cols - 1), r1.min(rows - 1), c0.min(cols - 1), r0.min(rows - 1))
+        };
+
+        let mut out = String::new();
+        for row in sr..=er {
+            let col_start = if row == sr { sc } else { 0 };
+            let col_end = if row == er { ec } else { cols - 1 };
+            let mut line = String::new();
+            let mut col = col_start;
+            while col <= col_end {
+                let cell = self.cell(col, row);
+                if !cell.wide_cont {
+                    if cell.ch != '\0' {
+                        line.push(cell.ch);
+                    }
+                }
+                col += 1;
+            }
+            while line.ends_with(' ') {
+                line.pop();
+            }
+            out.push_str(&line);
+            if row != er {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     fn active(&self) -> &Buffer {
         if self.use_alt {
             &self.alt

@@ -2,12 +2,13 @@
 //! Icons: Google Material 3 geometry (see `icons.rs`); no emoji in the UI.
 
 mod agent_pane;
-mod grok_term;
 mod debugger;
 mod decomp_tokens;
+mod dock_tabs;
 mod entropy;
 mod events;
 mod graphs;
+mod grok_term;
 mod icons;
 mod layouts;
 mod menu_actions;
@@ -15,8 +16,11 @@ mod nav;
 mod panes;
 mod register_manager;
 mod scripts;
+mod tool_panes;
 
+use dock_tabs::DockTab;
 use eframe::egui::{self, Color32, Visuals};
+use egui_dock::{DockArea, DockState, Style as DockStyle, TabViewer};
 use ghidrust_core::{
     analyzer_catalog, analyzer_supports_gpu, disassemble_range, load_path, m3_tokens,
     set_preferred_bulk_mode, xrefs_from, xrefs_to, AnalysisRunReport, AnalyzerInfo, AnalyzerOutput,
@@ -183,6 +187,8 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Legacy focused-center shim (kept for tests + `.tool.json` `center` field).
+/// The live layout is `center_dock` (`egui_dock`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CenterPane {
     /// File summary + analysis counts (default after open/analyze).
@@ -190,6 +196,50 @@ enum CenterPane {
     Listing,
     Decompiler,
     DataTypes,
+}
+
+impl From<DockTab> for CenterPane {
+    fn from(tab: DockTab) -> Self {
+        match tab {
+            DockTab::Overview => CenterPane::Overview,
+            DockTab::Listing => CenterPane::Listing,
+            DockTab::Decompiler => CenterPane::Decompiler,
+            DockTab::DataTypes => CenterPane::DataTypes,
+        }
+    }
+}
+
+impl From<CenterPane> for DockTab {
+    fn from(pane: CenterPane) -> Self {
+        match pane {
+            CenterPane::Overview => DockTab::Overview,
+            CenterPane::Listing => DockTab::Listing,
+            CenterPane::Decompiler => DockTab::Decompiler,
+            CenterPane::DataTypes => DockTab::DataTypes,
+        }
+    }
+}
+
+/// Renders center dock tabs by forwarding into `GhidrustApp` pane UIs.
+struct CenterTabViewer<'a> {
+    app: &'a mut GhidrustApp,
+}
+
+impl TabViewer for CenterTabViewer<'_> {
+    type Tab = DockTab;
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        match *tab {
+            DockTab::Overview => self.app.ui_overview(ui),
+            DockTab::Listing => self.app.ui_listing_pane(ui),
+            DockTab::Decompiler => self.app.ui_decompiler_pane(ui),
+            DockTab::DataTypes => self.app.ui_dtm_pane(ui),
+        }
+    }
 }
 
 /// Root UI state bound to real analysis core (not a mock dataset).
@@ -210,7 +260,10 @@ pub struct GhidrustApp {
     last_analyzers_run: Vec<String>,
     analyzer_enabled: Vec<bool>,
     analyzer_infos: Vec<AnalyzerInfo>,
+    /// Legacy focused-center shim (synced from `center_dock`).
     center: CenterPane,
+    /// IDE-style dock tree for Listing / Overview / Decompiler / DTM.
+    center_dock: DockState<DockTab>,
     show_project_tree: bool,
     show_program_tree: bool,
     show_symbol_tree: bool,
@@ -292,6 +345,8 @@ pub struct GhidrustApp {
     symbol_table_filter: String,
     /// Filter for Defined Strings window.
     defined_strings_filter: String,
+    /// Defined Strings encoding filter: `"all"` | `"ascii"` | `"utf16le"`.
+    defined_strings_encoding: String,
     /// Phase B (M2) — plugin-event bus (Ghidra `PluginEvent` analog).
     event_bus: EventBus,
     /// Phase B (M2) — tokenised decompiler cache (rebuilt after every refresh_decompiler_at).
@@ -355,6 +410,8 @@ pub struct GhidrustApp {
     symbol_refs_filter: String,
     /// Symbol References focus (target VA) — set from Symbol Table row.
     symbol_refs_target: Option<u64>,
+    /// Hide IL2CPP resolve-stub source rows (`ghidrust_il2cpp::is_resolve_stub_va`).
+    symbol_refs_hide_stubs: bool,
     /// Equates Table filters + edit dialog.
     equates_filter: String,
     equates_selected: Option<(String, i64)>,
@@ -421,9 +478,15 @@ pub struct GhidrustApp {
     current_layout_name: String,
     // ── Grok Build agent console (Option C: ACP sidecar) ───────────────
     /// Per-window Grok pane state (session, transcript, install prompts, mode).
-    /// One project per window means one session at a time; audit + MCP config
-    /// are written to `<project>/.grok/` on session start.
+    /// One project per window means one session at a time; skill is auto-wired
+    /// into `<project>/.grok/skills/` on project open; MCP/context on Start.
     grok_pane: agent_pane::GrokPaneState,
+    // ── Agent Friction Closure §13 — tool panes ─────────────────────────
+    /// Session state for IL2CPP Metadata/Methods/ICalls, Install Inventory,
+    /// File System Browser, Analysis Artifacts, and the GPU Decompile dialog.
+    tool_panes: tool_panes::ToolPanesState,
+    /// Analysis → GPU Decompile… dialog visibility.
+    show_gpu_decompile_dialog: bool,
 }
 
 /// Phase D (M4) — Checksum Generator report (Ghidra `ComputeChecksumsPlugin`).
@@ -726,7 +789,8 @@ impl GhidrustApp {
             last_analyzers_run: Vec::new(),
             analyzer_enabled: enabled,
             analyzer_infos: infos,
-            center: CenterPane::Overview,
+            center: CenterPane::Listing,
+            center_dock: dock_tabs::default_dock_state(),
             show_project_tree: true,
             show_program_tree: true,
             show_symbol_tree: true,
@@ -783,6 +847,7 @@ impl GhidrustApp {
             functions_window_filter: String::new(),
             symbol_table_filter: String::new(),
             defined_strings_filter: String::new(),
+            defined_strings_encoding: "all".into(),
             event_bus: EventBus::new(),
             decomp_lines: Vec::new(),
             decomp_cross_line: None,
@@ -824,6 +889,7 @@ impl GhidrustApp {
             bytes_pane_rows: 24,
             symbol_refs_filter: String::new(),
             symbol_refs_target: None,
+            symbol_refs_hide_stubs: false,
             equates_filter: String::new(),
             equates_selected: None,
             show_equate_dialog: false,
@@ -873,6 +939,8 @@ impl GhidrustApp {
             layouts_cached: Vec::new(),
             current_layout_name: String::new(),
             grok_pane: agent_pane::GrokPaneState::new(),
+            tool_panes: tool_panes::ToolPanesState::default(),
+            show_gpu_decompile_dialog: false,
         }
     }
 
@@ -1004,6 +1072,25 @@ impl GhidrustApp {
         self.decomp_lift_ratio
     }
 
+    /// Focus a center dock tab. Listing/Decompiler prefer a side-by-side split.
+    fn focus_center_tab(&mut self, tab: DockTab) {
+        match tab {
+            DockTab::Listing | DockTab::Decompiler => {
+                dock_tabs::ensure_side_by_side(&mut self.center_dock, tab);
+            }
+            DockTab::Overview | DockTab::DataTypes => {
+                dock_tabs::focus_tab(&mut self.center_dock, tab);
+            }
+        }
+        self.center = tab.into();
+    }
+
+    fn sync_center_from_dock(&mut self) {
+        self.center = DockTab::from_id(dock_tabs::active_center_id(&self.center_dock))
+            .unwrap_or(DockTab::Overview)
+            .into();
+    }
+
     /// Symbol Tree / Navigation: focus a function entry in Listing and update Decompiler.
     pub fn focus_function(&mut self, entry: u64) {
         let addr = format!("{entry:#x}");
@@ -1014,7 +1101,7 @@ impl GhidrustApp {
         }
         self.focused_function_entry = Some(entry);
         self.refresh_decompiler_at(entry);
-        self.center = CenterPane::Decompiler;
+        self.focus_center_tab(DockTab::Decompiler);
         let name = self
             .program
             .as_ref()
@@ -1872,7 +1959,7 @@ impl GhidrustApp {
             self.listing.len()
         );
         self.log(self.status.clone());
-        self.center = CenterPane::Listing;
+        self.focus_center_tab(DockTab::Listing);
     }
 
     /// Navigation → Go To Address.
@@ -1880,7 +1967,7 @@ impl GhidrustApp {
     pub fn goto_address_str(&mut self, s: &str) -> Result<(), String> {
         let va = parse_address(s)?;
         self.listing_focus_va = Some(va);
-        self.center = CenterPane::Listing;
+        self.focus_center_tab(DockTab::Listing);
 
         if let Some(i) = listing_index_at_or_before(&self.listing, va) {
             self.push_selection_undo();
@@ -1938,7 +2025,7 @@ impl GhidrustApp {
 
     /// Navigation → Go To entry.
     pub fn goto_entry(&mut self) {
-        self.center = CenterPane::Listing;
+        self.focus_center_tab(DockTab::Listing);
         if let Some(prog) = &self.program {
             if let Some(e) = prog.entry {
                 let _ = self.goto_address_str(&format!("{e:#x}"));
@@ -2511,7 +2598,7 @@ impl GhidrustApp {
             let _ = self.save_results();
             self.log("Results saved to project (results/ + exports/).");
         }
-        self.center = CenterPane::Overview;
+        self.focus_center_tab(DockTab::Overview);
         self.show_symbol_tree = true;
         // Function list / names may have changed — drop cache and re-seed Stage-0.
         self.clear_decompiler_cache();
@@ -2613,6 +2700,7 @@ impl GhidrustApp {
         self.show_startup_picker = false;
         self.project = Some(p);
         self.active_file_id = None;
+        self.ensure_project_skill_wired();
         Ok(())
     }
 
@@ -2635,11 +2723,38 @@ impl GhidrustApp {
         // Auto-open active file if any
         if let Some(id) = p.meta.active_id.clone() {
             self.project = Some(p);
+            self.ensure_project_skill_wired();
             let _ = self.open_project_file(&id);
         } else {
             self.project = Some(p);
+            self.ensure_project_skill_wired();
         }
         Ok(())
+    }
+
+    /// Auto-install embedded (or workspace) skill into the open project so the
+    /// Grok Start checklist Skill row is green before the user clicks Start.
+    fn ensure_project_skill_wired(&mut self) {
+        let Some(root) = self.project.as_ref().map(|p| p.root.clone()) else {
+            return;
+        };
+        let (_body, skill_source) = load_skill_body();
+        // Reset so a new project root always re-attempts wire.
+        self.grok_pane.skill_wired_root = None;
+        agent_pane::ensure_skill_for_project(
+            &mut self.grok_pane,
+            &root,
+            skill_source.as_deref(),
+        );
+        if let Some(err) = &self.grok_pane.skill_wire_error {
+            self.log_error(err.clone());
+        } else if let Some(path) = self
+            .project
+            .as_ref()
+            .map(|p| ghidrust_agent::project_skill_path(&p.root))
+        {
+            self.log(format!("Agent skill ready at {}", path.display()));
+        }
     }
 
     pub fn import_into_project(&mut self) -> Result<(), String> {
@@ -2746,7 +2861,7 @@ impl GhidrustApp {
         {
             self.refresh_decompiler_at(va);
         }
-        self.center = CenterPane::Overview;
+        self.focus_center_tab(DockTab::Overview);
         self.show_symbol_tree = true;
         if let Some(p) = self.project.as_mut() {
             let _ = p.set_active(id);
@@ -2916,9 +3031,18 @@ impl GhidrustApp {
         let mut do_probe = false;
         let mut start_size: Option<(u16, u16)> = None;
 
+        let checklist_root: Option<std::path::PathBuf> = match &self.project {
+            Some(p) => Some(p.root.clone()),
+            None => self
+                .grok_pane
+                .session
+                .as_ref()
+                .map(|s| s.project_root.clone()),
+        };
         agent_pane::render_grok_pane(
             ui,
             &mut self.grok_pane,
+            checklist_root.as_deref(),
             primary,
             muted,
             &mut |cols, rows| {
@@ -3093,6 +3217,79 @@ impl GhidrustApp {
         self.grok_pane.request_term_focus = true;
         self.grok_pane.keyboard_captured = true;
         Ok(())
+    }
+
+    /// Analysis → GPU Decompile… — resolve the dialog's address (containing
+    /// function honesty via `resolve_function`) then run
+    /// `ghidrust_decomp::gpu_decompile_to_file` (GPU pipeline with automatic
+    /// CPU multipass fallback outside the `gpu` feature).
+    fn run_gpu_decompile_dialog(&mut self) {
+        let dialog = &mut self.tool_panes.gpu_decompile;
+        dialog.error = None;
+        dialog.resolve = None;
+        dialog.summary = None;
+        let max_bytes: usize = dialog.max_bytes_input.trim().parse().unwrap_or(256).max(32);
+        let addr_input = dialog.addr_input.trim().to_string();
+        let Some(prog) = self.program.as_mut() else {
+            self.tool_panes.gpu_decompile.error = Some("no program loaded".into());
+            return;
+        };
+        let addr = if addr_input.is_empty() {
+            prog.entry.unwrap_or(prog.image_base)
+        } else {
+            match parse_address(&addr_input) {
+                Ok(a) => a,
+                Err(e) => {
+                    self.tool_panes.gpu_decompile.error = Some(format!("bad address: {e}"));
+                    return;
+                }
+            }
+        };
+        let resolve = match ghidrust_core::resolve_function(prog, addr) {
+            Ok(r) => r,
+            Err(e) => {
+                self.tool_panes.gpu_decompile.error = Some(format!("resolve_function: {e}"));
+                return;
+            }
+        };
+        if !resolve.ok {
+            self.tool_panes.gpu_decompile.resolve = Some(resolve);
+            self.tool_panes.gpu_decompile.error =
+                Some("address did not resolve to a function — see resolve_status above".into());
+            return;
+        }
+        let entry = resolve.resolved_entry.unwrap_or(addr);
+        let dump_path = std::env::temp_dir().join(format!("ghidrust-gpu-decompile-{entry:016x}.txt"));
+        match ghidrust_decomp::gpu_decompile_to_file(prog, Some(entry), &dump_path, max_bytes) {
+            Ok(rep) => {
+                let preview: String = rep.pseudo_c.chars().take(4000).collect();
+                self.tool_panes.gpu_decompile.summary = Some(tool_panes::GpuDecompileSummary {
+                    backend: rep.backend,
+                    device: rep.device,
+                    entry: rep.entry,
+                    name: rep.name,
+                    ms: rep.ms,
+                    device_ms: rep.device_ms,
+                    pcie_upload_ms: rep.pcie_upload_ms,
+                    pcie_download_ms: rep.pcie_download_ms,
+                    mid_pipeline_host_reads: rep.mid_pipeline_host_reads,
+                    dump_path: rep.dump_path,
+                    dump_bytes: rep.dump_bytes,
+                    ir_count: rep.ir_count,
+                    block_count: rep.block_count,
+                    pseudo_c_preview: preview,
+                });
+                self.tool_panes.gpu_decompile.resolve = Some(resolve);
+                self.log(format!(
+                    "GPU Decompile · {:#x} · backend={}",
+                    entry, self.tool_panes.gpu_decompile.summary.as_ref().unwrap().backend
+                ));
+            }
+            Err(e) => {
+                self.tool_panes.gpu_decompile.resolve = Some(resolve);
+                self.tool_panes.gpu_decompile.error = Some(format!("gpu_decompile_to_file: {e}"));
+            }
+        }
     }
 
     /// Menu / pane identifiers present in the shell (for structural tests).
@@ -3530,6 +3727,39 @@ impl GhidrustApp {
                 PaneKind::Python => {
                     win.default_size(egui::vec2(640.0, 420.0))
                         .show(ctx, |ui| self.ui_mcp_repl_pane(ui, muted, primary));
+                }
+                // Agent Friction Closure §13 — tool panes (real backends).
+                PaneKind::Il2cppMetadata => {
+                    win.default_size(egui::vec2(720.0, 560.0)).show(ctx, |ui| {
+                        tool_panes::ui_il2cpp_metadata(ui, &mut self.tool_panes.il2cpp_meta, muted);
+                    });
+                }
+                PaneKind::Il2cppMethods => {
+                    let prog = self.program.as_ref();
+                    win.default_size(egui::vec2(760.0, 560.0)).show(ctx, |ui| {
+                        tool_panes::ui_il2cpp_methods(ui, &mut self.tool_panes.il2cpp_methods, prog, muted);
+                    });
+                }
+                PaneKind::Il2cppIcalls => {
+                    let prog = self.program.as_ref();
+                    win.default_size(egui::vec2(760.0, 560.0)).show(ctx, |ui| {
+                        tool_panes::ui_il2cpp_icalls(ui, &mut self.tool_panes.il2cpp_icalls, prog, muted);
+                    });
+                }
+                PaneKind::InstallInventory => {
+                    win.default_size(egui::vec2(760.0, 520.0)).show(ctx, |ui| {
+                        tool_panes::ui_install_inventory(ui, &mut self.tool_panes.install_inventory, muted);
+                    });
+                }
+                PaneKind::FileSystemBrowser => {
+                    win.default_size(egui::vec2(720.0, 520.0)).show(ctx, |ui| {
+                        tool_panes::ui_file_system_browser(ui, &mut self.tool_panes.fs_browser, muted);
+                    });
+                }
+                PaneKind::AnalysisArtifacts => {
+                    win.default_size(egui::vec2(820.0, 520.0)).show(ctx, |ui| {
+                        tool_panes::ui_analysis_artifacts(ui, &mut self.tool_panes.artifacts, muted);
+                    });
                 }
                 _ => {
                     win.show(ctx, |ui| {
@@ -3992,13 +4222,8 @@ impl GhidrustApp {
         docks.insert("program_tree".into(), self.show_program_tree);
         docks.insert("symbol_tree".into(), self.show_symbol_tree);
         docks.insert("console".into(), self.show_console);
-        let center = match self.center {
-            CenterPane::Overview => "overview",
-            CenterPane::Listing => "listing",
-            CenterPane::Decompiler => "decompiler",
-            CenterPane::DataTypes => "datatypes",
-        }
-        .to_string();
+        let center = dock_tabs::active_center_id(&self.center_dock).to_string();
+        let dock_tree = serde_json::to_value(&self.center_dock).ok();
         let theme = match self.theme {
             ThemeMode::Dark => "dark",
             ThemeMode::Light => "light",
@@ -4009,6 +4234,7 @@ impl GhidrustApp {
             open_panes,
             docks,
             center,
+            dock_tree,
             theme,
             comment: String::new(),
         }
@@ -4047,12 +4273,15 @@ impl GhidrustApp {
         if let Some(v) = layout.docks.get("console") {
             self.show_console = *v;
         }
-        self.center = match layout.center.as_str() {
-            "listing" => CenterPane::Listing,
-            "decompiler" => CenterPane::Decompiler,
-            "datatypes" => CenterPane::DataTypes,
-            _ => CenterPane::Overview,
-        };
+        if let Some(value) = &layout.dock_tree {
+            match serde_json::from_value::<DockState<DockTab>>(value.clone()) {
+                Ok(dock) => self.center_dock = dock,
+                Err(_) => self.center_dock = dock_tabs::from_legacy_center(&layout.center),
+            }
+        } else {
+            self.center_dock = dock_tabs::from_legacy_center(&layout.center);
+        }
+        self.sync_center_from_dock();
         self.theme = match layout.theme.as_str() {
             "light" => ThemeMode::Light,
             _ => ThemeMode::Dark,
@@ -5294,6 +5523,40 @@ impl GhidrustApp {
         {
             self.refresh_decompiler_at(va);
         }
+        // requested_addr vs resolved_entry (honest containing-function resolve)
+        // plus an IL2CPP `follow_stub` chip when the resolved entry classifies
+        // as a lazy resolve thunk with a populated slot.
+        if let Some(va) = self.listing_focus_va.or(self.decomp_entry) {
+            if let Some(prog) = self.program.as_mut() {
+                if let Ok(resolve) = ghidrust_core::resolve_function(prog, va) {
+                    let stub_target = resolve.resolved_entry.and_then(|entry| {
+                        ghidrust_il2cpp::classify_at(prog, entry)
+                            .and_then(|stub| ghidrust_il2cpp::follow_stub_target(prog, &stub))
+                    });
+                    ui.horizontal(|ui| {
+                        ui.small(format!(
+                            "resolve: requested={:#x} → resolved_entry={} [{:?}]{}",
+                            resolve.requested_addr,
+                            resolve
+                                .resolved_entry
+                                .map(|e| format!("{e:#x}"))
+                                .unwrap_or_else(|| "—".into()),
+                            resolve.resolve_status,
+                            if resolve.ambiguous { " (ambiguous)" } else { "" },
+                        ));
+                        if let Some(target) = stub_target {
+                            ui.small(
+                                egui::RichText::new(format!("follow_stub → {target:#x}"))
+                                    .color(Color32::from_rgb(0xFB, 0xC0, 0x2D)),
+                            )
+                            .on_hover_text(
+                                "ghidrust_il2cpp::follow_stub_target — cached slot for this IL2CPP resolve thunk",
+                            );
+                        }
+                    });
+                }
+            }
+        }
         // Header row: stage + entry + Commit/Rename right-click hints.
         ui.horizontal(|ui| {
             if !self.decomp_status.is_empty() {
@@ -5747,11 +6010,23 @@ impl GhidrustApp {
         let mut rename: Option<(usize, String)> = None;
         let mut toggle: Option<(usize, char)> = None;
 
+        let notes_by_section: BTreeMap<String, Vec<String>> = self
+            .program
+            .as_ref()
+            .map(|p| {
+                let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for n in ghidrust_core::section_notes_for(p) {
+                    m.entry(n.section.clone()).or_default().push(n.message);
+                }
+                m
+            })
+            .unwrap_or_default();
+
         egui::ScrollArea::both()
             .id_salt("memmap_scroll")
             .show(ui, |ui| {
                 egui::Grid::new("memory_map_grid")
-                    .num_columns(8)
+                    .num_columns(9)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("Name");
@@ -5761,6 +6036,7 @@ impl GhidrustApp {
                         ui.strong("R");
                         ui.strong("W");
                         ui.strong("X");
+                        ui.strong("Notes");
                         ui.strong("");
                         ui.end_row();
                         let blocks: Vec<(String, u64, u64, bool, bool, bool)> = self
@@ -5813,12 +6089,22 @@ impl GhidrustApp {
                             if ui.checkbox(&mut xb, "").changed() {
                                 toggle = Some((i, 'X'));
                             }
+                            let notes = notes_by_section.get(name.trim_end_matches('\0'));
+                            match notes {
+                                Some(msgs) => {
+                                    let joined = msgs.join(" · ");
+                                    ui.small(egui::RichText::new("⚠ notes").color(muted))
+                                        .on_hover_text(joined);
+                                }
+                                None => {
+                                    ui.small(egui::RichText::new("—").color(muted));
+                                }
+                            }
                             if ui.small_button("Delete").clicked() {
                                 delete = Some(i);
                             }
                             ui.end_row();
                         }
-                        let _ = muted;
                     });
             });
 
@@ -6013,13 +6299,23 @@ impl GhidrustApp {
                     .desired_width(280.0)
                     .hint_text("Substring…"),
             );
+            ui.label("Encoding:");
+            egui::ComboBox::from_id_salt("defined_strings_encoding_combo")
+                .selected_text(self.defined_strings_encoding.clone())
+                .show_ui(ui, |ui| {
+                    for enc in ["all", "ascii", "utf16le"] {
+                        ui.selectable_value(&mut self.defined_strings_encoding, enc.into(), enc);
+                    }
+                });
         });
         let q = self.defined_strings_filter.to_ascii_lowercase();
-        let rows: Vec<(u64, String)> = self
+        let enc_filter = self.defined_strings_encoding.clone();
+        let rows: Vec<(u64, String, String)> = self
             .strings
             .iter()
             .filter(|s| q.is_empty() || s.value.to_ascii_lowercase().contains(&q))
-            .map(|s| (s.va, s.value.clone()))
+            .filter(|s| enc_filter == "all" || s.encoding == enc_filter)
+            .map(|s| (s.va, s.value.clone(), s.encoding.clone()))
             .collect();
         ui.small(format!("{} / {} strings", rows.len(), self.strings.len()));
         egui::ScrollArea::vertical()
@@ -6027,20 +6323,22 @@ impl GhidrustApp {
             .max_height(400.0)
             .show(ui, |ui| {
                 egui::Grid::new("defined_strings_grid")
-                    .num_columns(2)
+                    .num_columns(3)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("Address");
+                        ui.strong("Encoding");
                         ui.strong("String");
                         ui.end_row();
                         let mut goto: Option<u64> = None;
-                        for (va, s) in &rows {
+                        for (va, s, enc) in &rows {
                             if ui
                                 .link(egui::RichText::new(format!("{va:#x}")).monospace())
                                 .clicked()
                             {
                                 goto = Some(*va);
                             }
+                            ui.monospace(enc.clone());
                             let val: String = s.chars().take(80).collect();
                             ui.monospace(val);
                             ui.end_row();
@@ -6468,6 +6766,8 @@ impl GhidrustApp {
             if ui.button("Use cursor").clicked() {
                 self.symbol_refs_target = self.listing_focus_va;
             }
+            ui.checkbox(&mut self.symbol_refs_hide_stubs, "Hide resolve stubs")
+                .on_hover_text("ghidrust_il2cpp::is_resolve_stub_va — hide IL2CPP lazy resolve thunks");
         });
         ui.separator();
         let Some(target) = target else {
@@ -6476,7 +6776,17 @@ impl GhidrustApp {
         };
         let refs = self.xrefs_to_va(target);
         let q = self.symbol_refs_filter.to_ascii_lowercase();
-        let rows: Vec<XRef> = refs
+        let hide_stubs = self.symbol_refs_hide_stubs;
+        let classify = |prog: &Program, va: u64| -> Option<String> {
+            ghidrust_il2cpp::classify_at(prog, va).map(|stub| {
+                stub.icall_name
+                    .clone()
+                    .map(|n| format!("il2cpp_stub: {n}"))
+                    .unwrap_or_else(|| "il2cpp_stub".into())
+            })
+        };
+        let prog_ref = self.program.as_ref();
+        let rows: Vec<(XRef, Option<String>)> = refs
             .into_iter()
             .filter(|r| {
                 if q.is_empty() {
@@ -6485,6 +6795,18 @@ impl GhidrustApp {
                 r.preview.to_ascii_lowercase().contains(&q)
                     || format!("{:#x}", r.from).contains(&q)
                     || r.kind.contains(&q)
+            })
+            .filter_map(|r| {
+                let cls = prog_ref.and_then(|p| classify(p, r.from));
+                let is_stub = cls.is_some()
+                    || prog_ref
+                        .map(|p| ghidrust_il2cpp::is_resolve_stub_va(p, r.from))
+                        .unwrap_or(false);
+                if hide_stubs && is_stub {
+                    None
+                } else {
+                    Some((r, cls))
+                }
             })
             .collect();
         let label_at = |va: u64| {
@@ -6501,15 +6823,16 @@ impl GhidrustApp {
             .max_height(400.0)
             .show(ui, |ui| {
                 egui::Grid::new("symbol_refs_grid")
-                    .num_columns(4)
+                    .num_columns(5)
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("From");
                         ui.strong("Label");
                         ui.strong("Kind");
+                        ui.strong("Classify");
                         ui.strong("Preview");
                         ui.end_row();
-                        for r in &rows {
+                        for (r, cls) in &rows {
                             if ui
                                 .link(egui::RichText::new(format!("{:#x}", r.from)).monospace())
                                 .clicked()
@@ -6518,6 +6841,7 @@ impl GhidrustApp {
                             }
                             ui.label(label_at(r.from));
                             ui.monospace(r.kind);
+                            ui.small(cls.as_deref().unwrap_or("—"));
                             ui.label(&r.preview);
                             ui.end_row();
                         }
@@ -7211,6 +7535,27 @@ impl eframe::App for GhidrustApp {
                             ui.close_menu();
                         }
                     });
+                    ui.separator();
+                    if ui
+                        .button("GPU Decompile…")
+                        .on_hover_text(
+                            "ghidrust_decomp::gpu_decompile_to_file · GPU pipeline with CPU multipass fallback",
+                        )
+                        .clicked()
+                    {
+                        if self.tool_panes.gpu_decompile.addr_input.trim().is_empty() {
+                            if let Some(prog) = &self.program {
+                                if let Some(e) = self.listing_focus_va.or(prog.entry) {
+                                    self.tool_panes.gpu_decompile.addr_input = format!("{e:#x}");
+                                }
+                            }
+                        }
+                        if self.tool_panes.gpu_decompile.max_bytes_input.trim().is_empty() {
+                            self.tool_panes.gpu_decompile.max_bytes_input = "256".into();
+                        }
+                        self.show_gpu_decompile_dialog = true;
+                        ui.close_menu();
+                    }
                 });
                 ui.menu_button("Navigation", |ui| {
                     if ui.add_enabled(self.can_nav_back(), egui::Button::new("Back")).clicked() {
@@ -7433,12 +7778,35 @@ impl eframe::App for GhidrustApp {
                     ui.checkbox(&mut self.show_symbol_tree, "Symbol Tree (dock)");
                     ui.checkbox(&mut self.show_console, "Console (dock)");
                     ui.separator();
-                    // Center tabs.
+                    // Center dock tabs (Listing/Decompiler prefer side-by-side).
                     ui.label(egui::RichText::new("Center Tabs").small().weak());
-                    ui.selectable_value(&mut self.center, CenterPane::Overview, "Overview");
-                    ui.selectable_value(&mut self.center, CenterPane::Listing, "Listing");
-                    ui.selectable_value(&mut self.center, CenterPane::Decompiler, "Decompiler");
-                    ui.selectable_value(&mut self.center, CenterPane::DataTypes, "Data Type Manager");
+                    if ui
+                        .selectable_label(self.center == CenterPane::Overview, "Overview")
+                        .clicked()
+                    {
+                        self.focus_center_tab(DockTab::Overview);
+                    }
+                    if ui
+                        .selectable_label(self.center == CenterPane::Listing, "Listing")
+                        .clicked()
+                    {
+                        self.focus_center_tab(DockTab::Listing);
+                    }
+                    if ui
+                        .selectable_label(self.center == CenterPane::Decompiler, "Decompiler")
+                        .clicked()
+                    {
+                        self.focus_center_tab(DockTab::Decompiler);
+                    }
+                    if ui
+                        .selectable_label(
+                            self.center == CenterPane::DataTypes,
+                            "Data Type Manager",
+                        )
+                        .clicked()
+                    {
+                        self.focus_center_tab(DockTab::DataTypes);
+                    }
                     ui.separator();
                     // Full Ghidra CodeBrowser provider catalog (floating windows).
                     // Sorted alphabetically by title to mirror Ghidra's Window menu.
@@ -7977,90 +8345,118 @@ impl eframe::App for GhidrustApp {
                         let muted =
                             Color32::from_rgb(t.on_surface_variant[0], t.on_surface_variant[1], t.on_surface_variant[2]);
                         let ok_green = Color32::from_rgb(0x4C, 0xAF, 0x50);
-                        let root_open = {
-                            ui.horizontal(|ui| {
-                                m3_icon(ui, M3Icon::Folder, 18.0, primary);
-                                ui.strong(&model.project_name);
-                            });
-                            egui::CollapsingHeader::new("Project files")
-                                .default_open(self.project_tree_expanded)
-                                .show(ui, |ui| {
-                            ui.small(egui::RichText::new(&model.project_root).weak());
-                            ui.add_space(4.0);
-                            if model.files.is_empty() {
-                                ui.weak("Empty — Import a binary.");
-                            }
-                            let mut open_id: Option<String> = None;
-                            let mut analyze_id: Option<String> = None;
-                            let mut delete_id: Option<String> = None;
-                            let mut select_id: Option<String> = None;
-                            for row in &model.files {
-                                let selected = self.tree_selected_id.as_deref() == Some(row.id.as_str());
-                                let viewing = self.active_file_id.as_deref() == Some(row.id.as_str())
-                                    && self.program.is_some();
-                                ui.group(|ui| {
-                                    ui.horizontal(|ui| {
-                                        if viewing {
-                                            m3_icon(ui, M3Icon::PlayArrow, 14.0, primary);
-                                        } else {
-                                            ui.add_space(14.0);
+                        ui.horizontal(|ui| {
+                            m3_icon(ui, M3Icon::Folder, 18.0, primary);
+                            ui.strong(&model.project_name);
+                        });
+                        // Fill remaining panel height and scroll when files overflow
+                        // (same idiom as Console / working list panes).
+                        let root_open = egui::ScrollArea::vertical()
+                            .id_salt("project_tree_scroll")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                egui::CollapsingHeader::new("Project files")
+                                    .default_open(self.project_tree_expanded)
+                                    .show(ui, |ui| {
+                                        ui.small(egui::RichText::new(&model.project_root).weak());
+                                        ui.add_space(4.0);
+                                        if model.files.is_empty() {
+                                            ui.weak("Empty — Import a binary.");
                                         }
-                                        let resp = ui.selectable_label(selected || viewing, &row.display_name);
-                                        if resp.double_clicked() {
-                                            open_id = Some(row.id.clone());
-                                        } else if resp.clicked() {
-                                            select_id = Some(row.id.clone());
+                                        let mut open_id: Option<String> = None;
+                                        let mut analyze_id: Option<String> = None;
+                                        let mut delete_id: Option<String> = None;
+                                        let mut select_id: Option<String> = None;
+                                        for row in &model.files {
+                                            let selected =
+                                                self.tree_selected_id.as_deref() == Some(row.id.as_str());
+                                            let viewing = self.active_file_id.as_deref()
+                                                == Some(row.id.as_str())
+                                                && self.program.is_some();
+                                            ui.group(|ui| {
+                                                ui.horizontal(|ui| {
+                                                    if viewing {
+                                                        m3_icon(ui, M3Icon::PlayArrow, 14.0, primary);
+                                                    } else {
+                                                        ui.add_space(14.0);
+                                                    }
+                                                    let resp = ui.selectable_label(
+                                                        selected || viewing,
+                                                        &row.display_name,
+                                                    );
+                                                    if resp.double_clicked() {
+                                                        open_id = Some(row.id.clone());
+                                                    } else if resp.clicked() {
+                                                        select_id = Some(row.id.clone());
+                                                    }
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    status_badge(
+                                                        ui,
+                                                        row.has_saved_analysis,
+                                                        ok_green,
+                                                        muted,
+                                                    );
+                                                    if viewing {
+                                                        ui.small(
+                                                            egui::RichText::new("viewing").color(primary),
+                                                        );
+                                                    } else if row.has_saved_analysis {
+                                                        ui.small(
+                                                            egui::RichText::new("double-click to open")
+                                                                .weak(),
+                                                        );
+                                                    }
+                                                });
+                                                ui.horizontal(|ui| {
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(egui::Align::Center),
+                                                        |ui| {
+                                                            if ui
+                                                                .small_button("Delete")
+                                                                .on_hover_text(
+                                                                    "Remove from project (confirmation)",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                delete_id = Some(row.id.clone());
+                                                            }
+                                                            if ui
+                                                                .small_button("Analyze")
+                                                                .on_hover_text(
+                                                                    "Analysis options (analyzers + GPU)",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                analyze_id = Some(row.id.clone());
+                                                            }
+                                                            if ui
+                                                                .small_button("Open")
+                                                                .on_hover_text(
+                                                                    "Load into Overview / Listing / Symbol Tree",
+                                                                )
+                                                                .clicked()
+                                                            {
+                                                                open_id = Some(row.id.clone());
+                                                            }
+                                                        },
+                                                    );
+                                                });
+                                                ui.small(
+                                                    egui::RichText::new(&row.imported_rel)
+                                                        .weak()
+                                                        .italics(),
+                                                );
+                                            });
+                                            ui.add_space(2.0);
                                         }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        status_badge(ui, row.has_saved_analysis, ok_green, muted);
-                                        if viewing {
-                                            ui.small(egui::RichText::new("viewing").color(primary));
-                                        } else if row.has_saved_analysis {
-                                            ui.small(egui::RichText::new("double-click to open").weak());
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.with_layout(
-                                            egui::Layout::right_to_left(egui::Align::Center),
-                                            |ui| {
-                                                if ui
-                                                    .small_button("Delete")
-                                                    .on_hover_text("Remove from project (confirmation)")
-                                                    .clicked()
-                                                {
-                                                    delete_id = Some(row.id.clone());
-                                                }
-                                                if ui
-                                                    .small_button("Analyze")
-                                                    .on_hover_text("Analysis options (analyzers + GPU)")
-                                                    .clicked()
-                                                {
-                                                    analyze_id = Some(row.id.clone());
-                                                }
-                                                if ui
-                                                    .small_button("Open")
-                                                    .on_hover_text("Load into Overview / Listing / Symbol Tree")
-                                                    .clicked()
-                                                {
-                                                    open_id = Some(row.id.clone());
-                                                }
-                                            },
-                                        );
-                                    });
-                                    ui.small(
-                                        egui::RichText::new(&row.imported_rel)
-                                            .weak()
-                                            .italics(),
-                                    );
-                                });
-                                ui.add_space(2.0);
-                            }
-                            (open_id, analyze_id, delete_id, select_id)
-                        })
-                        };
+                                        (open_id, analyze_id, delete_id, select_id)
+                                    })
+                            })
+                            .inner;
                         let expanded = root_open.fully_open();
-                        if let Some((open_id, analyze_id, delete_id, select_id)) = root_open.body_returned {
+                        if let Some((open_id, analyze_id, delete_id, select_id)) = root_open.body_returned
+                        {
                             if let Some(id) = select_id {
                                 self.tree_selected_id = Some(id);
                             }
@@ -8188,6 +8584,7 @@ impl eframe::App for GhidrustApp {
                     let mut add_to_view: Option<String> = None;
                     let mut remove_from_view: Option<String> = None;
                     let mut set_view: Option<String> = None;
+                    let mut show_all = false;
                     let view_filter = self.listing_view_filter.clone();
                     let mut render_module =
                         |ui: &mut egui::Ui, title: &str, indices: &[usize]| {
@@ -8266,9 +8663,37 @@ impl eframe::App for GhidrustApp {
                             });
                         };
 
-                    render_module(ui, "Code (X)", &code);
-                    render_module(ui, "Data (RW)", &data);
-                    render_module(ui, "Read‑only (R)", &rodata);
+                    egui::ScrollArea::vertical()
+                        .id_salt("program_tree_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            render_module(ui, "Code (X)", &code);
+                            render_module(ui, "Data (RW)", &data);
+                            render_module(ui, "Read‑only (R)", &rodata);
+
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .small_button("Show All")
+                                    .on_hover_text("Clear the Listing view filter")
+                                    .clicked()
+                                {
+                                    show_all = true;
+                                }
+                                if let Some(f) = view_filter.as_ref() {
+                                    ui.small(format!(
+                                        "View filter · {} fragment(s) in view",
+                                        f.len()
+                                    ));
+                                } else {
+                                    ui.small(
+                                        egui::RichText::new("View filter · full program")
+                                            .weak()
+                                            .italics(),
+                                    );
+                                }
+                            });
+                        });
 
                     if let Some(va) = goto {
                         let _ = self.goto_address_str(&format!("{va:#x}"));
@@ -8284,29 +8709,9 @@ impl eframe::App for GhidrustApp {
                         s.insert(name);
                         self.set_listing_view(Some(s));
                     }
-
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if ui
-                            .small_button("Show All")
-                            .on_hover_text("Clear the Listing view filter")
-                            .clicked()
-                        {
-                            self.listing_view_filter = None;
-                        }
-                        if let Some(f) = self.listing_view_filter.as_ref() {
-                            ui.small(format!(
-                                "View filter · {} fragment(s) in view",
-                                f.len()
-                            ));
-                        } else {
-                            ui.small(
-                                egui::RichText::new("View filter · full program")
-                                    .weak()
-                                    .italics(),
-                            );
-                        }
-                    });
+                    if show_all {
+                        self.listing_view_filter = None;
+                    }
                 });
         }
 
@@ -8335,6 +8740,13 @@ impl eframe::App for GhidrustApp {
                     });
                     ui.separator();
 
+                    // Outer scroll so category headers + expanded sections aren't clipped
+                    // when they exceed the dock height. Per-list ScrollAreas keep max_height
+                    // so nested wheel scrolling still targets the open list.
+                    egui::ScrollArea::vertical()
+                        .id_salt("symbol_tree_scroll")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                     // ── Ghidra `SymbolTreePlugin` category order ────────────────
                     // Imports · Exports · Functions · Labels · Classes · Namespaces
 
@@ -8543,11 +8955,35 @@ impl eframe::App for GhidrustApp {
                             self.rebuild_rtti_filter_cache();
                             let n_show = self.rtti_filtered_idx.len();
                             ui.small(format!("{n_show} / {rtti_n} classes (RTTI)"));
+                            // `ghidrust_core::rtti_query` gives the catalog (deduped,
+                            // grouped by name) view with every recovered vtable VA —
+                            // `self.rtti` is the raw per-class report used for the
+                            // filter cache above, so we join on name for the tooltip.
+                            let vtable_vas: BTreeMap<String, Vec<u64>> = self
+                                .program
+                                .as_ref()
+                                .and_then(|p| {
+                                    ghidrust_core::rtti_query(
+                                        p,
+                                        None,
+                                        false,
+                                        ghidrust_core::RttiMatchMode::Substr,
+                                    )
+                                    .ok()
+                                })
+                                .map(|q| {
+                                    q.classes
+                                        .into_iter()
+                                        .map(|c| (c.name, c.vtable_vas))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
                             let row_h = ui.text_style_height(&egui::TextStyle::Body) + 2.0;
                             let idxs = self.rtti_filtered_idx.clone();
                             egui::ScrollArea::vertical()
                                 .id_salt("rtti_scroll")
                                 .auto_shrink([false, false])
+                                .max_height(220.0)
                                 .show_rows(ui, row_h, idxs.len(), |ui, range| {
                                     for i in range {
                                         let c = &self.rtti.classes[idxs[i]];
@@ -8555,11 +8991,20 @@ impl eframe::App for GhidrustApp {
                                             .type_info_va
                                             .map(|v| format!("{v:#x}"))
                                             .unwrap_or_else(|| "—".into());
+                                        let vtables = vtable_vas
+                                            .get(&c.name)
+                                            .map(|vs| {
+                                                vs.iter()
+                                                    .map(|v| format!("{v:#x}"))
+                                                    .collect::<Vec<_>>()
+                                                    .join(", ")
+                                            })
+                                            .unwrap_or_else(|| "—".into());
                                         ui.horizontal(|ui| {
                                             ui.monospace(&va);
                                             ui.label(&c.name)
                                                 .on_hover_text(format!(
-                                                    "kind={} col={:?} vtable={:?}",
+                                                    "kind={} col={:?} vtable={:?}\nvtable_vas (rtti_query)=[{vtables}]",
                                                     c.kind, c.col_va, c.vtable_va
                                                 ));
                                         });
@@ -8655,6 +9100,7 @@ impl eframe::App for GhidrustApp {
                                 ui.small(format!("Showing first 5000 of {str_n}"));
                             }
                         });
+                        });
                 });
         }
 
@@ -8672,7 +9118,7 @@ impl eframe::App for GhidrustApp {
                             self.analysis_done_banner = None;
                         }
                         if ui.button("Open Overview").clicked() {
-                            self.center = CenterPane::Overview;
+                            self.focus_center_tab(DockTab::Overview);
                             self.analysis_done_banner = None;
                         }
                     });
@@ -8681,27 +9127,16 @@ impl eframe::App for GhidrustApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.center, CenterPane::Overview, "Overview");
-                ui.selectable_value(&mut self.center, CenterPane::Listing, "Listing");
-                ui.selectable_value(&mut self.center, CenterPane::Decompiler, "Decompiler");
-                ui.selectable_value(&mut self.center, CenterPane::DataTypes, "Data Type Manager");
-            });
-            ui.separator();
-            match self.center {
-                CenterPane::Overview => {
-                    self.ui_overview(ui);
-                }
-                CenterPane::Listing => {
-                    self.ui_listing_pane(ui);
-                }
-                CenterPane::Decompiler => {
-                    self.ui_decompiler_pane(ui);
-                }
-                CenterPane::DataTypes => {
-                    self.ui_dtm_pane(ui);
-                }
-            }
+            // `DockArea` and the tab viewer both need `&mut self` fields — take
+            // the dock tree out so the viewer can borrow the rest of the app.
+            let mut dock = std::mem::replace(&mut self.center_dock, DockState::new(vec![]));
+            DockArea::new(&mut dock)
+                .style(DockStyle::from_egui(ui.style().as_ref()))
+                .show_close_buttons(true)
+                .show_add_buttons(false)
+                .show_inside(ui, &mut CenterTabViewer { app: self });
+            self.center_dock = dock;
+            self.sync_center_from_dock();
         });
 
         // Phase A (M1) — draw every open floating provider pane.
@@ -9201,6 +9636,51 @@ impl eframe::App for GhidrustApp {
                         self.show_processor_dialog = false;
                     }
                 });
+        }
+
+        // Analysis → GPU Decompile…
+        if self.show_gpu_decompile_dialog {
+            let t = m3_tokens(self.theme);
+            let muted = Color32::from_rgb(
+                t.on_surface_variant[0],
+                t.on_surface_variant[1],
+                t.on_surface_variant[2],
+            );
+            let mut close = false;
+            let mut run_clicked = false;
+            let has_program = self.program.is_some();
+            egui::Window::new("GPU Decompile")
+                .collapsible(false)
+                .resizable(true)
+                .default_width(560.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    tool_panes::ui_gpu_decompile_dialog_header(
+                        ui,
+                        &mut self.tool_panes.gpu_decompile,
+                        muted,
+                    );
+                    if !has_program {
+                        ui.weak("No program loaded.");
+                    } else if ui.button("Resolve + Decompile").clicked() {
+                        run_clicked = true;
+                    }
+                    tool_panes::ui_gpu_decompile_dialog_result(
+                        ui,
+                        &self.tool_panes.gpu_decompile,
+                        muted,
+                    );
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            if run_clicked {
+                self.run_gpu_decompile_dialog();
+            }
+            if close {
+                self.show_gpu_decompile_dialog = false;
+            }
         }
 
         if self.show_analysis_dialog && self.analysis_job.is_none() {
@@ -10703,7 +11183,7 @@ mod tests {
         app.toggle_pane(PaneKind::Bookmarks, true);
         app.toggle_pane(PaneKind::MemoryMap, true);
         app.debugger_open.insert(DebuggerPane::Targets, true);
-        app.center = CenterPane::Decompiler;
+        app.focus_center_tab(DockTab::Decompiler);
         app.show_console = false;
 
         app.save_layout_named("myTest").expect("save layout");
@@ -10711,7 +11191,7 @@ mod tests {
         app.toggle_pane(PaneKind::Bookmarks, false);
         app.toggle_pane(PaneKind::MemoryMap, false);
         app.debugger_open.insert(DebuggerPane::Targets, false);
-        app.center = CenterPane::Overview;
+        app.focus_center_tab(DockTab::Overview);
         app.show_console = true;
 
         app.restore_layout_named("myTest").expect("restore layout");
@@ -10719,6 +11199,7 @@ mod tests {
         assert!(app.is_pane_open(PaneKind::MemoryMap));
         assert_eq!(app.debugger_open.get(&DebuggerPane::Targets), Some(&true));
         assert_eq!(app.center, CenterPane::Decompiler);
+        assert!(app.center_dock.find_tab(&DockTab::Decompiler).is_some());
         assert!(!app.show_console);
 
         let _ = std::fs::remove_dir_all(&dir);

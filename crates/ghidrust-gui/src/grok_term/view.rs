@@ -2,7 +2,7 @@
 
 use super::ansi::{char_cell_width, Color, TerminalGrid, DEFAULT_BG};
 use super::session::{encode_key, GrokTermSession};
-use eframe::egui::{self, Color32, FontId, Key, Modifiers, Pos2, Rect, Sense, Ui, Vec2};
+use eframe::egui::{self, Color32, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Ui, Vec2};
 
 const FONT_SIZE: f32 = 13.0;
 
@@ -10,10 +10,10 @@ fn to_color32(c: Color) -> Color32 {
     Color32::from_rgb(c.r, c.g, c.b)
 }
 
-/// Paint the terminal and route keyboard/text input into the PTY.
+/// Paint the terminal and route keyboard/text/mouse input into the PTY.
 ///
-/// `sticky_keys`: keep routing keys (especially Ctrl+C) after focus was granted,
-/// until the parent clears capture (Console tab / Stop).
+/// `sticky_keys`: keep routing keys after focus was granted, until the parent
+/// clears capture (Console tab / Stop).
 ///
 /// Returns `true` when this widget owns the keyboard (listing hotkeys must yield).
 pub fn show_terminal(
@@ -39,8 +39,25 @@ pub fn show_terminal(
 
     painter.rect_filled(response.rect, 0.0, to_color32(DEFAULT_BG));
 
+    let selection = session.selection;
     if let Ok(grid) = session.grid().lock() {
-        paint_grid(ui, &painter, &grid, origin, cell_w, cell_h, &font);
+        paint_grid(
+            ui,
+            &painter,
+            &grid,
+            origin,
+            cell_w,
+            cell_h,
+            &font,
+            selection.as_ref(),
+        );
+    }
+
+    handle_pointer(ui, &response, session, origin, cell_w, cell_h, cols, rows);
+
+    if session.copied_flash_visible(ui.ctx()) {
+        paint_copied_toast(&painter, response.rect);
+        ui.ctx().request_repaint();
     }
 
     if request_focus || response.clicked() {
@@ -65,8 +82,6 @@ pub fn show_terminal(
     }
 
     let focused = response.has_focus();
-    // Hover / sticky: Ctrl+C must reach the PTY mid-generation even if egui
-    // briefly loses widget focus (toolbar click, etc.).
     let capturing = focused || response.hovered() || sticky_keys;
     if capturing {
         handle_input(ui, session);
@@ -79,6 +94,119 @@ pub fn show_terminal(
     focused || response.hovered() || sticky_keys
 }
 
+fn pos_to_cell(
+    pos: Pos2,
+    origin: Pos2,
+    cell_w: f32,
+    cell_h: f32,
+    cols: u16,
+    rows: u16,
+) -> (usize, usize) {
+    let col = ((pos.x - origin.x) / cell_w).floor() as i32;
+    let row = ((pos.y - origin.y) / cell_h).floor() as i32;
+    (
+        col.clamp(0, cols as i32 - 1) as usize,
+        row.clamp(0, rows as i32 - 1) as usize,
+    )
+}
+
+fn handle_pointer(
+    ui: &mut Ui,
+    response: &egui::Response,
+    session: &mut GrokTermSession,
+    origin: Pos2,
+    cell_w: f32,
+    cell_h: f32,
+    cols: u16,
+    rows: u16,
+) {
+    // Scroll wheel → clear stale host highlight, then Grok scrollback.
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.5 {
+            session.clear_selection();
+            let steps = (scroll.abs() / cell_h).ceil().max(1.0) as usize;
+            let up = scroll > 0.0;
+            for _ in 0..steps.min(12) {
+                let btn = if up { 64 } else { 65 };
+                let (c, r) = ui
+                    .input(|i| i.pointer.hover_pos())
+                    .map(|p| pos_to_cell(p, origin, cell_w, cell_h, cols, rows))
+                    .unwrap_or((0, 0));
+                session.write_bytes(
+                    format!("\x1b[<{};{};{}M", btn, c + 1, r + 1).as_bytes(),
+                );
+            }
+        }
+    }
+
+    let Some(pointer) = response.interact_pointer_pos() else {
+        if session.is_selecting() && !ui.input(|i| i.pointer.any_down()) {
+            finish_host_selection(ui, session);
+        }
+        return;
+    };
+    let cell = pos_to_cell(pointer, origin, cell_w, cell_h, cols, rows);
+
+    // Right-click: copy+clear selection if any, else Ctrl+V paste into Grok.
+    if response.secondary_clicked() {
+        if !session.copy_selection_and_clear(ui.ctx()) {
+            session.write_bytes(&[0x16]);
+        }
+        return;
+    }
+
+    if response.drag_started_by(PointerButton::Primary) {
+        session.begin_selection(cell.0, cell.1);
+    }
+    if session.is_selecting() && response.dragged_by(PointerButton::Primary) {
+        session.update_selection(cell.0, cell.1);
+    }
+    if response.drag_stopped_by(PointerButton::Primary) {
+        let was_drag = session
+            .selection
+            .is_some_and(|s| !s.is_empty_cell());
+        if was_drag {
+            finish_host_selection(ui, session);
+        } else {
+            // Plain click elsewhere — drop highlight; forward click to Grok.
+            session.clear_selection();
+            let (c, r) = (cell.0 + 1, cell.1 + 1);
+            session.write_bytes(format!("\x1b[<0;{c};{r}M").as_bytes());
+            session.write_bytes(format!("\x1b[<0;{c};{r}m").as_bytes());
+        }
+    }
+}
+
+fn finish_host_selection(ui: &mut Ui, session: &mut GrokTermSession) {
+    session.end_selection();
+    // Auto-copy on release, flash "Copied", clear highlight.
+    let _ = session.copy_selection_and_clear(ui.ctx());
+}
+
+fn paint_copied_toast(painter: &egui::Painter, term_rect: Rect) {
+    let label = "Copied";
+    let pad = Vec2::new(10.0, 6.0);
+    let font = FontId::proportional(13.0);
+    let galley = painter.layout_no_wrap(label.to_owned(), font, Color32::WHITE);
+    let size = galley.size() + pad * 2.0;
+    let origin = Pos2::new(
+        term_rect.max.x - size.x - 10.0,
+        term_rect.min.y + 10.0,
+    );
+    let rect = Rect::from_min_size(origin, size);
+    painter.rect_filled(
+        rect,
+        4.0,
+        Color32::from_rgba_unmultiplied(0x1B, 0x5E, 0x20, 220),
+    );
+    painter.galley(
+        origin + pad,
+        galley,
+        Color32::WHITE,
+    );
+}
+
 fn paint_grid(
     ui: &Ui,
     painter: &egui::Painter,
@@ -87,6 +215,7 @@ fn paint_grid(
     cell_w: f32,
     cell_h: f32,
     font: &FontId,
+    selection: Option<&super::session::TermSelection>,
 ) {
     let cols = grid.cols();
     let rows = grid.rows();
@@ -117,12 +246,16 @@ fn paint_grid(
                 Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w * span as f32, cell_h));
 
             painter.rect_filled(rect, 0.0, to_color32(bg));
+            if selection.is_some_and(|s| s.contains(col, row)) {
+                painter.rect_filled(
+                    rect,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(0x26, 0x4F, 0x78, 160),
+                );
+            }
 
             if cell.ch != ' ' && !cell.ch.is_control() {
                 let clipped = painter.with_clip_rect(rect);
-                // Vertically center the glyph in the cell so the block cursor
-                // (full cell) lines up with `>` / text instead of looking one
-                // row low under padded line height.
                 let g = ui.fonts(|f| {
                     f.layout_no_wrap(cell.ch.to_string(), font.clone(), to_color32(fg))
                 });
@@ -166,8 +299,6 @@ fn visible_cursor(col: usize, row: usize, cols: usize, rows: usize) -> (usize, u
     if col < cols {
         return (col, row.min(rows - 1));
     }
-    // Pending wrap: show at end of current line (xterm-style), not the next row
-    // — drawing on row+1 put the block on the input box's bottom border.
     (cols - 1, row.min(rows - 1))
 }
 
@@ -179,74 +310,93 @@ fn ui_time_ms() -> u64 {
 }
 
 fn handle_input(ui: &mut Ui, session: &mut GrokTermSession) {
-    // egui maps Ctrl+C → Event::Copy (and often drops Key::C). In a terminal that
-    // must be ETX (0x03) cancel, not clipboard copy — consume those events here.
-    ui.input_mut(|i| {
-        let mut send_etx = false;
-        let mut send_eot = false;
-        let mut send_susp = false;
-        let mut send_ff = false;
+    // egui remaps Ctrl+C → Copy and Ctrl+V → Paste. When a host selection
+    // exists, Copy means clipboard; otherwise Copy is Grok's Ctrl+C (0x03).
+    let mut paste: Option<String> = None;
+    let mut copy_event = false;
+    let has_sel = session
+        .selection
+        .is_some_and(|s| !s.is_empty_cell());
 
+    ui.input_mut(|i| {
         i.events.retain(|ev| match ev {
-            egui::Event::Copy | egui::Event::Cut => {
-                send_etx = true;
+            egui::Event::Paste(s) => {
+                paste = Some(s.clone());
                 false
             }
-            egui::Event::Key {
-                key,
-                pressed: true,
-                modifiers,
-                ..
-            } if modifiers.ctrl || modifiers.command => match key {
-                Key::C => {
-                    send_etx = true;
-                    false
-                }
-                Key::D => {
-                    send_eot = true;
-                    false
-                }
-                Key::Z => {
-                    send_susp = true;
-                    false
-                }
-                Key::L => {
-                    send_ff = true;
-                    false
-                }
-                _ => true,
-            },
+            egui::Event::Copy | egui::Event::Cut => {
+                copy_event = true;
+                false
+            }
             _ => true,
         });
-
-        if send_etx
-            || i.consume_key(Modifiers::CTRL, Key::C)
-            || i.consume_key(Modifiers::COMMAND, Key::C)
-        {
-            session.write_bytes(&[0x03]);
-        }
-        if send_eot
-            || i.consume_key(Modifiers::CTRL, Key::D)
-            || i.consume_key(Modifiers::COMMAND, Key::D)
-        {
-            session.write_bytes(&[0x04]);
-        }
-        if send_susp
-            || i.consume_key(Modifiers::CTRL, Key::Z)
-            || i.consume_key(Modifiers::COMMAND, Key::Z)
-        {
-            session.write_bytes(&[0x1a]);
-        }
-        if send_ff || i.consume_key(Modifiers::CTRL, Key::L) {
-            session.write_bytes(&[0x0c]);
+        let ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        for key in [
+            Key::C,
+            Key::V,
+            Key::D,
+            Key::L,
+            Key::P,
+            Key::M,
+            Key::O,
+            Key::S,
+            Key::G,
+            Key::T,
+            Key::B,
+            Key::E,
+            Key::F,
+            Key::J,
+            Key::K,
+            Key::U,
+            Key::X,
+            Key::I,
+            Key::A,
+            Key::Z,
+            Key::Enter,
+            Key::Tab,
+            Key::Insert,
+        ] {
+            let _ = i.consume_key(Modifiers::CTRL, key);
+            let _ = i.consume_key(Modifiers::COMMAND, key);
+            let _ = i.consume_key(Modifiers::ALT, key);
+            let _ = i.consume_key(ctrl_shift, key);
         }
     });
 
+    if let Some(text) = paste.as_ref().filter(|t| !t.is_empty()) {
+        session.write_bytes(text.as_bytes());
+        session.clear_selection();
+    }
+
+    // Ctrl+Shift+C or Copy with selection → clipboard (do not interrupt Grok).
+    let force_clipboard = ui.input(|i| {
+        (i.modifiers.ctrl || i.modifiers.command)
+            && i.modifiers.shift
+            && i.key_pressed(Key::C)
+    });
+    if (copy_event && has_sel) || force_clipboard {
+        if session.copy_selection_and_clear(ui.ctx()) {
+            return;
+        }
+    }
+    if copy_event {
+        session.write_bytes(&[0x03]);
+    }
+
+    let pasted = paste.as_ref().is_some_and(|t| !t.is_empty());
     ui.input(|i| {
         for ev in &i.events {
             match ev {
                 egui::Event::Text(t) => {
                     if t != "\n" && t != "\r" && t != "\t" {
+                        // Typing / Grok keyscroll must not leave a floating highlight.
+                        if !session.is_selecting() {
+                            session.clear_selection();
+                        }
                         session.write_bytes(t.as_bytes());
                     }
                 }
@@ -256,12 +406,31 @@ fn handle_input(ui: &mut Ui, session: &mut GrokTermSession) {
                     modifiers,
                     ..
                 } => {
-                    if (modifiers.ctrl || modifiers.command)
-                        && matches!(key, Key::C | Key::D | Key::Z | Key::L)
-                    {
+                    let ctrl = modifiers.ctrl || modifiers.command;
+                    if copy_event && ctrl && *key == Key::C {
+                        continue;
+                    }
+                    if force_clipboard && ctrl && *key == Key::C {
+                        continue;
+                    }
+                    if pasted && ctrl && *key == Key::V {
+                        continue;
+                    }
+                    // Ctrl+Insert → copy selection
+                    if ctrl && *key == Key::Insert && has_sel {
+                        let _ = session.copy_selection_and_clear(ui.ctx());
+                        continue;
+                    }
+                    // Shift+Insert → paste (terminal classic)
+                    if modifiers.shift && *key == Key::Insert {
+                        session.clear_selection();
+                        session.write_bytes(&[0x16]);
                         continue;
                     }
                     if let Some(bytes) = encode_key(*key, *modifiers) {
+                        if !session.is_selecting() {
+                            session.clear_selection();
+                        }
                         session.write_bytes(&bytes);
                     }
                 }

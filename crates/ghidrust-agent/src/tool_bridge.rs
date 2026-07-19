@@ -190,21 +190,195 @@ pub fn resolve_ghidrust_cli_bin() -> Option<PathBuf> {
     None
 }
 
-/// Ensure `<project>/.grok/skills/ghidrust/SKILL.md` mirrors the workspace
-/// `skill/SKILL.md`.
+/// Embedded skill body shipped with the agent crate (release installs without source tree).
+pub const EMBEDDED_SKILL_MD: &str = include_str!("../../../skill/SKILL.md");
+
+/// Fingerprint of the embedded skill (first 16 hex of FNV-1a 64) for stale-skill detection.
+pub fn skill_content_hash(skill: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in skill.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+/// Canonical on-disk skill path Start / checklist expect:
+/// `<project>/.grok/skills/ghidrust/SKILL.md`.
+pub fn project_skill_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join(".grok")
+        .join("skills")
+        .join("ghidrust")
+        .join("SKILL.md")
+}
+
+/// Ensure `<project>/.grok/skills/ghidrust/SKILL.md` mirrors the workspace skill
+/// or the embedded fallback when `skill_source` is missing.
 pub fn write_project_skill(project_root: &Path, skill_source: &Path) -> io::Result<PathBuf> {
-    let skill = fs::read_to_string(skill_source)?;
+    let skill = match fs::read_to_string(skill_source) {
+        Ok(s) => s,
+        Err(_) => EMBEDDED_SKILL_MD.to_string(),
+    };
+    write_project_skill_contents(project_root, &skill)
+}
+
+/// Write skill from the embedded copy (always succeeds if the project dir is writable).
+pub fn write_project_skill_embedded(project_root: &Path) -> io::Result<PathBuf> {
+    write_project_skill_contents(project_root, EMBEDDED_SKILL_MD)
+}
+
+/// Ensure the project skill file exists: prefer optional disk source, else embed.
+///
+/// This is the Agent Context Bundle skill half — safe to call on project open
+/// (before Start) so the Grok checklist is green without a silent skip.
+pub fn ensure_project_skill(
+    project_root: &Path,
+    skill_source: Option<&Path>,
+) -> io::Result<PathBuf> {
+    match skill_source {
+        Some(src) => write_project_skill(project_root, src),
+        None => write_project_skill_embedded(project_root),
+    }
+}
+
+fn write_project_skill_contents(project_root: &Path, skill: &str) -> io::Result<PathBuf> {
     let dest_dir = project_root.join(".grok").join("skills").join("ghidrust");
     fs::create_dir_all(&dest_dir)?;
     let dest = dest_dir.join("SKILL.md");
+    let hash_path = dest_dir.join("SKILL.hash");
+    let hash = skill_content_hash(skill);
+    let hash_body = format!("{hash}\n");
 
-    if let Ok(existing) = fs::read_to_string(&dest) {
-        if existing == skill {
-            return Ok(dest);
+    let skill_ok = match fs::read_to_string(&dest) {
+        Ok(existing) if existing == skill => true,
+        _ => {
+            fs::write(&dest, skill)?;
+            true
+        }
+    };
+    // Always ensure the hash sidecar (even when SKILL.md was already current).
+    if skill_ok {
+        match fs::read_to_string(&hash_path) {
+            Ok(existing) if existing == hash_body || existing.trim() == hash => {}
+            _ => fs::write(&hash_path, &hash_body)?,
         }
     }
-    fs::write(&dest, skill)?;
     Ok(dest)
+}
+
+/// Fail-loud Start checklist rows: mcp / skill / agents / context (+ skill hash).
+#[derive(Debug, Clone)]
+pub struct StartChecklistItem {
+    pub id: &'static str,
+    pub ok: bool,
+    pub detail: String,
+}
+
+pub fn start_checklist(project_root: &Path) -> Vec<StartChecklistItem> {
+    let mut items = Vec::new();
+    let mcp_root = project_root.join(".mcp.json");
+    items.push(StartChecklistItem {
+        id: "mcp",
+        ok: mcp_root.is_file(),
+        detail: if mcp_root.is_file() {
+            mcp_root.display().to_string()
+        } else {
+            format!(
+                "missing — looked for {} (written on Start when ghidrust CLI is resolvable)",
+                mcp_root.display()
+            )
+        },
+    });
+    let mcp_grok = project_root.join(".grok").join("mcp.json");
+    items.push(StartChecklistItem {
+        id: "mcp_grok",
+        ok: mcp_grok.is_file(),
+        detail: if mcp_grok.is_file() {
+            mcp_grok.display().to_string()
+        } else {
+            format!(
+                "missing — looked for {} (written on Start with MCP config)",
+                mcp_grok.display()
+            )
+        },
+    });
+    let skill = project_skill_path(project_root);
+    let hash_path = skill.with_extension("hash");
+    let (skill_ok, skill_detail) = if skill.is_file() {
+        let body = fs::read_to_string(&skill).unwrap_or_default();
+        let live = skill_content_hash(&body);
+        let embedded = skill_content_hash(EMBEDDED_SKILL_MD);
+        let note = if live == embedded {
+            format!("{} · hash={live}", skill.display())
+        } else {
+            format!(
+                "{} · hash={live} (differs from embedded={embedded})",
+                skill.display()
+            )
+        };
+        (true, note)
+    } else {
+        (
+            false,
+            format!(
+                "missing — looked for {} (auto-written from embedded skill on project open / Start)",
+                skill.display()
+            ),
+        )
+    };
+    items.push(StartChecklistItem {
+        id: "skill",
+        ok: skill_ok,
+        detail: skill_detail,
+    });
+    items.push(StartChecklistItem {
+        id: "skill_hash",
+        ok: hash_path.is_file() || skill_ok,
+        detail: if hash_path.is_file() {
+            format!(
+                "{} · {}",
+                hash_path.display(),
+                fs::read_to_string(&hash_path)
+                    .unwrap_or_default()
+                    .trim()
+            )
+        } else if skill_ok {
+            format!(
+                "missing sidecar {} (skill body present — re-open project or Start to refresh)",
+                hash_path.display()
+            )
+        } else {
+            format!("missing — looked for {}", hash_path.display())
+        },
+    });
+    let agents = project_root.join("AGENTS.md");
+    items.push(StartChecklistItem {
+        id: "agents",
+        ok: agents.is_file(),
+        detail: if agents.is_file() {
+            agents.display().to_string()
+        } else {
+            format!(
+                "missing — looked for {} (written on Start)",
+                agents.display()
+            )
+        },
+    });
+    let context = project_root.join(".grok").join("ghidrust-context.md");
+    items.push(StartChecklistItem {
+        id: "context",
+        ok: context.is_file(),
+        detail: if context.is_file() {
+            context.display().to_string()
+        } else {
+            format!(
+                "missing — looked for {} (written on Start)",
+                context.display()
+            )
+        },
+    });
+    items
 }
 
 #[cfg(test)]
@@ -242,8 +416,8 @@ mod tests {
     #[test]
     fn strips_windows_long_path_prefix() {
         assert_eq!(
-            mcp_bin_string(Path::new(r"\\?\F:\Repos\Ghidrust\target\release\ghidrust.exe")),
-            "F:/Repos/Ghidrust/target/release/ghidrust.exe"
+            mcp_bin_string(Path::new(r"\\?\C:\path\to\Ghidrust\target\release\ghidrust.exe")),
+            "C:/path/to/Ghidrust/target/release/ghidrust.exe"
         );
     }
 
@@ -270,9 +444,44 @@ mod tests {
     }
 
     #[test]
-    fn missing_skill_source_is_error() {
+    fn missing_skill_source_uses_embedded() {
         let proj = tmp_project("miss");
-        let err = write_project_skill(&proj, &proj.join("nope.md")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let out = write_project_skill(&proj, &proj.join("nope.md")).unwrap();
+        let contents = fs::read_to_string(&out).unwrap();
+        assert!(contents.contains("Ghidrust") || contents.len() > 100);
+        assert!(!start_checklist(&proj).is_empty());
+    }
+
+    #[test]
+    fn embedded_skill_hash_stable() {
+        let h1 = skill_content_hash(EMBEDDED_SKILL_MD);
+        let h2 = skill_content_hash(EMBEDDED_SKILL_MD);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+    }
+
+    #[test]
+    fn ensure_project_skill_makes_checklist_skill_ok() {
+        let proj = tmp_project("ensure");
+        let out = ensure_project_skill(&proj, None).unwrap();
+        assert_eq!(out, project_skill_path(&proj));
+        assert!(out.is_file());
+        assert!(out.with_extension("hash").is_file());
+        let skill = start_checklist(&proj)
+            .into_iter()
+            .find(|i| i.id == "skill")
+            .expect("skill row");
+        assert!(skill.ok, "detail={}", skill.detail);
+    }
+
+    #[test]
+    fn skill_hash_sidecar_written_when_body_already_matches() {
+        let proj = tmp_project("hash-sidecar");
+        let dest = ensure_project_skill(&proj, None).unwrap();
+        let hash_path = dest.with_extension("hash");
+        fs::remove_file(&hash_path).unwrap();
+        // Idempotent rewrite with same body must restore the sidecar.
+        let _ = ensure_project_skill(&proj, None).unwrap();
+        assert!(hash_path.is_file());
     }
 }

@@ -1,12 +1,17 @@
 //! Ghidrust CLI + stdio MCP/agent tool surface over ghidrust-core.
 
+mod friction;
+
 use ghidrust_core::{
-    analyzer_catalog, analyze_path, collect_strings_bytes, collect_strings_opts,
-    disassemble_range, disassemble_range_opts, filter_imports, load_path, load_path_opts,
-    recover_rtti, run_analyzers, scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback,
+    analyzer_catalog, analyze_path, artifact_get, artifact_query, collect_strings_bytes,
+    collect_strings_opts, disassemble_range_opts, filter_imports, inventory_pe_dir, list_artifacts,
+    list_tree, load_path, load_path_opts, process_attach, process_detach, process_list,
+    process_modules, process_read, process_regions, process_resolve, recover_rtti, rtti_query,
+    run_analyzers, scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback,
     scan_printable_runs_parallel, scan_printable_runs_seq, time_bulk_printable, write_json_no_bom,
-    xrefs_from, xrefs_to, xrefs_to_import, xrefs_to_string_filter, AnalysisBundle, BulkScanMode,
-    Program, Project, StringCollectOpts, StringMatchMode, ANALYZER_NAMES,
+    xrefs_from, xrefs_to, xrefs_to_import, xrefs_to_string_filter_opts, AnalysisBundle, BulkScanMode,
+    Program, Project, RttiMatchMode, StringCollectOpts, StringMatchMode, TreeListOpts,
+    ANALYZER_NAMES, DEFAULT_PREVIEW_LIMIT,
 };
 use ghidrust_decomp::decompile_entry;
 use ghidrust_il2cpp::{
@@ -39,7 +44,21 @@ fn main() -> ExitCode {
         "load" => cmd_load(&args[1..], json_mode),
         "disasm" | "disassemble" => cmd_disasm(&args[1..], json_mode),
         "bytes" | "dump" => cmd_bytes(&args[1..], json_mode),
-        "rtti" => cmd_rtti(&args[1..], json_mode),
+        "rtti" => {
+            let rest = &args[1..];
+            if rest.iter().any(|a| {
+                matches!(a.as_str(), "--filter" | "--name" | "--exact" | "query")
+            }) {
+                let rest = if rest.first().map(|s| s.as_str()) == Some("query") {
+                    &rest[1..]
+                } else {
+                    rest
+                };
+                friction::cmd_rtti_query_cli(rest, json_mode)
+            } else {
+                cmd_rtti(rest, json_mode)
+            }
+        }
         "analyzers" => cmd_analyzers(json_mode),
         "analyze" => cmd_analyze(&args[1..], json_mode),
         "strings" => cmd_strings(&args[1..], json_mode),
@@ -48,6 +67,10 @@ fn main() -> ExitCode {
         "function-at" => cmd_function_at(&args[1..], json_mode),
         "il2cpp" => cmd_il2cpp(&args[1..], json_mode),
         "unity-inventory" => cmd_unity_inventory(&args[1..], json_mode),
+        "inventory" | "pe-inventory" => friction::cmd_inventory(&args[1..], json_mode),
+        "tree" | "list-tree" => friction::cmd_tree(&args[1..], json_mode),
+        "artifact" => friction::cmd_artifact(&args[1..], json_mode),
+        "process" => friction::cmd_process(&args[1..], json_mode),
         "bulk-bench" => cmd_bulk_bench(&args[1..], json_mode),
         "decompile" => cmd_decompile(&args[1..], json_mode),
         "decompile-bench" => cmd_decompile_bench(&args[1..], json_mode),
@@ -74,13 +97,13 @@ fn print_help() {
     eprintln!(
         "ghidrust — AI-native reverse-engineering (CodeBrowser headless)\n\n\
          Usage:\n\
-           ghidrust load <path> [--out FILE] [--json]\n\
+           ghidrust load <path|--project DIR --file-id ID> [--out FILE] [--json]\n\
            ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--out FILE] [--json]\n\
            ghidrust bytes <path> --addr HEX [--count N] [--out FILE] [--json]\n\
            ghidrust strings <path> [--raw] [--encoding ascii|utf16|all] [--filter SUB]\n\
                      [--match substr|token|whole|glob] [--min N] [--limit N] [--out FILE] [--json]\n\
            ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME)\n\
-                     [--skip-stubs] [--classify] [--out FILE] [--json]\n\
+                     [--encoding ascii|utf16le|all] [--skip-stubs] [--classify] [--out FILE] [--json]\n\
            ghidrust imports <path> [--dll NAME] [--name NAME] [--json]\n\
            ghidrust function-at <path> --addr HEX [--json]\n\
            ghidrust il2cpp meta <metadata.dat> [--filter SUB] [--out FILE] [--json]\n\
@@ -88,7 +111,11 @@ fn print_help() {
            ghidrust il2cpp stubs --binary <il2cpp> [--filter SUB] [--max N] [--out FILE] [--json]\n\
            ghidrust il2cpp icalls --binary <engine.dll> [--filter SUB] [--out FILE] [--json]\n\
            ghidrust unity-inventory <game-dir> [--out FILE] [--json]\n\
-           ghidrust rtti <path> [--json]\n\
+           ghidrust inventory <dir> [--max-depth N] [--hash] [--out FILE] [--json]\n\
+           ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB] [--json]\n\
+           ghidrust artifact get|query|list <id> [--offset N] [--limit N] [--json]\n\
+           ghidrust process list|attach|detach|modules|read|resolve|regions … [--json]\n\
+           ghidrust rtti <path> [--filter|--name|--exact] [--match MODE] [--json]\n\
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
            ghidrust bulk-bench <path> [--json]   # seq vs parallel vs GPU/fallback timings\n\
@@ -96,7 +123,7 @@ fn print_help() {
                      [--follow-stub] [--verbose] [--out FILE] [--json]\n\
            ghidrust decompile-bench <path> [--functions N] [--count N] [--out FILE] [--stage1] [--parallel] [--json]\n\
            ghidrust ghidra-headtohead <path> [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out FILE] [--spawn-timeout SECS] [--ghidra-fn-cap N] [--json]\n\
-           ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]\n\
+           ghidrust gpu-decompile <path> [--addr HEX] [--out FILE] [--metrics FILE] [--json]\n\
            ghidrust re-bench <path> [--out FILE] [--json]  # CPU then GPU metrics (decomp+bulk)\n\
            ghidrust analyzer-bench <path> [--large] [--out FILE] [--json]\n\
            ghidrust analyzer-bench-matrix\n\
@@ -372,15 +399,29 @@ fn path_arg(args: &[String]) -> Result<PathBuf, String> {
 }
 
 fn cmd_load(args: &[String], json: bool) -> ExitCode {
-    let path = match path_arg(args) {
-        Ok(p) => p,
+    let (path, identity) = match friction::resolve_program_path(args) {
+        Ok(v) => v,
         Err(e) => {
-            eprintln!("{e}");
-            return ExitCode::from(2);
+            // Fall back to positional path for backward compatibility.
+            match path_arg(args) {
+                Ok(p) => (
+                    p.clone(),
+                    json!({
+                        "path": p.display().to_string(),
+                        "project": Value::Null,
+                        "file_id": Value::Null,
+                        "resolved_path": p.display().to_string(),
+                    }),
+                ),
+                Err(_) => {
+                    eprintln!("{e}");
+                    return ExitCode::from(2);
+                }
+            }
         }
     };
     let mut out_path: Option<PathBuf> = None;
-    let mut i = 1;
+    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--out" if i + 1 < args.len() => {
@@ -392,18 +433,7 @@ fn cmd_load(args: &[String], json: bool) -> ExitCode {
     }
     match load_path(&path) {
         Ok(prog) => {
-            let v = json!({
-                "name": prog.name,
-                "format": prog.format,
-                "image_base": format!("{:#x}", prog.image_base),
-                "entry": prog.entry.map(|e| format!("{e:#x}")),
-                "sections": prog.sections.iter().map(|s| json!({
-                    "name": s.name,
-                    "va": format!("{:#x}", s.va),
-                    "virtual_size": s.virtual_size,
-                    "raw_size": s.raw_size,
-                })).collect::<Vec<_>>(),
-            });
+            let v = friction::load_json_for_prog(&prog, &identity);
             emit_result(&v, json, out_path.as_deref(), || print_program_summary(&prog))
         }
         Err(e) => {
@@ -503,11 +533,29 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
         Ok(prog) => {
             let start = addr.or(prog.entry).unwrap_or(prog.image_base);
             match disassemble_range_opts(&prog, start, count, skip_bad) {
-                Ok(listing) => emit_result(&listing, json, out_path.as_deref(), || {
-                    for insn in &listing {
-                        println!("{}", insn.text());
+                Ok(result) => {
+                    if json {
+                        let body = json!({
+                            "insns": result.insns,
+                            "decode_gaps": result.decode_gaps,
+                            "first_gap_va": result.first_gap_va.map(|v| format!("{v:#x}")),
+                        });
+                        emit_result(&body, true, out_path.as_deref(), || {})
+                    } else {
+                        emit_result(&result.insns, false, out_path.as_deref(), || {
+                            for insn in &result.insns {
+                                println!("{}", insn.text());
+                            }
+                            if result.decode_gaps > 0 {
+                                println!(
+                                    "; decode_gaps={} first_gap={:?}",
+                                    result.decode_gaps,
+                                    result.first_gap_va.map(|v| format!("{v:#x}"))
+                                );
+                            }
+                        })
                     }
-                }),
+                }
                 Err(e) => {
                     eprintln!("error: {e}");
                     ExitCode::FAILURE
@@ -713,6 +761,7 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
     let mut import_name: Option<String> = None;
     let mut skip_stubs = false;
     let mut classify = false;
+    let mut encoding = "all".to_string();
     let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
@@ -731,6 +780,10 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
             }
             "--import" if i + 1 < args.len() => {
                 import_name = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--encoding" if i + 1 < args.len() => {
+                encoding = args[i + 1].clone();
                 i += 2;
             }
             "--skip-stubs" => {
@@ -754,7 +807,7 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
         .count();
     if modes != 1 {
         eprintln!(
-            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--skip-stubs] [--classify] [--out FILE] [--json]"
+            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--encoding ascii|utf16le|all] [--skip-stubs] [--classify] [--out FILE] [--json]"
         );
         return ExitCode::from(2);
     }
@@ -765,7 +818,7 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
             } else if let Some(f) = from {
                 xrefs_from(&prog, f, 256)
             } else if let Some(s) = string_filter {
-                xrefs_to_string_filter(&prog, &s)
+                xrefs_to_string_filter_opts(&prog, &s, &encoding, true)
             } else {
                 xrefs_to_import(&prog, import_name.as_deref().unwrap())
             };
@@ -796,6 +849,7 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
                         "to": format!("{:#x}", r.to),
                         "kind": kind,
                         "preview": preview,
+                        "encoding": r.encoding,
                     })
                 })
                 .collect();
@@ -1722,13 +1776,14 @@ fn cmd_gpu_decompile(args: &[String], json: bool) -> ExitCode {
         Some(p) => PathBuf::from(p),
         None => {
             eprintln!(
-                "usage: ghidrust gpu-decompile <path> [--out FILE] [--metrics FILE] [--json]"
+                "usage: ghidrust gpu-decompile <path> [--addr HEX] [--out FILE] [--metrics FILE] [--json]"
             );
             return ExitCode::from(2);
         }
     };
     let mut out_path = PathBuf::from("ghidrust_gpu_decompile.gdecomp");
     let mut metrics_path: Option<PathBuf> = None;
+    let mut addr: Option<u64> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -1740,18 +1795,29 @@ fn cmd_gpu_decompile(args: &[String], json: bool) -> ExitCode {
                 metrics_path = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--addr" if i + 1 < args.len() => {
+                addr = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
             _ => i += 1,
         }
     }
-    let prog = match load_path(&path) {
+    let mut prog = match load_path(&path) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("load error: {e}");
             return ExitCode::FAILURE;
         }
     };
+    let (entry_va, resolve_meta) = match friction::resolve_and_entry(&mut prog, addr) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     let t_cpu = Instant::now();
-    let cpu = match ghidrust_decomp::decompile_entry(&prog, 64) {
+    let cpu = match ghidrust_decomp::decompile_at(&prog, entry_va, 64) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("cpu decompile: {e}");
@@ -1760,7 +1826,7 @@ fn cmd_gpu_decompile(args: &[String], json: bool) -> ExitCode {
     };
     let cpu_ms = t_cpu.elapsed().as_secs_f64() * 1000.0;
 
-    let rep = match ghidrust_decomp::gpu_decompile_to_file(&prog, None, &out_path, 128) {
+    let rep = match ghidrust_decomp::gpu_decompile_to_file(&prog, Some(entry_va), &out_path, 128) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("gpu-decompile error: {e}");
@@ -1783,6 +1849,11 @@ fn cmd_gpu_decompile(args: &[String], json: bool) -> ExitCode {
 
     let metrics = json!({
         "file": path.display().to_string(),
+        "resolve": resolve_meta,
+        "requested_addr": addr.map(|a| format!("{a:#x}")),
+        "resolved_entry": format!("{entry_va:#x}"),
+        "dump_path": out_path.display().to_string(),
+        "note": ".gdecomp is opaque binary dump — use metrics JSON, not dump-as-text",
         "cpu_decompile_ms": cpu_ms,
         "cpu_blocks": cpu.blocks.len(),
         "cpu_chars": cpu.char_count(),
@@ -1924,8 +1995,25 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
     }
     let _ = stage0; // suppressed; retained for future gating
     match load_path(&path) {
-        Ok(prog) => {
-            let mut va = addr.unwrap_or_else(|| prog.entry.unwrap_or(prog.image_base));
+        Ok(mut prog) => {
+            let (mut va, resolve_meta) = match friction::resolve_and_entry(&mut prog, addr) {
+                Ok(v) => v,
+                Err(e) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&json!({
+                                "ok": false,
+                                "error": e,
+                            }))
+                            .unwrap()
+                        );
+                    } else {
+                        eprintln!("error: {e}");
+                    }
+                    return ExitCode::FAILURE;
+                }
+            };
             let mut follow_meta: Option<Value> = None;
             if follow_stub {
                 if let Some(stub) = classify_at(&prog, va) {
@@ -1972,6 +2060,7 @@ fn cmd_decompile(args: &[String], json: bool) -> ExitCode {
                     Ok((d, s1)) => {
                         let mut obj = json!({
                             "decompile": d,
+                            "resolve": resolve_meta,
                             "stage1": {
                                 "loops": s1.structure.loops.len(),
                                 "phis": s1.ssa.phi_count(),
@@ -2637,6 +2726,7 @@ fn refs_json(refs: &[ghidrust_core::XRef]) -> Value {
                     "to": format!("{:#x}", r.to),
                     "kind": r.kind,
                     "preview": r.preview,
+                    "encoding": r.encoding,
                 })
             })
             .collect(),
@@ -2664,11 +2754,157 @@ fn tool_defs() -> Vec<ToolDef> {
     vec![
         ToolDef {
             name: "load",
-            description: "Load a PE or ELF binary and return memory map / sections",
+            description: "Load a PE or ELF binary (path OR project+file_id) and return sections + section_notes",
             input_schema: json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": {
+                    "path": { "type": "string" },
+                    "project": { "type": "string", "description": "Project directory" },
+                    "file_id": { "type": "string", "description": "Imported file id within project" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "artifact_get",
+            description: "Fetch a spilled analysis artifact by id or path (full JSON)",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: "artifact_query",
+            description: "Page through an artifact with offset/limit; returns next_offset",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "offset": { "type": "integer" },
+                    "limit": { "type": "integer" }
+                },
+                "required": ["id"]
+            }),
+        },
+        ToolDef {
+            name: "artifact_list",
+            description: "List recent spilled analysis artifacts (id/kind/path/entry_count)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "max": { "type": "integer", "description": "Max artifacts to list (default 64)" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "inventory",
+            description: "Generic PE install inventory (exe/dll catalog + VERSIONINFO)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Install / directory root" },
+                    "max_depth": { "type": "integer" },
+                    "hash": { "type": "boolean" }
+                },
                 "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "list_tree",
+            description: "Bounded file tree index (size/mtime; no unpack; errors as rows)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "max_depth": { "type": "integer" },
+                    "extensions": { "type": "string", "description": "Comma-separated extensions" },
+                    "name_glob": { "type": "string" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "rtti_query",
+            description: "RTTI catalog query (filter/exact) with multi-vtable honesty + cache",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "exact": { "type": "boolean" },
+                    "match": { "type": "string", "enum": ["substr", "token", "whole", "glob", "exact"] }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "process_list",
+            description: "List OS processes (Windows Live Process Bridge)",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "process_attach",
+            description: "Attach read-only to a process by pid; returns session_id",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "pid": { "type": "integer" } },
+                "required": ["pid"]
+            }),
+        },
+        ToolDef {
+            name: "process_detach",
+            description: "Detach a live-process session by session_id",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "session_id": { "type": "string" } },
+                "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+            name: "process_modules",
+            description: "List modules (base/size/path) for an attached session",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "session_id": { "type": "string" } },
+                "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+            name: "process_read",
+            description: "Read process memory at VA (capped); short reads are explicit errors",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "addr": { "type": "string" },
+                    "size": { "type": "integer" }
+                },
+                "required": ["session_id", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "process_resolve",
+            description: "static_to_live: module + RVA → live VA (ASLR)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "module": { "type": "string" },
+                    "rva": { "type": "string" }
+                },
+                "required": ["session_id", "module", "rva"]
+            }),
+        },
+        ToolDef {
+            name: "process_regions",
+            description: "List memory regions for an attached session (capped)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "max": { "type": "integer", "description": "Max regions (default 256)" }
+                },
+                "required": ["session_id"]
             }),
         },
         ToolDef {
@@ -2747,11 +2983,12 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "gpu_decompile",
-            description: "GPU-resident multipass decompile of entry; returns dump metrics (PCIe/device when available)",
+            description: "GPU multipass decompile at addr (containing-fn resolve); returns metrics JSON path; .gdecomp is opaque",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "addr": { "type": "string", "description": "VA (mid-body ok; resolved to containing entry)" },
                     "out": { "type": "string", "description": "optional dump path" }
                 },
                 "required": ["path"]
@@ -2903,12 +3140,13 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_string_xrefs",
-            description: "Find strings by filter, then xrefs to each string VA",
+            description: "Find strings by filter, then xrefs (encoding ascii|utf16le|all; interior LEA supported)",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "filter": { "type": "string" }
+                    "filter": { "type": "string" },
+                    "encoding": { "type": "string", "enum": ["ascii", "utf16", "utf16le", "all"] }
                 },
                 "required": ["path", "filter"]
             }),
@@ -3052,6 +3290,205 @@ fn call_tool(params: &Value) -> Result<String, String> {
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
     match name {
+        "artifact_get" => {
+            let id = args
+                .get("id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.id".to_string())?;
+            let v = artifact_get(id).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&v).unwrap())
+        }
+        "artifact_query" => {
+            let id = args
+                .get("id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.id".to_string())?;
+            let offset = args.get("offset").and_then(|o| o.as_u64()).unwrap_or(0) as usize;
+            let limit = args
+                .get("limit")
+                .and_then(|o| o.as_u64())
+                .unwrap_or(DEFAULT_PREVIEW_LIMIT as u64) as usize;
+            let env = artifact_query(id, offset, limit).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&env).unwrap())
+        }
+        "artifact_list" => {
+            let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(64) as usize;
+            let m = list_artifacts(max).map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&m).unwrap())
+        }
+        "inventory" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let max_depth = args.get("max_depth").and_then(|m| m.as_u64()).unwrap_or(8) as usize;
+            let with_hash = args.get("hash").and_then(|h| h.as_bool()).unwrap_or(false);
+            let inv = inventory_pe_dir(path, max_depth, with_hash).map_err(|e| e.to_string())?;
+            let entries = serde_json::to_value(&inv.entries).unwrap();
+            let env = ghidrust_core::envelope_or_spill(
+                "inventory",
+                entries,
+                64,
+                DEFAULT_PREVIEW_LIMIT,
+                Some(&inv.root),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "schema_version": inv.schema_version,
+                "root": inv.root,
+                "notes": inv.notes,
+                "entry_count": inv.entries.len(),
+                "envelope": env,
+                "entries": if inv.entries.len() <= 64 {
+                    serde_json::to_value(&inv.entries).unwrap()
+                } else {
+                    Value::Null
+                },
+            }))
+            .unwrap())
+        }
+        "list_tree" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let mut opts = TreeListOpts::default();
+            if let Some(d) = args.get("max_depth").and_then(|m| m.as_u64()) {
+                opts.max_depth = d as usize;
+            }
+            if let Some(ext) = args.get("extensions").and_then(|e| e.as_str()) {
+                opts.extensions = Some(
+                    ext.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                );
+            }
+            if let Some(g) = args.get("name_glob").and_then(|e| e.as_str()) {
+                opts.name_glob = Some(g.to_string());
+            }
+            let res = list_tree(path, opts);
+            let entries = serde_json::to_value(&res.entries).unwrap();
+            let env = ghidrust_core::envelope_or_spill(
+                "tree",
+                entries,
+                128,
+                DEFAULT_PREVIEW_LIMIT,
+                Some(&res.root),
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "root": res.root,
+                "truncated": res.truncated,
+                "entry_count": res.entries.len(),
+                "envelope": env,
+            }))
+            .unwrap())
+        }
+        "rtti_query" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let filter = args.get("filter").and_then(|f| f.as_str());
+            let exact = args.get("exact").and_then(|e| e.as_bool()).unwrap_or(false);
+            let mode = args
+                .get("match")
+                .and_then(|m| m.as_str())
+                .map(RttiMatchMode::parse)
+                .unwrap_or(RttiMatchMode::Substr);
+            let prog = load_path(path).map_err(|e| e.to_string())?;
+            let q = rtti_query(&prog, filter, exact, mode).map_err(|e| e.to_string())?;
+            let entries = serde_json::to_value(&q.classes).unwrap();
+            let env = if q.entry_count > 64 {
+                Some(
+                    ghidrust_core::spill_artifact("rtti", entries, DEFAULT_PREVIEW_LIMIT, Some(path))
+                        .map_err(|e| e.to_string())?,
+                )
+            } else {
+                None
+            };
+            Ok(serde_json::to_string_pretty(&json!({
+                "entry_count": q.entry_count,
+                "cache_hit": q.cache_hit,
+                "notes": q.notes,
+                "envelope": env,
+                "classes": if q.entry_count <= 64 {
+                    serde_json::to_value(&q.classes).unwrap()
+                } else {
+                    Value::Null
+                },
+            }))
+            .unwrap())
+        }
+        "process_list" => {
+            let list = process_list()?;
+            Ok(serde_json::to_string_pretty(&list).unwrap())
+        }
+        "process_attach" => {
+            let pid = args
+                .get("pid")
+                .and_then(|p| p.as_u64())
+                .ok_or_else(|| "missing arguments.pid".to_string())? as u32;
+            let s = process_attach(pid)?;
+            Ok(serde_json::to_string_pretty(&s).unwrap())
+        }
+        "process_detach" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            process_detach(sid)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_modules" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let m = process_modules(sid)?;
+            Ok(serde_json::to_string_pretty(&m).unwrap())
+        }
+        "process_read" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let size = args.get("size").and_then(|s| s.as_u64()).unwrap_or(64) as usize;
+            let va = parse_u64(addr)?;
+            let r = process_read(sid, va, size)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_resolve" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let module = args
+                .get("module")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.module".to_string())?;
+            let rva = args
+                .get("rva")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.rva".to_string())?;
+            let rva = parse_u64(rva)?;
+            let r = process_resolve(sid, module, rva)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_regions" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(256) as usize;
+            let r = process_regions(sid, max)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
         "list_strings" | "search_strings" => {
             let path = args
                 .get("path")
@@ -3298,8 +3735,12 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("filter")
                 .and_then(|f| f.as_str())
                 .ok_or_else(|| "missing arguments.filter".to_string())?;
+            let encoding = args
+                .get("encoding")
+                .and_then(|e| e.as_str())
+                .unwrap_or("all");
             let prog = load_path(path).map_err(|e| e.to_string())?;
-            let refs = xrefs_to_string_filter(&prog, filter);
+            let refs = xrefs_to_string_filter_opts(&prog, filter, encoding, true);
             Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
         }
         "list_imports" => {
@@ -3376,10 +3817,19 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .and_then(|p| p.as_str())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| std::env::temp_dir().join("mcp_gpu_decompile.gdecomp"));
-            let prog = load_path(path).map_err(|e| e.to_string())?;
-            let rep = ghidrust_decomp::gpu_decompile_to_file(&prog, None, &out, 256)
+            let mut prog = load_path(path).map_err(|e| e.to_string())?;
+            let addr = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
+                Some(parse_u64(a)?)
+            } else {
+                None
+            };
+            let (entry, resolve_meta) = friction::resolve_and_entry(&mut prog, addr)?;
+            let rep = ghidrust_decomp::gpu_decompile_to_file(&prog, Some(entry), &out, 256)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_string_pretty(&json!({
+                "resolve": resolve_meta,
+                "requested_addr": addr.map(|a| format!("{a:#x}")),
+                "resolved_entry": format!("{entry:#x}"),
                 "backend": rep.backend,
                 "device": rep.device,
                 "ms": rep.ms,
@@ -3391,6 +3841,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 "block_count": rep.block_count,
                 "dump_path": rep.dump_path,
                 "dump_bytes": rep.dump_bytes,
+                "note": ".gdecomp is opaque — use metrics fields, do not read dump as text",
                 "pseudo_c_head": rep.pseudo_c.lines().take(8).collect::<Vec<_>>().join("\n"),
             }))
             .unwrap())
@@ -3437,12 +3888,13 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("follow_stub")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let prog = load_path(path).map_err(|e| e.to_string())?;
-            let mut va = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
-                parse_u64(a)?
+            let mut prog = load_path(path).map_err(|e| e.to_string())?;
+            let addr_opt = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
+                Some(parse_u64(a)?)
             } else {
-                prog.entry.unwrap_or(prog.image_base)
+                None
             };
+            let (mut va, resolve_meta) = friction::resolve_and_entry(&mut prog, addr_opt)?;
             let mut follow_meta: Option<Value> = None;
             if follow_stub {
                 if let Some(stub) = classify_at(&prog, va) {
@@ -3477,6 +3929,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         ghidrust_decomp::decompile_at(&prog, va, count).map_err(|e| e.to_string())?;
                     let mut obj = json!({
                         "stage": "0",
+                        "resolve": resolve_meta,
                         "name": d.name,
                         "entry": format!("{:#x}", d.entry),
                         "blocks": d.blocks.len(),
@@ -3494,6 +3947,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         .map_err(|e| e.to_string())?;
                     let mut obj = json!({
                         "stage": "0.5",
+                        "resolve": resolve_meta,
                         "name": d.name,
                         "entry": format!("{:#x}", d.entry),
                         "blocks": d.blocks.len(),
@@ -3513,6 +3967,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         .map_err(|e| e.to_string())?;
                     let mut obj = json!({
                         "stage": "1",
+                        "resolve": resolve_meta,
                         "name": d.name,
                         "entry": format!("{:#x}", d.entry),
                         "blocks": d.blocks.len(),
@@ -3536,44 +3991,77 @@ fn call_tool(params: &Value) -> Result<String, String> {
             }
         }
         "load" | "disassemble" | "rtti" | "analyze" => {
-            let path = args
-                .get("path")
-                .and_then(|p| p.as_str())
-                .ok_or_else(|| "missing arguments.path".to_string())?;
             match name {
                 "load" => {
-                    let prog = load_path(path).map_err(|e| e.to_string())?;
-                    Ok(serde_json::to_string_pretty(&json!({
-                        "name": prog.name,
-                        "format": prog.format,
-                        "image_base": format!("{:#x}", prog.image_base),
-                        "entry": prog.entry.map(|e| format!("{e:#x}")),
-                        "sections": prog.sections.iter().map(|s| json!({
-                            "name": s.name,
-                            "va": format!("{:#x}", s.va),
-                            "virtual_size": s.virtual_size,
-                        })).collect::<Vec<_>>(),
-                    }))
+                    let path = if let Some(p) = args.get("path").and_then(|p| p.as_str()) {
+                        p.to_string()
+                    } else if let (Some(proj), Some(fid)) = (
+                        args.get("project").and_then(|p| p.as_str()),
+                        args.get("file_id").and_then(|p| p.as_str()),
+                    ) {
+                        let project = Project::open(proj).map_err(|e| e.to_string())?;
+                        let entry = project
+                            .list_files()
+                            .into_iter()
+                            .find(|f| f.id == fid)
+                            .ok_or_else(|| format!("file_id not found: {fid}"))?;
+                        project
+                            .root
+                            .join(&entry.imported_rel)
+                            .display()
+                            .to_string()
+                    } else {
+                        return Err("load requires path or project+file_id".into());
+                    };
+                    let prog = load_path(&path).map_err(|e| e.to_string())?;
+                    let identity = json!({
+                        "path": args.get("path").and_then(|p| p.as_str()),
+                        "project": args.get("project").and_then(|p| p.as_str()),
+                        "file_id": args.get("file_id").and_then(|p| p.as_str()),
+                        "resolved_path": path,
+                    });
+                    Ok(serde_json::to_string_pretty(&friction::load_json_for_prog(
+                        &prog, &identity,
+                    ))
                     .unwrap())
                 }
                 "disassemble" => {
-                    let prog = load_path(path).map_err(|e| e.to_string())?;
+                    let path = args
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| "missing arguments.path".to_string())?;
+                    let mut prog = load_path(path).map_err(|e| e.to_string())?;
                     let count = args.get("count").and_then(|c| c.as_u64()).unwrap_or(16) as usize;
-                    let start = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
-                        parse_u64(a)?
+                    let addr_opt = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
+                        Some(parse_u64(a)?)
                     } else {
-                        prog.entry.unwrap_or(prog.image_base)
+                        None
                     };
-                    let listing =
-                        disassemble_range(&prog, start, count).map_err(|e| e.to_string())?;
-                    Ok(serde_json::to_string_pretty(&listing).unwrap())
+                    let (start, resolve_meta) = friction::resolve_and_entry(&mut prog, addr_opt)?;
+                    let result = disassemble_range_opts(&prog, start, count, true)
+                        .map_err(|e| e.to_string())?;
+                    Ok(serde_json::to_string_pretty(&json!({
+                        "resolve": resolve_meta,
+                        "decode_gaps": result.decode_gaps,
+                        "first_gap_va": result.first_gap_va.map(|v| format!("{v:#x}")),
+                        "insns": result.insns,
+                    }))
+                    .unwrap())
                 }
                 "rtti" => {
+                    let path = args
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| "missing arguments.path".to_string())?;
                     let prog = load_path(path).map_err(|e| e.to_string())?;
                     let report = recover_rtti(&prog).map_err(|e| e.to_string())?;
                     Ok(serde_json::to_string_pretty(&report).unwrap())
                 }
                 "analyze" => {
+                    let path = args
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .ok_or_else(|| "missing arguments.path".to_string())?;
                     let mut prog = load_path(path).map_err(|e| e.to_string())?;
                     let names_owned: Vec<String> = args
                         .get("analyzers")

@@ -1,6 +1,6 @@
 //! Unity player install inventory (assemblies, plugins, metadata, XR-related fields).
 
-use ghidrust_core::load_path;
+use ghidrust_core::{load_path, version_info_for_file, VersionInfo};
 use ghidrust_il2cpp::{Il2CppMetadata, METADATA_MAGIC};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -71,9 +71,18 @@ pub struct UnityInventory {
     pub native_xr_imports: Vec<String>,
     pub external_vr_indicators: Vec<String>,
     pub key_hashes: Vec<FileHash>,
+    /// PE VERSIONINFO for player exe / key native modules (shared inventory helpers).
+    #[serde(default)]
+    pub pe_versions: Vec<PeVersionRow>,
     pub verdict: XrVerdict,
     pub confidence: Confidence,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PeVersionRow {
+    pub path: String,
+    pub version: VersionInfo,
 }
 
 /// Inventory a Unity player directory (exe + `*_Data/` layout).
@@ -134,6 +143,7 @@ pub fn inventory_path(root: impl AsRef<Path>) -> Result<UnityInventory, String> 
     let mut native_xr_imports = Vec::new();
     let mut external_vr_indicators = Vec::new();
     let mut key_hashes = Vec::new();
+    let mut pe_versions = Vec::new();
 
     // Hash player exe + GameAssembly / UnityPlayer when present.
     for name in ["GameAssembly.dll", "UnityPlayer.dll"] {
@@ -142,6 +152,10 @@ pub fn inventory_path(root: impl AsRef<Path>) -> Result<UnityInventory, String> 
             if let Some(h) = hash_file(&p) {
                 key_hashes.push(h);
             }
+            pe_versions.push(PeVersionRow {
+                path: p.display().to_string(),
+                version: version_info_for_file(&p),
+            });
             if let Ok(prog) = load_path(&p) {
                 for e in &prog.imports {
                     let dll = e.dll.to_ascii_lowercase();
@@ -178,6 +192,10 @@ pub fn inventory_path(root: impl AsRef<Path>) -> Result<UnityInventory, String> 
             if let Some(h) = hash_file(&path) {
                 key_hashes.push(h);
             }
+            pe_versions.push(PeVersionRow {
+                path: path.display().to_string(),
+                version: version_info_for_file(&path),
+            });
         }
         if fname.contains("inject") && fname.ends_with(".dll") {
             external_vr_indicators.push(format!("sidecar_dll:{}", path.display()));
@@ -234,6 +252,7 @@ pub fn inventory_path(root: impl AsRef<Path>) -> Result<UnityInventory, String> 
         native_xr_imports,
         external_vr_indicators,
         key_hashes,
+        pe_versions,
         verdict,
         confidence,
         notes,

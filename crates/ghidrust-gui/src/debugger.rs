@@ -12,6 +12,11 @@
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, RichText, Ui};
+use ghidrust_core::process::{
+    process_attach, process_detach, process_list, process_modules, process_read,
+    process_regions, static_to_live, ModuleInfo, ProcessInfo, ProcessSession, ReadResult,
+    RegionInfo,
+};
 
 /// One provider in Ghidra's Debugger tool catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -109,14 +114,14 @@ impl DebuggerPane {
     /// Copy pointing at the pending backend for this pane.
     pub const fn backend_message(self) -> &'static str {
         match self {
-            DebuggerPane::Targets => "Backend pending — no live target agents yet (Phase P12 in GHIDRA_PARITY_PHASE_PLANS.md).",
+            DebuggerPane::Targets => "Live Process Bridge (Windows) — ghidrust_core::process_list/attach.",
             DebuggerPane::Threads => "Backend pending — target-agent thread model.",
-            DebuggerPane::Modules => "Backend pending — target-agent module list.",
-            DebuggerPane::Regions => "Backend pending — target-agent memory regions.",
+            DebuggerPane::Modules => "Live Process Bridge (Windows) — ghidrust_core::process_modules + static_to_live.",
+            DebuggerPane::Regions => "Live Process Bridge (Windows) — ghidrust_core::process_regions (VirtualQueryEx).",
             DebuggerPane::Registers => "Backend pending — live register values (Register Manager renders the static register lattice).",
             DebuggerPane::Stack => "Backend pending — target-agent stack unwinder.",
             DebuggerPane::Breakpoints => "Backend pending — breakpoint model + agent set/clear.",
-            DebuggerPane::MemoryBytes => "Backend pending — live memory reads (Bytes pane renders static Program bytes).",
+            DebuggerPane::MemoryBytes => "Live Process Bridge (Windows) — ghidrust_core::process_read (ReadProcessMemory).",
             DebuggerPane::Watches => "Backend pending — expression evaluator + refresh.",
             DebuggerPane::DebuggerConsole => "Backend pending — target-agent stdio.",
         }
@@ -181,6 +186,29 @@ pub struct DebuggerState {
     pub bp_input: String,
     /// New-watch input.
     pub watch_input: String,
+    // ── Live Process Bridge (Windows) — `ghidrust_core::process_*` ──────
+    /// Attached session (Targets pane "Attach"); `None` = no live target.
+    pub session: Option<ProcessSession>,
+    /// Cached process list (Targets pane; refreshed on demand).
+    pub process_list_cache: Vec<ProcessInfo>,
+    /// Targets pane process-name filter.
+    pub targets_filter: String,
+    /// Targets pane manual PID input (attach without scanning the list).
+    pub attach_pid_input: String,
+    /// Cached module list for the attached session (Modules pane).
+    pub modules_cache: Vec<ModuleInfo>,
+    /// Cached region list for the attached session (Regions pane).
+    pub regions_cache: Vec<RegionInfo>,
+    /// Modules pane · Static Mappings mini-tool: module name + static RVA.
+    pub static_map_module_input: String,
+    pub static_map_rva_input: String,
+    pub static_map_result: Option<String>,
+    /// Memory Bytes pane inputs + last read.
+    pub mem_bytes_va_input: String,
+    pub mem_bytes_size_input: String,
+    pub mem_bytes_last: Option<ReadResult>,
+    /// Last error from any Live Process Bridge call (fail-loud, not silent).
+    pub live_error: Option<String>,
 }
 
 impl DebuggerState {
@@ -224,8 +252,326 @@ pub fn render(pane: DebuggerPane, state: &mut DebuggerState, ui: &mut Ui, muted:
     match pane {
         DebuggerPane::Breakpoints => render_breakpoints(state, ui, muted),
         DebuggerPane::Watches => render_watches(state, ui, muted),
+        DebuggerPane::Targets => render_targets(state, ui, muted),
+        DebuggerPane::Modules => render_modules(state, ui, muted),
+        DebuggerPane::Regions => render_regions(state, ui, muted),
+        DebuggerPane::MemoryBytes => render_memory_bytes(state, ui, muted),
         _ => render_empty_table(pane, ui, muted),
     }
+}
+
+fn err_row(ui: &mut Ui, err: &str) {
+    ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
+}
+
+/// Ghidra `DebuggerTargetsPlugin` analog — process list (Windows Toolhelp32
+/// snapshot) + Attach. Attaching stores a `ProcessSession` other panes read.
+fn render_targets(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    ui.horizontal(|ui| {
+        if ui.button("Refresh process list").clicked() {
+            state.live_error = None;
+            match process_list() {
+                Ok(v) => state.process_list_cache = v,
+                Err(e) => {
+                    state.process_list_cache.clear();
+                    state.live_error = Some(e);
+                }
+            }
+        }
+        ui.label("Filter:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.targets_filter)
+                .desired_width(200.0)
+                .hint_text("process name…"),
+        );
+    });
+    if let Some(sess) = state.session.clone() {
+        let mut do_detach = false;
+        ui.horizontal(|ui| {
+            ui.small(RichText::new(format!("Attached · pid={} session={}", sess.pid, sess.session_id)).color(muted));
+            if ui.button("Detach").clicked() {
+                do_detach = true;
+            }
+        });
+        if do_detach {
+            let _ = process_detach(&sess.session_id);
+            state.session = None;
+            state.modules_cache.clear();
+            state.regions_cache.clear();
+        }
+    }
+    if let Some(e) = &state.live_error {
+        err_row(ui, e);
+    }
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("PID:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.attach_pid_input)
+                .desired_width(100.0)
+                .hint_text("1234"),
+        );
+        if ui
+            .add_enabled(!state.attach_pid_input.trim().is_empty(), egui::Button::new("Attach by PID"))
+            .clicked()
+        {
+            attach(state, state.attach_pid_input.trim().parse().unwrap_or(0));
+        }
+    });
+    if state.process_list_cache.is_empty() {
+        ui.weak("No process list loaded — click Refresh (Windows Toolhelp32 snapshot).");
+        return;
+    }
+    let q = state.targets_filter.to_ascii_lowercase();
+    let rows: Vec<&ProcessInfo> = state
+        .process_list_cache
+        .iter()
+        .filter(|p| q.is_empty() || p.name.to_ascii_lowercase().contains(&q))
+        .collect();
+    ui.small(format!("{} / {} processes", rows.len(), state.process_list_cache.len()));
+    let mut attach_pid: Option<u32> = None;
+    egui::ScrollArea::vertical()
+        .id_salt("dbg_targets_scroll")
+        .max_height(320.0)
+        .show(ui, |ui| {
+            egui::Grid::new("dbg_targets_grid")
+                .num_columns(4)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("PID");
+                    ui.strong("Name");
+                    ui.strong("Path");
+                    ui.strong("");
+                    ui.end_row();
+                    for p in &rows {
+                        ui.monospace(format!("{}", p.pid));
+                        ui.label(&p.name);
+                        ui.small(p.path.as_deref().unwrap_or("—"));
+                        if ui.small_button("Attach").clicked() {
+                            attach_pid = Some(p.pid);
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+    if let Some(pid) = attach_pid {
+        attach(state, pid);
+    }
+}
+
+fn attach(state: &mut DebuggerState, pid: u32) {
+    if pid == 0 {
+        state.live_error = Some("invalid PID".into());
+        return;
+    }
+    state.live_error = None;
+    match process_attach(pid) {
+        Ok(sess) => {
+            state.session = Some(sess);
+            state.modules_cache.clear();
+            state.regions_cache.clear();
+        }
+        Err(e) => state.live_error = Some(e),
+    }
+}
+
+/// Ghidra `DebuggerModulesPlugin` analog — module list for the attached
+/// session, plus a Static Mappings mini-tool (`static_to_live`: module + RVA
+/// → live VA via the loaded module base).
+fn render_modules(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target — attach one from Debugger Targets first.");
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.small(RichText::new(format!("pid={}", sess.pid)).color(muted));
+        if ui.button("Refresh modules").clicked() {
+            state.live_error = None;
+            match process_modules(&sess.session_id) {
+                Ok(v) => state.modules_cache = v,
+                Err(e) => {
+                    state.modules_cache.clear();
+                    state.live_error = Some(e);
+                }
+            }
+        }
+    });
+    if let Some(e) = &state.live_error {
+        err_row(ui, e);
+    }
+    if !state.modules_cache.is_empty() {
+        ui.small(format!("{} module(s)", state.modules_cache.len()));
+        egui::ScrollArea::vertical()
+            .id_salt("dbg_modules_scroll")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                egui::Grid::new("dbg_modules_grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("Base");
+                        ui.strong("Size");
+                        ui.strong("Name");
+                        ui.strong("Path");
+                        ui.end_row();
+                        for m in &state.modules_cache {
+                            ui.monospace(format!("{:#x}", m.base));
+                            ui.monospace(format!("{:#x}", m.size));
+                            ui.label(&m.name);
+                            ui.small(m.path.as_deref().unwrap_or("—"));
+                            ui.end_row();
+                        }
+                    });
+            });
+    } else {
+        ui.weak("No modules cached — click Refresh modules.");
+    }
+    ui.separator();
+    ui.label(RichText::new("Static Mappings").strong());
+    ui.small(
+        RichText::new("ghidrust_core::process::static_to_live · static file RVA → live VA via module base")
+            .color(muted),
+    );
+    ui.horizontal(|ui| {
+        ui.label("Module:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.static_map_module_input)
+                .desired_width(160.0)
+                .hint_text("game.exe"),
+        );
+        ui.label("RVA:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.static_map_rva_input)
+                .desired_width(120.0)
+                .hint_text("0x1000"),
+        );
+        if ui.button("Resolve").clicked() {
+            let rva = parse_hex(&state.static_map_rva_input).unwrap_or(0);
+            match static_to_live(&sess.session_id, state.static_map_module_input.trim(), rva) {
+                Ok(r) => {
+                    state.static_map_result = Some(format!(
+                        "{} base={:#x} rva={:#x} → live_va={:#x}",
+                        r.module, r.base, r.rva, r.live_va
+                    ));
+                    state.live_error = None;
+                }
+                Err(e) => {
+                    state.static_map_result = None;
+                    state.live_error = Some(e);
+                }
+            }
+        }
+    });
+    if let Some(res) = &state.static_map_result {
+        ui.monospace(res);
+    }
+}
+
+/// Ghidra `DebuggerRegionsPlugin` analog — `VirtualQueryEx` region walk.
+fn render_regions(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target — attach one from Debugger Targets first.");
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.small(RichText::new(format!("pid={}", sess.pid)).color(muted));
+        if ui.button("Refresh regions").clicked() {
+            state.live_error = None;
+            match process_regions(&sess.session_id, 4096) {
+                Ok(v) => state.regions_cache = v,
+                Err(e) => {
+                    state.regions_cache.clear();
+                    state.live_error = Some(e);
+                }
+            }
+        }
+    });
+    if let Some(e) = &state.live_error {
+        err_row(ui, e);
+    }
+    if state.regions_cache.is_empty() {
+        ui.weak("No regions cached — click Refresh regions.");
+        return;
+    }
+    ui.small(format!("{} region(s)", state.regions_cache.len()));
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
+    let regions = state.regions_cache.clone();
+    egui::ScrollArea::vertical()
+        .id_salt("dbg_regions_scroll")
+        .auto_shrink([false, false])
+        .max_height(320.0)
+        .show_rows(ui, row_h, regions.len(), |ui, range| {
+            for i in range {
+                let r: &RegionInfo = &regions[i];
+                ui.monospace(format!(
+                    "{:#018x}  +{:#x}  protect={} state={} type={}",
+                    r.base, r.size, r.protect, r.state, r.typ
+                ));
+            }
+        });
+}
+
+/// Ghidra `DebuggerMemoryBytesPlugin` analog — live `ReadProcessMemory` hex
+/// dump for the attached session.
+fn render_memory_bytes(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target — attach one from Debugger Targets first.");
+        return;
+    };
+    ui.small(RichText::new(format!("pid={} · live ReadProcessMemory", sess.pid)).color(muted));
+    ui.horizontal(|ui| {
+        ui.label("VA:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.mem_bytes_va_input)
+                .desired_width(160.0)
+                .hint_text("0x140001000"),
+        );
+        ui.label("Size:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.mem_bytes_size_input)
+                .desired_width(100.0)
+                .hint_text("256"),
+        );
+        if ui.button("Read").clicked() {
+            let va = parse_hex(&state.mem_bytes_va_input).unwrap_or(0);
+            let size: usize = state.mem_bytes_size_input.trim().parse().unwrap_or(256).max(1);
+            match process_read(&sess.session_id, va, size) {
+                Ok(r) => {
+                    state.live_error = r.error.clone();
+                    state.mem_bytes_last = Some(r);
+                }
+                Err(e) => {
+                    state.mem_bytes_last = None;
+                    state.live_error = Some(e);
+                }
+            }
+        }
+    });
+    if let Some(e) = &state.live_error {
+        err_row(ui, e);
+    }
+    let Some(read) = &state.mem_bytes_last else {
+        ui.weak("No read yet — enter a VA + size and click Read.");
+        return;
+    };
+    ui.small(format!(
+        "va={:#x} requested={} read={}",
+        read.va, read.size_requested, read.bytes_read
+    ));
+    egui::ScrollArea::vertical()
+        .id_salt("dbg_membytes_scroll")
+        .max_height(320.0)
+        .show(ui, |ui| {
+            for (row, chunk) in read.bytes.chunks(16).enumerate() {
+                let addr = read.va + (row as u64) * 16;
+                let hex: String = chunk.iter().map(|b| format!("{b:02x} ")).collect();
+                let ascii: String = chunk
+                    .iter()
+                    .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                    .collect();
+                ui.monospace(format!("{addr:#018x}  {hex:<48} {ascii}"));
+            }
+        });
 }
 
 fn render_empty_table(pane: DebuggerPane, ui: &mut Ui, muted: Color32) {
