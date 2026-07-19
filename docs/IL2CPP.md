@@ -8,7 +8,9 @@ Hand-rolled support for Unity IL2CPP metadata and player-install inventory. No I
 ghidrust strings <path> [--raw] [--match substr|token|whole|glob] [--limit N] [--out FILE]
 ghidrust bytes <path> --addr HEX [--count N] [--out FILE] [--json]
 ghidrust il2cpp meta <global-metadata.dat> [--filter SUB] [--json] [--out FILE]
-ghidrust il2cpp map --binary <GameAssembly.dll> --meta <metadata.dat> [--script-json]
+ghidrust il2cpp map --binary <GameAssembly.dll> --meta <metadata.dat>|--meta-sections DIR
+         [--baseline PREV.json] [--baseline-strict] [--script-json]
+ghidrust il2cpp touch-map --meta PATH|--meta-sections DIR --filter SUB [--binary PE] [--json]
 ghidrust il2cpp stubs --binary <GameAssembly.dll> [--filter SUB]
 ghidrust il2cpp icalls --binary <UnityPlayer.dll> [--filter SUB] [--json] [--out FILE]
 ghidrust xrefs … [--skip-stubs] [--classify] [--out FILE]
@@ -16,6 +18,33 @@ ghidrust disasm … [--out FILE]
 ghidrust decompile … [--follow-stub] [--out FILE]
 ghidrust unity-inventory <player-dir> [--json]
 ```
+
+## Meta-sections directory
+
+When a clear monolithic `global-metadata.dat` is available (or decrypted offline), pass it with `--meta`, or point `--meta-sections DIR` at a folder that contains one of:
+
+| Candidate | Notes |
+|-----------|--------|
+| `DIR/global-metadata.dat` | Preferred clear dump |
+| `DIR/metadata.dat` | Alternate filename |
+| `DIR/global-metadata.dat.decrypted` | Explicit decrypted alias |
+| `DIR/Metadata/global-metadata.dat` | Nested Metadata folder |
+| `DIR/il2cpp_data/Metadata/global-metadata.dat` | Unity player layout fragment |
+| `DIR/*_Data/il2cpp_data/Metadata/global-metadata.dat` | One-level player-data scan |
+
+Ghidrust does **not** reassemble encrypted or v39+/v106 sectioned heaps. Place a clear `0xFAB11BAF` file in the directory. Wrong magic → fail closed with `next_steps` (includes touch-map / meta-sections).
+
+## Touch-map + body proof
+
+`il2cpp touch-map` searches metadata string heaps for `--filter` and classifies rows as `method|field|type|property|other`. With `--binary`, proven method pointers upgrade confidence to `rva_bound`.
+
+`il2cpp map` fingerprints each resolved VA:
+
+- `body_class`: `thin_thunk` | `shared_stub` | `empty_xor_al_ret` | `bool_bit_test` | `complex` | `unreadable` | `runtime_unresolved`
+- `shared_stubs[]` aggregate when many names collapse to one tiny body
+- `semantics_mismatch` when `get_`/`set_`/`is*`/`has*` names disagree with stub/empty bodies
+
+`--baseline PREV.json` emits `build_skew: { moved, missing, appeared, sample }`. `--baseline-strict` exits nonzero if any RVA moved.
 
 ## Engine icall resolve (name‖fn tables)
 
@@ -50,7 +79,8 @@ Launch: `ghidrust mcp` (or `target/release/ghidrust.exe mcp` after build). Stdio
 | Tool | Args | Purpose |
 |------|------|---------|
 | `il2cpp_meta` | `path`, optional `filter` | Parse `global-metadata.dat` → types/methods |
-| `il2cpp_map` | `binary`, `meta`, optional `filter` | Metadata ↔ RVA map (`rva` null when unproven) |
+| `il2cpp_map` | `binary`, `meta` or `meta_sections`, optional `filter`, `baseline` | Metadata ↔ RVA map + `body_class` / `shared_stubs` / optional `build_skew` |
+| `il2cpp_touch_map` | `filter`, `meta` or `meta_sections`, optional `binary` | Substring touch-map over heaps |
 | `il2cpp_stubs` | `binary`, optional `filter`, `max` | Classify resolve stubs |
 | `il2cpp_icalls` | `binary`, optional `filter` | Engine name‖fn icall tables |
 | `read_bytes` | `path`, `addr`, optional `count` | Raw VA dump |
@@ -78,7 +108,9 @@ Magic must be `0xFAB11BAF`. Wrong magic → fail closed. CLI/MCP JSON:
   "next_steps": [
     "Use engine PE strings + il2cpp icalls for native internal-call RVAs",
     "Treat GameAssembly resolve stubs as lazy thunks, not gameplay callers (xrefs --skip-stubs)",
-    "Instance/type latch may require live inspection when metadata is unavailable"
+    "Instance/type latch may require live inspection when metadata is unavailable",
+    "If you have a decrypted dump: il2cpp touch-map --meta PATH|--meta-sections DIR --filter SUB",
+    "meta-sections DIR expects global-metadata.dat (or clear metadata.dat); section dumps documented in docs/IL2CPP.md"
   ]
 }
 ```

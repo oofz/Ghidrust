@@ -127,6 +127,27 @@ impl Il2CppMetadata {
         Self::parse(&data)
     }
 
+    /// Load from a clear metadata file path, or from a directory containing it.
+    ///
+    /// Directory candidates (first hit wins):
+    /// - `global-metadata.dat`
+    /// - `metadata.dat`
+    /// - `global-metadata.dat.decrypted`
+    /// - nested `il2cpp_data/Metadata/global-metadata.dat`
+    pub fn load_path_or_dir(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if path.is_file() {
+            return Self::load_path(path);
+        }
+        if path.is_dir() {
+            return load_from_meta_sections_dir(path);
+        }
+        Err(Error::Io(format!(
+            "metadata path not found: {}",
+            path.display()
+        )))
+    }
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < 16 {
             return Err(Error::Parse("metadata too small".into()));
@@ -434,6 +455,89 @@ fn parse_images(
         });
     }
     Ok(out)
+}
+
+/// Resolve metadata from `--meta PATH` and/or `--meta-sections DIR`.
+///
+/// Prefer an explicit file when both are given. Fail closed on encrypted magic
+/// with [`Error::EncryptedOrObfuscated`] (see `ENCRYPTED_METADATA_NEXT_STEPS`).
+pub fn load_metadata_flexible(
+    meta: Option<&Path>,
+    meta_sections: Option<&Path>,
+) -> Result<Il2CppMetadata> {
+    if let Some(p) = meta {
+        return Il2CppMetadata::load_path_or_dir(p);
+    }
+    if let Some(dir) = meta_sections {
+        return load_from_meta_sections_dir(dir);
+    }
+    Err(Error::Parse(
+        "provide --meta PATH or --meta-sections DIR".into(),
+    ))
+}
+
+/// Load clear `global-metadata.dat` (or documented aliases) from a directory.
+///
+/// Expected layout (see `docs/IL2CPP.md`):
+/// - `DIR/global-metadata.dat` — preferred clear dump
+/// - `DIR/metadata.dat` — alternate name
+/// - `DIR/global-metadata.dat.decrypted`
+/// - `DIR/*/il2cpp_data/Metadata/global-metadata.dat` — one level of player-data nesting
+///
+/// Sectioned v39+/v106 dumps are not reassembled in P0; place a clear monolithic
+/// file in the directory. Encrypted files fail closed (do not invent RVAs).
+pub fn load_from_meta_sections_dir(dir: &Path) -> Result<Il2CppMetadata> {
+    if !dir.is_dir() {
+        return Err(Error::Io(format!(
+            "meta-sections path is not a directory: {}",
+            dir.display()
+        )));
+    }
+    let candidates = [
+        dir.join("global-metadata.dat"),
+        dir.join("metadata.dat"),
+        dir.join("global-metadata.dat.decrypted"),
+        dir.join("Metadata").join("global-metadata.dat"),
+        dir.join("il2cpp_data")
+            .join("Metadata")
+            .join("global-metadata.dat"),
+    ];
+    let mut last_err: Option<Error> = None;
+    for c in &candidates {
+        if c.is_file() {
+            match Il2CppMetadata::load_path(c) {
+                Ok(m) => return Ok(m),
+                Err(e) => {
+                    // Encrypted: surface immediately (fail closed).
+                    if matches!(e, Error::EncryptedOrObfuscated { .. }) {
+                        return Err(e);
+                    }
+                    last_err = Some(e);
+                }
+            }
+        }
+    }
+    // One-level scan for *_Data/il2cpp_data/Metadata/global-metadata.dat
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            if p.is_dir() {
+                let nested = p
+                    .join("il2cpp_data")
+                    .join("Metadata")
+                    .join("global-metadata.dat");
+                if nested.is_file() {
+                    return Il2CppMetadata::load_path(nested);
+                }
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        Error::Io(format!(
+            "no clear global-metadata.dat under {} (see docs/IL2CPP.md meta-sections)",
+            dir.display()
+        ))
+    }))
 }
 
 /// Build a minimal valid metadata blob for tests (dialect v31 layout).

@@ -74,6 +74,7 @@ pub fn builtin_catalog() -> Vec<ScriptEntry> {
         s("mcp.il2cpp_stubs", "MCP · IL2CPP", "List IL2CPP resolve stubs by icall name."),
         s("mcp.unity_inventory", "MCP · Unity", "Player install inventory (assemblies, plugins, metadata)."),
         s("mcp.function_at", "MCP · Functions", "Containing function for a body VA."),
+        s("mcp.function_create", "MCP · Functions", "Create/heal a function at VA (optional end)."),
         s("mcp.decompile", "MCP · Decompile", "Stage-1 C; optional follow_stub for IL2CPP."),
         s("mcp.get_current_address", "MCP · Cursor", "Report the currently focused Listing VA."),
         s("mcp.get_current_function", "MCP · Cursor", "Report the function containing the cursor."),

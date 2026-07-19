@@ -27,16 +27,10 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
                 f.noreturn = true;
                 marked.push(s.va);
             } else {
-                prog.analysis.functions.push(FunctionInfo {
-                    entry: s.va,
-                    end: s.va + 1,
-                    name: s.name.clone(),
-                    calling_convention: Some("stdcall".into()),
-                    noreturn: true,
-                    varargs: false,
-                    parameters: Vec::new(),
-                    stack_locals: Vec::new(),
-                });
+                let mut fi = FunctionInfo::new(s.va, s.va + 1, s.name.clone());
+                fi.calling_convention = Some("stdcall".into());
+                fi.noreturn = true;
+                prog.analysis.functions.push(fi);
                 marked.push(s.va);
             }
         }

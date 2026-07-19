@@ -232,14 +232,20 @@ fn mcp_server_info_and_live_tools() {
         "process_read",
         "artifact_query",
         "inventory",
+        "il2cpp_touch_map",
+        "function_create",
     ] {
         assert!(s.contains(tool), "missing {tool} in {s}");
     }
-    // tool_surface must be at least 2 (not a placeholder zero)
-    assert!(
-        s.contains("\"toolSurface\":2")
-            || s.contains("\"tool_surface\": 2")
-            || s.contains("\"tool_surface\":2"),
-        "expected tool_surface >= 2 in {s}"
-    );
+    // tool_surface must be at least 3 (touch-map / body_class / function_create surface)
+    let surface_ok = s.contains("\"toolSurface\":3")
+        || s.contains("\"tool_surface\": 3")
+        || s.contains("\"tool_surface\":3")
+        || s.contains("\"toolSurface\":4")
+        || s.contains("\"tool_surface\": 4")
+        || s.contains("\"tool_surface\":4")
+        || s.contains("\"toolSurface\":5")
+        || s.contains("\"tool_surface\": 5")
+        || s.contains("\"tool_surface\":5");
+    assert!(surface_ok, "expected tool_surface >= 3 in {s}");
 }

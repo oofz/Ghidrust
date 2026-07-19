@@ -236,20 +236,12 @@ pub fn merge_seeds_into_program(
             for &off in hits {
                 if let Some(va) = flat_to_va(map, off) {
                     if !prog.analysis.functions.iter().any(|f| f.entry == va) {
-                        prog.analysis.functions.push(FunctionInfo {
-                            entry: va,
-                            end: va,
-                            name: format!("FUN_{va:016x}"),
-                            calling_convention: if strategy == GpuStrategyClass::PrologueAbi {
-                                Some("unknown".into())
-                            } else {
-                                None
-                            },
-                            noreturn: false,
-                            varargs: false,
-                            parameters: Vec::new(),
-                            stack_locals: Vec::new(),
-                        });
+                        let mut fi = FunctionInfo::new(va, va, format!("FUN_{va:016x}"))
+                            .with_seed_kind(crate::program::FunctionSeedKind::Prologue);
+                        if strategy == GpuStrategyClass::PrologueAbi {
+                            fi.calling_convention = Some("unknown".into());
+                        }
+                        prog.analysis.functions.push(fi);
                     }
                 }
             }
@@ -321,16 +313,9 @@ pub fn merge_seeds_into_program(
                         f.stack_locals.push(format!("spill_{va:x}"));
                         n += 1;
                     } else {
-                        prog.analysis.functions.push(FunctionInfo {
-                            entry: va,
-                            end: va,
-                            name: format!("FUN_{va:016x}"),
-                            calling_convention: None,
-                            noreturn: false,
-                            varargs: false,
-                            parameters: Vec::new(),
-                            stack_locals: vec![format!("frame_{va:x}")],
-                        });
+                        let mut fi = FunctionInfo::new(va, va, format!("FUN_{va:016x}"));
+                        fi.stack_locals = vec![format!("frame_{va:x}")];
+                        prog.analysis.functions.push(fi);
                         n += 1;
                     }
                 }
@@ -364,16 +349,9 @@ pub fn merge_seeds_into_program(
                             });
                         }
                         "Non-Returning Functions - Discovered" => {
-                            prog.analysis.functions.push(FunctionInfo {
-                                entry: va,
-                                end: va,
-                                name: label.into(),
-                                calling_convention: None,
-                                noreturn: true,
-                                varargs: false,
-                                parameters: Vec::new(),
-                                stack_locals: Vec::new(),
-                            });
+                            let mut fi = FunctionInfo::new(va, va, label);
+                            fi.noreturn = true;
+                            prog.analysis.functions.push(fi);
                         }
                         "PDB MSDIA" | "PDB Universal" => {
                             prog.analysis.pdb_symbols.push(SymbolInfo {
@@ -383,16 +361,9 @@ pub fn merge_seeds_into_program(
                             });
                         }
                         "Variadic Function Signature Override" => {
-                            prog.analysis.functions.push(FunctionInfo {
-                                entry: va,
-                                end: va,
-                                name: label.into(),
-                                calling_convention: None,
-                                noreturn: false,
-                                varargs: true,
-                                parameters: Vec::new(),
-                                stack_locals: Vec::new(),
-                            });
+                            let mut fi = FunctionInfo::new(va, va, label);
+                            fi.varargs = true;
+                            prog.analysis.functions.push(fi);
                         }
                         "Windows x86 Propagate External Parameters" => {
                             prog.analysis.symbols.push(SymbolInfo {

@@ -10421,26 +10421,14 @@ mod tests {
         if app.program.as_ref().unwrap().analysis.functions.is_empty() {
             let prog = app.program.as_mut().unwrap();
             let base = prog.entry.unwrap_or(prog.image_base);
-            prog.analysis.functions.push(ghidrust_core::FunctionInfo {
-                entry: base,
-                end: base + 0x10,
-                name: "fn_a".into(),
-                calling_convention: None,
-                noreturn: false,
-                varargs: false,
-                parameters: Vec::new(),
-                stack_locals: Vec::new(),
-            });
-            prog.analysis.functions.push(ghidrust_core::FunctionInfo {
-                entry: base + 0x40,
-                end: base + 0x50,
-                name: "fn_b".into(),
-                calling_convention: None,
-                noreturn: false,
-                varargs: false,
-                parameters: Vec::new(),
-                stack_locals: Vec::new(),
-            });
+            prog.analysis
+                .functions
+                .push(ghidrust_core::FunctionInfo::new(base, base + 0x10, "fn_a"));
+            prog.analysis.functions.push(ghidrust_core::FunctionInfo::new(
+                base + 0x40,
+                base + 0x50,
+                "fn_b",
+            ));
         }
         let entries: Vec<u64> = app
             .program
@@ -10510,16 +10498,11 @@ mod tests {
         let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
         {
             let prog = app.program.as_mut().unwrap();
-            prog.analysis.functions.push(ghidrust_core::FunctionInfo {
+            prog.analysis.functions.push(ghidrust_core::FunctionInfo::new(
                 entry,
-                end: entry + 0x10,
-                name: "FUN_original".into(),
-                calling_convention: None,
-                noreturn: false,
-                varargs: false,
-                parameters: Vec::new(),
-                stack_locals: Vec::new(),
-            });
+                entry + 0x10,
+                "FUN_original",
+            ));
         }
         app.rename_at(entry, "my_main").expect("rename");
         let p = app.program.as_ref().unwrap();
@@ -10560,16 +10543,12 @@ mod tests {
         let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
         {
             let prog = app.program.as_mut().unwrap();
-            prog.analysis.functions.push(ghidrust_core::FunctionInfo {
-                entry,
-                end: entry + 0x40,
-                name: "with_params".into(),
-                calling_convention: Some("windowsx64".into()),
-                noreturn: false,
-                varargs: false,
-                parameters: vec!["rcx".into(), "rdx".into()],
-                stack_locals: vec!["local_10".into(), "local_18".into()],
-            });
+            let mut fi =
+                ghidrust_core::FunctionInfo::new(entry, entry + 0x40, "with_params");
+            fi.calling_convention = Some("windowsx64".into());
+            fi.parameters = vec!["rcx".into(), "rdx".into()];
+            fi.stack_locals = vec!["local_10".into(), "local_18".into()];
+            prog.analysis.functions.push(fi);
         }
         app.commit_params_return(entry).expect("commit params");
         app.commit_locals(entry).expect("commit locals");
@@ -10778,16 +10757,9 @@ mod tests {
         let entry = app.program.as_ref().and_then(|p| p.entry).unwrap();
         {
             let prog = app.program.as_mut().unwrap();
-            prog.analysis.functions.push(ghidrust_core::FunctionInfo {
-                entry,
-                end: entry + 0x20,
-                name: "fn".into(),
-                calling_convention: None,
-                noreturn: false,
-                varargs: false,
-                parameters: Vec::new(),
-                stack_locals: Vec::new(),
-            });
+            prog.analysis
+                .functions
+                .push(ghidrust_core::FunctionInfo::new(entry, entry + 0x20, "fn"));
         }
         app.refresh_decompiler_at(entry);
         assert!(!app.decomp_text.is_empty());

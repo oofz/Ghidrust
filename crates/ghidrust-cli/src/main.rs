@@ -3,20 +3,23 @@
 mod friction;
 
 use ghidrust_core::{
-    analyzer_catalog, analyze_path, artifact_get, artifact_query, collect_strings_bytes,
-    collect_strings_opts, disassemble_range_opts, filter_imports, inventory_pe_dir, list_artifacts,
-    list_tree, load_path, load_path_opts, process_attach, process_detach, process_list,
-    process_modules, process_read, process_regions, process_resolve, recover_rtti, rtti_query,
-    run_analyzers, scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback,
-    scan_printable_runs_parallel, scan_printable_runs_seq, time_bulk_printable, write_json_no_bom,
-    xrefs_from, xrefs_to, xrefs_to_import, xrefs_to_string_filter_opts, AnalysisBundle, BulkScanMode,
+    analyzer_catalog, analyze_path, artifact_get, artifact_query, calls_callees,
+    collect_strings_bytes, collect_strings_opts, disassemble_range_ex, disassemble_range_opts,
+    filter_imports, inventory_pe_dir, list_artifacts, list_tree, load_path, load_path_opts,
+    process_attach, process_detach, process_list, process_modules, process_read, process_regions,
+    process_resolve, recover_rtti, resolve_function, rtti_query, run_analyzers,
+    create_function,
+    scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel,
+    scan_printable_runs_seq, time_bulk_printable, write_json_no_bom, xrefs_from, xrefs_to,
+    xrefs_to_import, xrefs_to_string_filter_opts, AnalysisBundle, BulkScanMode, DisasmMode,
     Program, Project, RttiMatchMode, StringCollectOpts, StringMatchMode, TreeListOpts,
     ANALYZER_NAMES, DEFAULT_PREVIEW_LIMIT,
 };
 use ghidrust_decomp::decompile_entry;
 use ghidrust_il2cpp::{
-    classify_at, correlate, filter_entries, find_resolve_stubs, follow_stub_target,
-    is_resolve_stub_va, resolve_icalls_path, stub_matches_filter, to_script_json, Il2CppMetadata,
+    classify_at, compare_baseline, correlate, filter_entries, find_resolve_stubs,
+    follow_stub_target, is_resolve_stub_va, load_baseline_map, load_metadata_flexible,
+    resolve_icalls_path, stub_matches_filter, to_script_json, touch_map, Il2CppMetadata,
     ResolveStub,
 };
 use ghidrust_unity_inventory::inventory_path;
@@ -33,8 +36,9 @@ const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Monotonic MCP tool-surface contract. Bump when tools are added/removed/renamed
 /// or required args change in a breaking way. Skill documents a minimum.
-/// `2` = live process + artifacts + inventory / tree / rtti_query surface.
-const TOOL_SURFACE_VERSION: u32 = 2;
+/// `3` = touch-map + body_class map + baseline build_skew + function_create.
+/// `4` = bound-aware disasm + xref attribution + get_calls_from (+ surface 3).
+const TOOL_SURFACE_VERSION: u32 = 4;
 
 fn package_version() -> &'static str {
     PACKAGE_VERSION
@@ -52,7 +56,11 @@ fn server_info_json() -> Value {
             "inventory",
             "rtti_query",
             "list_tree",
-            "decompile_stage1"
+            "decompile_stage1",
+            "function_create",
+            "il2cpp_touch_map",
+            "bound_disasm",
+            "get_calls_from"
         ],
         "live_process": {
             "tools": [
@@ -200,6 +208,7 @@ fn main() -> ExitCode {
         "xrefs" => cmd_xrefs(&args[1..], json_mode),
         "imports" => cmd_imports(&args[1..], json_mode),
         "function-at" => cmd_function_at(&args[1..], json_mode),
+        "function" => cmd_function(&args[1..], json_mode),
         "il2cpp" => cmd_il2cpp(&args[1..], json_mode),
         "unity-inventory" => cmd_unity_inventory(&args[1..], json_mode),
         "inventory" | "pe-inventory" => friction::cmd_inventory(&args[1..], json_mode),
@@ -234,16 +243,21 @@ fn print_help() {
          Usage:\n\
            ghidrust version | --version | -V [--json]\n\
            ghidrust load <path|--project DIR --file-id ID> [--out FILE] [--json]\n\
-           ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--out FILE] [--json]\n\
+           ghidrust disasm <path> [--addr <hex>] [--count N] [--skip-bad] [--linear|--flow]\n\
+                     [--out FILE] [--json]\n\
            ghidrust bytes <path> --addr HEX [--count N] [--out FILE] [--json]\n\
            ghidrust strings <path> [--raw] [--encoding ascii|utf16|all] [--filter SUB]\n\
                      [--match substr|token|whole|glob] [--min N] [--limit N] [--out FILE] [--json]\n\
-           ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME)\n\
+           ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME | --calls HEX)\n\
                      [--encoding ascii|utf16le|all] [--skip-stubs] [--classify] [--out FILE] [--json]\n\
            ghidrust imports <path> [--dll NAME] [--name NAME] [--json]\n\
            ghidrust function-at <path> --addr HEX [--json]\n\
+           ghidrust function create <path> --addr HEX [--end HEX] [--json]\n\
            ghidrust il2cpp meta <metadata.dat> [--filter SUB] [--out FILE] [--json]\n\
-           ghidrust il2cpp map --binary <il2cpp> --meta <metadata.dat> [--filter SUB] [--script-json] [--out FILE] [--json]\n\
+           ghidrust il2cpp map --binary <il2cpp> --meta <metadata.dat>|--meta-sections DIR\n\
+                     [--filter SUB] [--baseline PREV.json] [--baseline-strict] [--script-json]\n\
+                     [--out FILE] [--json]\n\
+           ghidrust il2cpp touch-map --meta PATH|--meta-sections DIR --filter SUB [--binary PE] [--json]\n\
            ghidrust il2cpp stubs --binary <il2cpp> [--filter SUB] [--max N] [--out FILE] [--json]\n\
            ghidrust il2cpp icalls --binary <engine.dll> [--filter SUB] [--out FILE] [--json]\n\
            ghidrust unity-inventory <game-dir> [--out FILE] [--json]\n\
@@ -643,6 +657,8 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
     let mut addr: Option<u64> = None;
     let mut count: usize = 16;
     let mut skip_bad = false;
+    let mut force_linear = false;
+    let mut force_flow = false;
     let mut out_path: Option<PathBuf> = None;
     let mut i = 1;
     while i < args.len() {
@@ -659,6 +675,14 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
                 skip_bad = true;
                 i += 1;
             }
+            "--linear" => {
+                force_linear = true;
+                i += 1;
+            }
+            "--flow" => {
+                force_flow = true;
+                i += 1;
+            }
             "--out" if i + 1 < args.len() => {
                 out_path = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
@@ -667,15 +691,34 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
         }
     }
     match load_path(&path) {
-        Ok(prog) => {
+        Ok(mut prog) => {
             let start = addr.or(prog.entry).unwrap_or(prog.image_base);
-            match disassemble_range_opts(&prog, start, count, skip_bad) {
+            let (mode, bound_end) = if force_linear {
+                (DisasmMode::Linear, None)
+            } else if force_flow {
+                let bound = resolve_function(&mut prog, start)
+                    .ok()
+                    .filter(|r| r.ok)
+                    .and_then(|r| r.function_end);
+                (DisasmMode::Flow, bound)
+            } else {
+                // Default: bounded when a containing function is known.
+                match resolve_function(&mut prog, start) {
+                    Ok(r) if r.ok => (DisasmMode::Bounded, r.function_end),
+                    _ => (DisasmMode::Linear, None),
+                }
+            };
+            match disassemble_range_ex(&prog, start, count, skip_bad, mode, bound_end) {
                 Ok(result) => {
                     if json {
                         let body = json!({
                             "insns": result.insns,
                             "decode_gaps": result.decode_gaps,
                             "first_gap_va": result.first_gap_va.map(|v| format!("{v:#x}")),
+                            "stop_reason": result.stop_reason,
+                            "mode": mode,
+                            "entry": result.entry.map(|v| format!("{v:#x}")),
+                            "end": result.end.map(|v| format!("{v:#x}")),
                         });
                         emit_result(&body, true, out_path.as_deref(), || {})
                     } else {
@@ -690,6 +733,7 @@ fn cmd_disasm(args: &[String], json: bool) -> ExitCode {
                                     result.first_gap_va.map(|v| format!("{v:#x}"))
                                 );
                             }
+                            println!("; stop_reason={:?} mode={:?}", result.stop_reason, mode);
                         })
                     }
                 }
@@ -894,6 +938,7 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
     };
     let mut to: Option<u64> = None;
     let mut from: Option<u64> = None;
+    let mut calls: Option<u64> = None;
     let mut string_filter: Option<String> = None;
     let mut import_name: Option<String> = None;
     let mut skip_stubs = false;
@@ -909,6 +954,10 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
             }
             "--from" if i + 1 < args.len() => {
                 from = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            "--calls" if i + 1 < args.len() => {
+                calls = parse_u64(&args[i + 1]).ok();
                 i += 2;
             }
             "--string" if i + 1 < args.len() => {
@@ -938,18 +987,55 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
             _ => i += 1,
         }
     }
-    let modes = [to.is_some(), from.is_some(), string_filter.is_some(), import_name.is_some()]
-        .iter()
-        .filter(|&&b| b)
-        .count();
+    let modes = [
+        to.is_some(),
+        from.is_some(),
+        string_filter.is_some(),
+        import_name.is_some(),
+        calls.is_some(),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
     if modes != 1 {
         eprintln!(
-            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME) [--encoding ascii|utf16le|all] [--skip-stubs] [--classify] [--out FILE] [--json]"
+            "usage: ghidrust xrefs <path> (--to HEX | --from HEX | --string FILTER | --import NAME | --calls HEX) [--encoding ascii|utf16le|all] [--skip-stubs] [--classify] [--out FILE] [--json]"
         );
         return ExitCode::from(2);
     }
     match load_path(&path) {
-        Ok(prog) => {
+        Ok(mut prog) => {
+            if let Some(entry) = calls {
+                let _ = run_analyzers(&mut prog, &["Function Start Search"]);
+                let entry = resolve_function(&mut prog, entry)
+                    .ok()
+                    .and_then(|r| r.resolved_entry)
+                    .unwrap_or(entry);
+                let edges = calls_callees(&prog, entry);
+                let rows: Vec<_> = edges
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "from": format!("{:#x}", e.from),
+                            "to": format!("{:#x}", e.to),
+                            "kind": e.kind,
+                            "to_entry": e.to_entry.map(|v| format!("{v:#x}")),
+                            "to_function": e.to_function,
+                        })
+                    })
+                    .collect();
+                return emit_result(&rows, json, out_path.as_deref(), || {
+                    for r in &rows {
+                        println!(
+                            "{} -> {}  [{}]  to_entry={}",
+                            r["from"].as_str().unwrap_or("?"),
+                            r["to"].as_str().unwrap_or("?"),
+                            r["kind"].as_str().unwrap_or("?"),
+                            r["to_entry"].as_str().unwrap_or("-")
+                        );
+                    }
+                });
+            }
             let mut refs = if let Some(t) = to {
                 xrefs_to(&prog, t, None)
             } else if let Some(f) = from {
@@ -962,34 +1048,7 @@ fn cmd_xrefs(args: &[String], json: bool) -> ExitCode {
             if skip_stubs {
                 refs.retain(|r| !is_resolve_stub_va(&prog, r.from));
             }
-            let rows: Vec<_> = refs
-                .iter()
-                .map(|r| {
-                    let stub = if classify {
-                        classify_at(&prog, r.from)
-                    } else {
-                        None
-                    };
-                    let kind = if stub.is_some() {
-                        "resolve_stub"
-                    } else {
-                        r.kind
-                    };
-                    let mut preview = r.preview.clone();
-                    if let Some(s) = stub {
-                        if let Some(name) = s.icall_name {
-                            preview = format!("{preview}  ; il2cpp resolve {name}");
-                        }
-                    }
-                    json!({
-                        "from": format!("{:#x}", r.from),
-                        "to": format!("{:#x}", r.to),
-                        "kind": kind,
-                        "preview": preview,
-                        "encoding": r.encoding,
-                    })
-                })
-                .collect();
+            let rows: Vec<_> = refs.iter().map(|r| xref_row_json(r, &prog, classify)).collect();
             emit_result(&rows, json, out_path.as_deref(), || {
                 for r in &rows {
                     println!(
@@ -1013,13 +1072,14 @@ fn cmd_il2cpp(args: &[String], json: bool) -> ExitCode {
     let sub = match args.first().map(|s| s.as_str()) {
         Some(s) => s,
         None => {
-            eprintln!("usage: ghidrust il2cpp meta|map|stubs|icalls ...");
+            eprintln!("usage: ghidrust il2cpp meta|map|touch-map|stubs|icalls ...");
             return ExitCode::from(2);
         }
     };
     match sub {
         "meta" => cmd_il2cpp_meta(&args[1..], json),
         "map" => cmd_il2cpp_map(&args[1..], json),
+        "touch-map" => cmd_il2cpp_touch_map(&args[1..], json),
         "stubs" => cmd_il2cpp_stubs(&args[1..], json),
         "icalls" => cmd_il2cpp_icalls(&args[1..], json),
         other => {
@@ -1239,8 +1299,11 @@ fn cmd_il2cpp_meta(args: &[String], json: bool) -> ExitCode {
 fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
     let mut binary: Option<PathBuf> = None;
     let mut meta_path: Option<PathBuf> = None;
+    let mut meta_sections: Option<PathBuf> = None;
     let mut filter: Option<String> = None;
     let mut out_path: Option<PathBuf> = None;
+    let mut baseline_path: Option<PathBuf> = None;
+    let mut baseline_strict = false;
     let mut script_json = false;
     let mut i = 0;
     while i < args.len() {
@@ -1253,6 +1316,10 @@ fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
                 meta_path = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--meta-sections" if i + 1 < args.len() => {
+                meta_sections = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
             "--filter" if i + 1 < args.len() => {
                 filter = Some(args[i + 1].clone());
                 i += 2;
@@ -1261,6 +1328,14 @@ fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
                 out_path = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--baseline" if i + 1 < args.len() => {
+                baseline_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--baseline-strict" => {
+                baseline_strict = true;
+                i += 1;
+            }
             "--script-json" => {
                 script_json = true;
                 i += 1;
@@ -1268,12 +1343,17 @@ fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
             _ => i += 1,
         }
     }
-    let (Some(binary), Some(meta_path)) = (binary, meta_path) else {
+    let Some(binary) = binary else {
         eprintln!(
-            "usage: ghidrust il2cpp map --binary <il2cpp> --meta <metadata.dat> [--filter SUB] [--script-json] [--out FILE] [--json]"
+            "usage: ghidrust il2cpp map --binary <il2cpp> --meta <metadata.dat>|--meta-sections DIR\n\
+             [--filter SUB] [--baseline PREV.json] [--baseline-strict] [--script-json] [--out FILE] [--json]"
         );
         return ExitCode::from(2);
     };
+    if meta_path.is_none() && meta_sections.is_none() {
+        eprintln!("error: provide --meta PATH or --meta-sections DIR");
+        return ExitCode::from(2);
+    }
     let prog = match load_path(&binary) {
         Ok(p) => p,
         Err(e) => {
@@ -1281,10 +1361,20 @@ fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let meta = match Il2CppMetadata::load_path(&meta_path) {
+    let meta = match load_metadata_flexible(meta_path.as_deref(), meta_sections.as_deref()) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: {e}");
+            if let Some(payload) = e.to_structured_json() {
+                if json {
+                    return emit_result(&payload, true, out_path.as_deref(), || {});
+                }
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| e.to_string())
+                );
+            } else {
+                eprintln!("error: {e}");
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -1295,6 +1385,17 @@ fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
                 map.entries
                     .retain(|e| e.full_name.to_ascii_lowercase().contains(&fl));
             }
+            if let Some(bp) = &baseline_path {
+                match load_baseline_map(bp) {
+                    Ok(prev) => {
+                        map.build_skew = Some(compare_baseline(&map, &prev));
+                    }
+                    Err(e) => {
+                        eprintln!("error loading baseline: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             if script_json {
                 let script = to_script_json(&map);
                 return emit_result(&script, json, out_path.as_deref(), || {
@@ -1304,25 +1405,142 @@ fn cmd_il2cpp_map(args: &[String], json: bool) -> ExitCode {
                     );
                 });
             }
-            emit_result(&map, json, out_path.as_deref(), || {
+            let strict_fail = baseline_strict
+                && map
+                    .build_skew
+                    .as_ref()
+                    .map(|s| !s.moved.is_empty())
+                    .unwrap_or(false);
+            let code = emit_result(&map, json, out_path.as_deref(), || {
                 println!(
-                    "method map: {} entries, pointer_count={:?}",
+                    "method map: {} entries, pointer_count={:?}, shared_stubs={}",
                     map.entries.len(),
-                    map.method_pointer_count
+                    map.method_pointer_count,
+                    map.shared_stubs.len()
                 );
                 for n in &map.notes {
                     println!("  note: {n}");
                 }
+                if let Some(skew) = &map.build_skew {
+                    println!(
+                        "  build_skew: moved={} missing={} appeared={}",
+                        skew.moved.len(),
+                        skew.missing.len(),
+                        skew.appeared.len()
+                    );
+                }
                 for e in map.entries.iter().take(40) {
                     match e.rva {
-                        Some(rva) => println!("  {:#x}  {}", rva, e.full_name),
+                        Some(rva) => {
+                            let bc = e
+                                .body_class
+                                .map(|c| format!(" [{c:?}]"))
+                                .unwrap_or_default();
+                            println!("  {:#x}  {}{bc}", rva, e.full_name);
+                        }
                         None => println!("  (unmapped)  {}", e.full_name),
                     }
                 }
-            })
+            });
+            if strict_fail {
+                eprintln!("baseline-strict: {} moved RVAs", map.build_skew.as_ref().map(|s| s.moved.len()).unwrap_or(0));
+                ExitCode::FAILURE
+            } else {
+                code
+            }
         }
         Err(e) => {
             eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_il2cpp_touch_map(args: &[String], json: bool) -> ExitCode {
+    let mut meta_path: Option<PathBuf> = None;
+    let mut meta_sections: Option<PathBuf> = None;
+    let mut filter: Option<String> = None;
+    let mut binary: Option<PathBuf> = None;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--meta" if i + 1 < args.len() => {
+                meta_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--meta-sections" if i + 1 < args.len() => {
+                meta_sections = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--filter" if i + 1 < args.len() => {
+                filter = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--binary" if i + 1 < args.len() => {
+                binary = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--out" if i + 1 < args.len() => {
+                out_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(filter) = filter else {
+        eprintln!(
+            "usage: ghidrust il2cpp touch-map --meta PATH|--meta-sections DIR --filter SUB [--binary PE] [--json]"
+        );
+        return ExitCode::from(2);
+    };
+    if meta_path.is_none() && meta_sections.is_none() {
+        eprintln!("error: provide --meta PATH or --meta-sections DIR");
+        return ExitCode::from(2);
+    }
+    let prog = match &binary {
+        Some(b) => match load_path(b) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
+    match touch_map(
+        meta_path.as_deref(),
+        meta_sections.as_deref(),
+        &filter,
+        prog.as_ref(),
+    ) {
+        Ok(report) => emit_result(&report, json, out_path.as_deref(), || {
+            println!(
+                "touch-map filter={:?} rows={}",
+                report.filter, report.row_count
+            );
+            for r in report.rows.iter().take(40) {
+                println!(
+                    "  {:?}  {}  conf={:?}  {}",
+                    r.kind,
+                    r.string,
+                    r.confidence,
+                    r.full_name.as_deref().unwrap_or("-")
+                );
+            }
+        }),
+        Err(e) => {
+            if let Some(payload) = e.to_structured_json() {
+                if json {
+                    return emit_result(&payload, true, out_path.as_deref(), || {});
+                }
+                eprintln!(
+                    "{}",
+                    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| e.to_string())
+                );
+            } else {
+                eprintln!("error: {e}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -1474,6 +1692,70 @@ fn cmd_imports(args: &[String], json: bool) -> ExitCode {
                         e.iat_va, e.dll, sym
                     );
                 }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_function(args: &[String], json: bool) -> ExitCode {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("");
+    match sub {
+        "create" => cmd_function_create(&args[1..], json),
+        _ => {
+            eprintln!("usage: ghidrust function create <path> --addr HEX [--end HEX] [--json]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn cmd_function_create(args: &[String], json: bool) -> ExitCode {
+    let path = match path_arg(args) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut addr: Option<u64> = None;
+    let mut end: Option<u64> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--addr" if i + 1 < args.len() => {
+                addr = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            "--end" if i + 1 < args.len() => {
+                end = parse_u64(&args[i + 1]).ok();
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    let Some(va) = addr else {
+        eprintln!("usage: ghidrust function create <path> --addr HEX [--end HEX] [--json]");
+        return ExitCode::from(2);
+    };
+    match load_path(&path) {
+        Ok(mut prog) => {
+            let f = create_function(&mut prog, va, end);
+            if json {
+                emit_json(&json!({
+                    "entry": format!("{:#x}", f.entry),
+                    "end": format!("{:#x}", f.end),
+                    "name": f.name,
+                    "seed_kind": f.seed_kind,
+                }));
+            } else {
+                println!(
+                    "created {} [{:#x}, {:#x}) seed_kind={:?}",
+                    f.name, f.entry, f.end, f.seed_kind
+                );
             }
             ExitCode::SUCCESS
         }
@@ -2851,6 +3133,35 @@ fn fmt_opt_va(v: Option<u64>) -> String {
     v.map(|x| format!("{x:#x}")).unwrap_or_else(|| "-".into())
 }
 
+fn xref_row_json(r: &ghidrust_core::XRef, prog: &Program, classify: bool) -> Value {
+    let stub = if classify {
+        classify_at(prog, r.from)
+    } else {
+        None
+    };
+    let kind = if stub.is_some() {
+        "resolve_stub"
+    } else {
+        r.kind
+    };
+    let mut preview = r.preview.clone();
+    if let Some(s) = stub {
+        if let Some(name) = s.icall_name {
+            preview = format!("{preview}  ; il2cpp resolve {name}");
+        }
+    }
+    json!({
+        "from": format!("{:#x}", r.from),
+        "to": format!("{:#x}", r.to),
+        "kind": kind,
+        "preview": preview,
+        "encoding": r.encoding,
+        "from_entry": r.from_entry.map(|v| format!("{v:#x}")),
+        "from_function": r.from_function,
+        "to_entry": r.to_entry.map(|v| format!("{v:#x}")),
+    })
+}
+
 fn refs_json(refs: &[ghidrust_core::XRef]) -> Value {
     Value::Array(
         refs.iter()
@@ -2861,6 +3172,9 @@ fn refs_json(refs: &[ghidrust_core::XRef]) -> Value {
                     "kind": r.kind,
                     "preview": r.preview,
                     "encoding": r.encoding,
+                    "from_entry": r.from_entry.map(|v| format!("{v:#x}")),
+                    "from_function": r.from_function,
+                    "to_entry": r.to_entry.map(|v| format!("{v:#x}")),
                 })
             })
             .collect(),
@@ -3048,13 +3362,17 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "disassemble",
-            description: "Disassemble x86-64 at entry or given address",
+            description: "Disassemble x86-64: resolve addr to function entry, then bounded by function end by default (JSON: stop_reason, mode). Set linear:true to escape bounds.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "addr": { "type": "string" },
-                    "count": { "type": "integer" }
+                    "count": { "type": "integer" },
+                    "linear": {
+                        "type": "boolean",
+                        "description": "Escape hatch: legacy unbounded linear walk (default false = bounded by function end)"
+                    }
                 },
                 "required": ["path"]
             }),
@@ -3190,15 +3508,31 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "il2cpp_map",
-            description: "Correlate metadata methods with binary RVAs when CodeRegistration validates. Unproven RVAs are null.",
+            description: "Correlate metadata methods with binary RVAs; fingerprints body_class/shared_stubs. Optional baseline build_skew. Unproven RVAs are null.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "binary": { "type": "string", "description": "IL2CPP binary (e.g. GameAssembly.dll)" },
                     "meta": { "type": "string", "description": "Path to global-metadata.dat" },
-                    "filter": { "type": "string" }
+                    "meta_sections": { "type": "string", "description": "Directory with clear global-metadata.dat (see docs/IL2CPP.md)" },
+                    "filter": { "type": "string" },
+                    "baseline": { "type": "string", "description": "Prior map JSON for build_skew" }
                 },
-                "required": ["binary", "meta"]
+                "required": ["binary"]
+            }),
+        },
+        ToolDef {
+            name: "il2cpp_touch_map",
+            description: "Substring touch-map over metadata heaps (method|field|type|property|other). Prefer before inventing names from PE strings; optional binary upgrades rows to rva_bound.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "meta": { "type": "string", "description": "Path to clear global-metadata.dat" },
+                    "meta_sections": { "type": "string", "description": "Directory containing clear metadata dump" },
+                    "filter": { "type": "string", "description": "Substring filter (required)" },
+                    "binary": { "type": "string", "description": "Optional PE for rva_bound confidence" }
+                },
+                "required": ["filter"]
             }),
         },
         ToolDef {
@@ -3266,13 +3600,25 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_xrefs_from",
-            description: "Cross-references from a VA (disassemble forward)",
+            description: "Cross-references from a VA (disassemble forward); includes from_entry/from_function/to_entry when functions exist",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "addr": { "type": "string" },
                     "count": { "type": "integer" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "get_calls_from",
+            description: "Callee edges (call/jmp) inside the function containing addr (CLI: xrefs --calls). Resolves targets to function entries when known.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string", "description": "Function entry or mid-body VA" }
                 },
                 "required": ["path", "addr"]
             }),
@@ -3317,7 +3663,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "function_at",
-            description: "Containing function for a VA (runs Function Start Search if needed)",
+            description: "Containing function for a VA (runs Function Start Search if needed); JSON includes seed_kind (pdata|export|method_pointer|prologue|manual|synthesized)",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -3329,12 +3675,25 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "get_function_by_address",
-            description: "Alias of function_at",
+            description: "Alias of function_at (includes seed_kind)",
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
                     "addr": { "type": "string" }
+                },
+                "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "function_create",
+            description: "Create/heal a function at VA (optional end; grows body when omitted). Complements pdata/export/FSS seeds; orphan resolve may synthesize SYNTH_* ranges — never invent managed names on those.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "addr": { "type": "string" },
+                    "end": { "type": "string" }
                 },
                 "required": ["path", "addr"]
             }),
@@ -3754,20 +4113,57 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("binary")
                 .and_then(|p| p.as_str())
                 .ok_or_else(|| "missing arguments.binary".to_string())?;
-            let meta_path = args
-                .get("meta")
+            let meta = args.get("meta").and_then(|p| p.as_str()).map(Path::new);
+            let meta_sections = args
+                .get("meta_sections")
                 .and_then(|p| p.as_str())
-                .ok_or_else(|| "missing arguments.meta".to_string())?;
+                .map(Path::new);
+            if meta.is_none() && meta_sections.is_none() {
+                return Err("missing arguments.meta or arguments.meta_sections".into());
+            }
             let filter = args.get("filter").and_then(|f| f.as_str());
+            let baseline = args.get("baseline").and_then(|p| p.as_str());
             let prog = load_path(binary).map_err(|e| e.to_string())?;
-            let meta = Il2CppMetadata::load_path(meta_path).map_err(|e| e.to_string())?;
+            let meta = load_metadata_flexible(meta, meta_sections).map_err(|e| {
+                e.to_structured_json()
+                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| e.to_string()))
+                    .unwrap_or_else(|| e.to_string())
+            })?;
             let mut map = correlate(&prog, &meta).map_err(|e| e.to_string())?;
             if let Some(f) = filter {
                 let fl = f.to_ascii_lowercase();
                 map.entries
                     .retain(|e| e.full_name.to_ascii_lowercase().contains(&fl));
             }
+            if let Some(bp) = baseline {
+                let prev = load_baseline_map(Path::new(bp)).map_err(|e| e.to_string())?;
+                map.build_skew = Some(compare_baseline(&map, &prev));
+            }
             Ok(serde_json::to_string_pretty(&map).unwrap())
+        }
+        "il2cpp_touch_map" => {
+            let meta = args.get("meta").and_then(|p| p.as_str()).map(Path::new);
+            let meta_sections = args
+                .get("meta_sections")
+                .and_then(|p| p.as_str())
+                .map(Path::new);
+            let filter = args
+                .get("filter")
+                .and_then(|f| f.as_str())
+                .ok_or_else(|| "missing arguments.filter".to_string())?;
+            if meta.is_none() && meta_sections.is_none() {
+                return Err("missing arguments.meta or arguments.meta_sections".into());
+            }
+            let prog = match args.get("binary").and_then(|p| p.as_str()) {
+                Some(b) => Some(load_path(b).map_err(|e| e.to_string())?),
+                None => None,
+            };
+            let report = touch_map(meta, meta_sections, filter, prog.as_ref()).map_err(|e| {
+                e.to_structured_json()
+                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| e.to_string()))
+                    .unwrap_or_else(|| e.to_string())
+            })?;
+            Ok(serde_json::to_string_pretty(&report).unwrap())
         }
         "il2cpp_stubs" => {
             let binary = args
@@ -3869,22 +4265,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 refs.retain(|r| !is_resolve_stub_va(&prog, r.from));
             }
             if classify {
-                let rows: Vec<_> = refs
-                    .iter()
-                    .map(|r| {
-                        let kind = if classify_at(&prog, r.from).is_some() {
-                            "resolve_stub"
-                        } else {
-                            r.kind
-                        };
-                        json!({
-                            "from": format!("{:#x}", r.from),
-                            "to": format!("{:#x}", r.to),
-                            "kind": kind,
-                            "preview": r.preview,
-                        })
-                    })
-                    .collect();
+                let rows: Vec<_> = refs.iter().map(|r| xref_row_json(r, &prog, true)).collect();
                 return Ok(serde_json::to_string_pretty(&rows).unwrap());
             }
             Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
@@ -3903,6 +4284,37 @@ fn call_tool(params: &Value) -> Result<String, String> {
             let va = parse_u64(addr)?;
             let refs = xrefs_from(&prog, va, count);
             Ok(serde_json::to_string_pretty(&refs_json(&refs)).unwrap())
+        }
+        "get_calls_from" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let mut prog = load_path(path).map_err(|e| e.to_string())?;
+            let va = parse_u64(addr)?;
+            let (entry, resolve_meta) = friction::resolve_and_entry(&mut prog, Some(va))?;
+            let edges = calls_callees(&prog, entry);
+            let rows: Vec<_> = edges
+                .iter()
+                .map(|e| {
+                    json!({
+                        "from": format!("{:#x}", e.from),
+                        "to": format!("{:#x}", e.to),
+                        "kind": e.kind,
+                        "to_entry": e.to_entry.map(|v| format!("{v:#x}")),
+                        "to_function": e.to_function,
+                    })
+                })
+                .collect();
+            Ok(serde_json::to_string_pretty(&json!({
+                "resolve": resolve_meta,
+                "calls": rows,
+            }))
+            .unwrap())
         }
         "get_string_xrefs" => {
             let path = args
@@ -3971,6 +4383,7 @@ fn call_tool(params: &Value) -> Result<String, String> {
                     "calling_convention": f.calling_convention,
                     "noreturn": f.noreturn,
                     "parameters": f.parameters,
+                    "seed_kind": f.seed_kind,
                 }))
                 .unwrap()),
                 None => Ok(serde_json::to_string_pretty(&json!({
@@ -3979,6 +4392,30 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 }))
                 .unwrap()),
             }
+        }
+        "function_create" => {
+            let path = args
+                .get("path")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.path".to_string())?;
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "missing arguments.addr".to_string())?;
+            let end = match args.get("end").and_then(|e| e.as_str()) {
+                Some(e) => Some(parse_u64(e)?),
+                None => None,
+            };
+            let mut prog = load_path(path).map_err(|e| e.to_string())?;
+            let va = parse_u64(addr)?;
+            let f = create_function(&mut prog, va, end);
+            Ok(serde_json::to_string_pretty(&json!({
+                "entry": format!("{:#x}", f.entry),
+                "end": format!("{:#x}", f.end),
+                "name": f.name,
+                "seed_kind": f.seed_kind,
+            }))
+            .unwrap())
         }
         "list_analyzers" => {
             let cat = analyzer_catalog();
@@ -4199,16 +4636,30 @@ fn call_tool(params: &Value) -> Result<String, String> {
                         .ok_or_else(|| "missing arguments.path".to_string())?;
                     let mut prog = load_path(path).map_err(|e| e.to_string())?;
                     let count = args.get("count").and_then(|c| c.as_u64()).unwrap_or(16) as usize;
+                    let linear = args
+                        .get("linear")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     let addr_opt = if let Some(a) = args.get("addr").and_then(|a| a.as_str()) {
                         Some(parse_u64(a)?)
                     } else {
                         None
                     };
                     let (start, resolve_meta) = friction::resolve_and_entry(&mut prog, addr_opt)?;
-                    let result = disassemble_range_opts(&prog, start, count, true)
+                    let bound_end = prog.function_at(start).map(|f| f.end);
+                    let (mode, bound) = if linear {
+                        (DisasmMode::Linear, None)
+                    } else {
+                        (DisasmMode::Bounded, bound_end)
+                    };
+                    let result = disassemble_range_ex(&prog, start, count, true, mode, bound)
                         .map_err(|e| e.to_string())?;
                     Ok(serde_json::to_string_pretty(&json!({
                         "resolve": resolve_meta,
+                        "mode": mode,
+                        "stop_reason": result.stop_reason,
+                        "entry": result.entry.map(|v| format!("{v:#x}")),
+                        "end": result.end.map(|v| format!("{v:#x}")),
                         "decode_gaps": result.decode_gaps,
                         "first_gap_va": result.first_gap_va.map(|v| format!("{v:#x}")),
                         "insns": result.insns,

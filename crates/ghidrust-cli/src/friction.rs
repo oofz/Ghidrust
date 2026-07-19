@@ -647,6 +647,8 @@ pub fn resolve_and_entry(
     addr: Option<u64>,
 ) -> Result<(u64, Value), String> {
     let requested = addr.unwrap_or_else(|| prog.entry.unwrap_or(prog.image_base));
+    // Synthesize/heal orphans so decompile and other agent paths do not hard-fail
+    // on executable VAs outside analyzed function ranges.
     let r = resolve_function(prog, requested).map_err(|e| e.to_string())?;
     let meta = resolve_result_json(&r);
     if !r.ok {

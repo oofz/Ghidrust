@@ -39,17 +39,19 @@ cargo build -p ghidrust-gui --release
 
 ## Agent friction SOPs (required)
 
-- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 2`** (live process + artifacts + inventory). If `server_info` is missing, `tool_surface` is below that minimum, or `process_list` / `artifact_query` / `inventory` are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
+- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer `>= 4` when using bounded disasm / `get_calls_from`. If `server_info` is missing, `tool_surface` is below that minimum, or `process_list` / `artifact_query` / `il2cpp_touch_map` / `function_create` are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
 - **Artifacts**: When envelope `entry_count` > preview or the host truncates tool text, drain via `artifact_query` / `artifact get` until `next_offset` is null. Never assume truncated MCP text is complete.
 - **Program identity**: Prefer `load` with absolute `path`, or `project` + `file_id`. Facts always include `resolved_path` or honest null — resolve before analyze/decompile.
 - **Inventory / tree**: Use `inventory <dir>` (PE VERSIONINFO + exe/dll) before OS `dir`/`Get-Item`. Use `tree` / `list_tree` for non-PE sidecars (existence/size only; no unpack).
-- **Address→function**: Always pass `addr` to `decompile` / `disassemble` / `gpu_decompile`; trust `resolved_entry` / `resolve` meta. Mid-body hits resolve to containing entry; unmapped → `no_containing_function` (no invented 1-insn fn).
+- **Seed pipeline**: Exception Directory / FSS → `function_create` (heal orphans) → tagged synthesize when still missing. Never invent managed names on synthesized ranges.
+- **Bounded disasm**: Prefer default bounded/flow disasm clamped to function body; `--linear` / `linear:true` is an escape hatch only.
+- **Address→function**: Always pass `addr` to `decompile` / `disassemble` / `gpu_decompile`; trust `resolved_entry` / `resolve` meta. Mid-body hits resolve to containing entry; unmapped → create/synthesize or honest `no_containing_function` (no invented 1-insn fn).
 - **RTTI catalog**: Prefer `rtti_query` (`--filter`/`--exact`) before mangled `.?AV` string archaeology. Multi-vtable types report `vtable_vas[]` honestly.
 - **UTF-16 xrefs**: If `search_strings` returns `utf16le`, query `get_string_xrefs` with `encoding=all` (or `utf16le`) before concluding “no refs”.
 - **Live process (Windows)**: Multi-step live work **must** use MCP (or one long-lived process) — `process_list` → `process_attach` → `process_modules` → `process_resolve` (`static_to_live`) → `process_read` → optional `process_regions` / `process_detach`. Never chain separate CLI `ghidrust process` spawns expecting the same `session_id` (sessions are in-process). Bytes ≠ types. No write/breakpoints in MVP.
-- **IL2CPP offline → live**: (1) `il2cpp_meta` / `il2cpp_map` for method RVAs (null = unknown offline). (2) `decompile` + `follow_stub` for resolve stubs with mapped slots. (3) On `runtime_unresolved` / `trampoline_or_invoker` (see `next_steps` in JSON) → live attach → `process_resolve(module, rva)` → `process_read` for class/instance bytes. `follow_stub` is **not** “get managed method body for every RVA.”
+- **IL2CPP offline → live**: (1) `il2cpp_touch_map` / `il2cpp_meta` / `il2cpp_map` for names + method RVAs (null = unknown offline; encrypted → `next_steps` with meta-sections/touch-map). (2) Require `body_class` not `shared_stub` / `semantics_mismatch` before treating a name as a hook target. (3) `decompile` + `follow_stub` for resolve stubs with mapped slots. (4) On `runtime_unresolved` / `trampoline_or_invoker` → live attach → `process_resolve(module, rva)` → `process_read`. (5) Multi-build work: `il2cpp map --baseline PREV.json` → inspect `build_skew` (stale **map catalog**, not only stale MCP binary).
 - **Skill bootstrap**: GUI project open / Start writes `.grok/skills/ghidrust/SKILL.md` (disk or embedded fallback) and shows a fail-loud checklist (mcp/skill/agents/context + hash).
-- **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only).
+- **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only); hook shared stubs as unique gameplay methods.
 
 ## Decision tree
 
@@ -119,9 +121,11 @@ Need Ghidra ↔ Ghidrust head-to-head?
 
 Unity player / IL2CPP?
   → unity-inventory GAME_DIR for install layout (assemblies, plugins, metadata)
-  → il2cpp meta …/global-metadata.dat for managed types/methods
-  → il2cpp stubs / map on GameAssembly.dll; xrefs --skip-stubs; decompile --follow-stub
-  → encrypted metadata (wrong magic) → report encrypted, do not invent types
+  → il2cpp touch-map --meta META|--meta-sections DIR --filter NAME (names first)
+  → il2cpp map --binary GA.dll --meta META [--baseline PREV.json] → require body_class
+    (reject shared_stub / semantics_mismatch before hooking); inspect build_skew on rebuilds
+  → il2cpp meta for managed types/methods; stubs; xrefs --skip-stubs; decompile --follow-stub
+  → encrypted metadata (wrong magic) → report encrypted + next_steps; do not invent types
   → See docs/IL2CPP.md
 
 Large string dumps / raw non-PE files?
@@ -178,13 +182,13 @@ ghidrust project analyze PROJ_DIR --file ID \
 
 ### MCP (`ghidrust mcp`)
 
-Requires **`tool_surface >= 2`**. Check with `server_info` after connect.
+Requires **`tool_surface >= 3`** (prefer `>= 4` for bounded disasm / `get_calls_from`; current is `4`). Check with `server_info` after connect.
 
 | Tool | Args | Notes |
 |------|------|-------|
 | `server_info` | — | Package `version`, `tool_surface`, features, live session_model |
 | `load` | `path` **or** `project`+`file_id` | Map + `section_notes` + `resolved_path` |
-| `disassemble` | `path`, optional `addr`, `count` | Containing-fn resolve + `decode_gaps` |
+| `disassemble` | `path`, optional `addr`, `count`, **`linear`** | Bounded by function end by default; `linear:true` escapes; JSON `stop_reason` + `decode_gaps` |
 | `rtti` / `rtti_query` | `path`, optional `filter`/`exact`/`match` | Catalog; multi-vtable; artifact if large |
 | `artifact_get` / `artifact_query` / `artifact_list` | `id` / optional `offset`/`limit` / optional `max` | Drain or list spilled results |
 | `inventory` | `path`, optional `max_depth`/`hash` | PE VERSIONINFO + exe/dll catalog |
@@ -192,16 +196,19 @@ Requires **`tool_surface >= 2`**. Check with `server_info` after connect.
 | `list_analyzers` | — | Auto Analysis names |
 | `analyze` | `path`, optional `analyzers[]`, **`gpu`** | CPU + optional GPU enrich |
 | `list_strings` / `search_strings` | `path`, optional `encoding`, `filter`, **`match`**, `min`, **`limit`**, **`raw`** | Blob scan when `raw:true` |
-| `get_xrefs_to` | `path`, `addr`, optional **`skip_stubs`**, **`classify`** | RIP/tables + data ptrs; IL2CPP stubs |
-| `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs from VA |
+| `get_xrefs_to` | `path`, `addr`, optional **`skip_stubs`**, **`classify`** | RIP/tables + data ptrs; IL2CPP stubs; `to_entry` |
+| `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs from VA; `from_entry` / `from_function` / `to_entry` |
+| `get_calls_from` | `path`, `addr` | Callee edges inside containing function (CLI: `xrefs --calls`) |
 | `get_string_xrefs` | `path`, `filter`, optional `encoding` | UTF-16LE parity (`ascii`\|`utf16le`\|`all`) |
 | `list_imports` / `get_import_xrefs` | `path`, optional `dll`/`name` | PE IAT |
-| `function_at` / `get_function_by_address` | `path`, `addr` | Containing function |
+| `function_at` / `get_function_by_address` | `path`, `addr` | Containing function + `seed_kind` |
 | `read_bytes` | `path`, `addr`, optional `count` | Raw VA hex dump |
 | `il2cpp_meta` | `path`, optional `filter` | `global-metadata.dat` types/methods (v27/29/31); encrypted → `next_steps` JSON |
-| `il2cpp_map` | `binary`, `meta`, optional `filter` | Method RVA map; null when unproven |
+| `il2cpp_map` | `binary`, `meta` or `meta_sections`, optional `filter`, `baseline` | Method RVA map + `body_class` / `shared_stubs` / `semantics_mismatch` / optional `build_skew`; null RVA when unproven |
+| `il2cpp_touch_map` | `filter`, `meta` or `meta_sections`, optional `binary` | Heap substring touch-map (`name_only` \| `rva_bound`) |
 | `il2cpp_stubs` | `binary`, optional `filter`, `max` | Resolve stubs (filter: name or C-string at `name_string_va`) |
 | `il2cpp_icalls` | `binary`, optional `filter` | Engine name‖fn icall tables → index / RVA |
+| `function_create` | `path`, `addr`, optional `end` | Create/heal function (pdata/export/FSS; may synthesize `SYNTH_*`) |
 | `unity_inventory` | `path` | Player dir + PE VERSIONINFO helpers |
 | `decompile` | `path`, optional `addr`, `count`, `stage`, **`follow_stub`** | Resolve meta + Stage-1; JSON: `folded_temps`, `token_count`, `goto_rate`; `follow_stub` may be `runtime_unresolved` / `trampoline_or_invoker` with `next_steps` → live process |
 | `list_gpu_strategies` | — | Strategy matrix |
@@ -221,7 +228,8 @@ Canonical detail: [`docs/IL2CPP.md`](../docs/IL2CPP.md).
 |------|-----|-----|
 | Player install inventory | `ghidrust unity-inventory GAME_DIR --json` | `unity_inventory` `{path}` |
 | Managed types/methods | `ghidrust il2cpp meta META.dat [--filter F] --json` | `il2cpp_meta` `{path, filter?}` |
-| Metadata ↔ RVA | `ghidrust il2cpp map --binary GA.dll --meta META.dat --json` | `il2cpp_map` `{binary, meta, filter?}` |
+| Touch-map (names) | `ghidrust il2cpp touch-map --meta META\|--meta-sections DIR --filter F [--binary GA.dll] --json` | `il2cpp_touch_map` |
+| Metadata ↔ RVA + body proof | `ghidrust il2cpp map --binary GA.dll --meta META.dat\|--meta-sections DIR [--baseline PREV.json] [--baseline-strict] --json` | `il2cpp_map` `{binary, meta\|meta_sections, filter?, baseline?}` |
 | Engine icall name→fn | `ghidrust il2cpp icalls --binary ENGINE.dll --filter F --json` | `il2cpp_icalls` `{binary, filter?}` |
 | Resolve stubs | `ghidrust il2cpp stubs --binary GA.dll --filter F --json` | `il2cpp_stubs` `{binary, filter?, max?}` |
 | Raw bytes at VA | `ghidrust bytes PATH --addr HEX --count N --json` | `read_bytes` `{path, addr, count?}` |
@@ -253,17 +261,18 @@ Add `--json` for structured stdout.
 | Help | `ghidrust help` |
 | Version | `ghidrust version` / `--version` / `-V` `[--json]` (package + `tool_surface`) |
 | Load | `ghidrust load <path\|--project DIR --file-id ID>` |
-| Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad]` |
+| Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--linear\|--flow]` (bounded by fn end by default; JSON `stop_reason`) |
 | Strings | `ghidrust strings <path> [--raw] [--encoding …] [--match MODE] [--limit N] [--out FILE] [--filter SUB]` |
-| Xrefs | `ghidrust xrefs <path> (--to\|--from\|--string\|--import) [--encoding ascii\|utf16le\|all] [--skip-stubs] [--classify] [--out FILE]` |
+| Xrefs | `ghidrust xrefs <path> (--to\|--from\|--string\|--import\|--calls) [--encoding ascii\|utf16le\|all] [--skip-stubs] [--classify] [--out FILE]` |
 | Bytes | `ghidrust bytes <path> --addr HEX [--count N] [--out FILE]` |
 | Imports | `ghidrust imports <path> [--dll\|--name]` |
-| Function-at | `ghidrust function-at <path> --addr HEX` |
+| Function-at | `ghidrust function-at <path> --addr HEX` (`seed_kind`) |
+| Function create | `ghidrust function create <path> --addr HEX [--end HEX]` |
 | Inventory | `ghidrust inventory <dir> [--max-depth N] [--hash]` |
 | Tree | `ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB]` |
 | Artifact | `ghidrust artifact get\|query\|list …` |
 | Process (Windows) | `ghidrust process list\|attach\|detach\|modules\|read\|resolve\|regions …` |
-| IL2CPP | `ghidrust il2cpp meta\|map\|stubs\|icalls …` (see `docs/IL2CPP.md`) |
+| IL2CPP | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls …` (`--baseline` / `--meta-sections`; see `docs/IL2CPP.md`) |
 | Unity inventory | `ghidrust unity-inventory <game-dir>` |
 | RTTI catalog | `ghidrust rtti <path> [--filter\|--name\|--exact] [--match MODE]` |
 | List analyzers | `ghidrust analyzers` |
@@ -317,7 +326,9 @@ ghidrust process detach SESSION
 
 # Unity / IL2CPP
 ghidrust unity-inventory GAME_DIR --json
+ghidrust il2cpp touch-map --meta GAME_DIR/*_Data/il2cpp_data/Metadata/global-metadata.dat --filter Camera --json
 ghidrust il2cpp meta GAME_DIR/*_Data/il2cpp_data/Metadata/global-metadata.dat --filter Camera --json
+ghidrust il2cpp map --binary GAME_DIR/GameAssembly.dll --meta GAME_DIR/*_Data/il2cpp_data/Metadata/global-metadata.dat --json
 ghidrust il2cpp stubs --binary GAME_DIR/GameAssembly.dll --filter Camera --json
 ghidrust il2cpp icalls --binary GAME_DIR/UnityPlayer.dll --filter Camera --json
 ghidrust xrefs GAME_DIR/GameAssembly.dll --to HEX --skip-stubs --classify --json

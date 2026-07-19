@@ -7,7 +7,9 @@
 //! 4. Decoded instructions — absolute operand hex + RIP-relative targets
 //! 5. Import / IAT slots — `call/jmp [rip+disp]` landing on IAT VAs
 
-use crate::disasm::{decode_one, disassemble_range};
+use crate::disasm::{
+    decode_one, disassemble_range, disassemble_range_ex, DisasmMode,
+};
 use crate::program::{ImportEntry, Program};
 use serde::Serialize;
 
@@ -26,6 +28,32 @@ pub struct XRef {
     /// String encoding when this xref targets a string (`ascii`, `utf16le`); omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<String>,
+    /// Containing function entry for `from`, when analyzed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_entry: Option<u64>,
+    /// Containing function name for `from`, when analyzed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_function: Option<String>,
+    /// Containing / resolved function entry for `to`, when analyzed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_entry: Option<u64>,
+}
+
+/// Call/jmp edge discovered inside a function body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CalleeEdge {
+    /// Call/jmp site VA.
+    pub from: u64,
+    /// Decoded target VA.
+    pub to: u64,
+    /// `call` or `jmp`.
+    pub kind: &'static str,
+    /// Resolved callee entry when `to` lands in a known function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_entry: Option<u64>,
+    /// Callee function name when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_function: Option<String>,
 }
 
 /// Compute references **to** `target`.
@@ -41,13 +69,7 @@ pub fn xrefs_to(
 
     for r in &prog.analysis.references {
         if r.to == target {
-            out.push(XRef {
-                from: r.from,
-                to: r.to,
-                kind: static_kind(&r.kind),
-                preview: r.kind.clone(),
-                encoding: None,
-            });
+            out.push(xref(r.from, r.to, static_kind(&r.kind), r.kind.clone(), None));
         }
     }
 
@@ -55,13 +77,13 @@ pub fn xrefs_to(
         for (i, entry) in tbl.entries.iter().enumerate() {
             if *entry == target {
                 let from = tbl.base + (i as u64) * 8;
-                out.push(XRef {
+                out.push(xref(
                     from,
-                    to: target,
-                    kind: "ptr_table",
-                    preview: format!("[{}] {:#x}", i, target),
-                    encoding: None,
-                });
+                    target,
+                    "ptr_table",
+                    format!("[{}] {:#x}", i, target),
+                    None,
+                ));
             }
         }
     }
@@ -74,7 +96,7 @@ pub fn xrefs_to(
         scan_exec_xrefs_to(prog, target, &mut out);
     }
 
-    finalize(&mut out);
+    finalize(prog, &mut out);
     out
 }
 
@@ -102,13 +124,7 @@ fn scan_data_pointer_refs(prog: &Program, target: u64, out: &mut Vec<XRef>) {
             let val = u64::from_le_bytes(b[off..off + 8].try_into().unwrap());
             if val == target {
                 let from = block.va + off as u64;
-                out.push(XRef {
-                    from,
-                    to: target,
-                    kind: "ptr",
-                    preview: format!("dq {target:#x}"),
-                    encoding: None,
-                });
+                out.push(xref(from, target, "ptr", format!("dq {target:#x}"), None));
                 found += 1;
             }
             off += 8;
@@ -125,17 +141,61 @@ pub fn xrefs_from(prog: &Program, source: u64, max_insns: usize) -> Vec<XRef> {
     for insn in &listing {
         for tgt in instruction_targets(insn) {
             if prog.contains_va(tgt) {
-                out.push(XRef {
-                    from: insn.address,
-                    to: tgt,
-                    kind: mnemonic_kind(&insn.mnemonic),
-                    preview: format!("{} {}", insn.mnemonic, insn.operands),
-                    encoding: None,
-                });
+                out.push(xref(
+                    insn.address,
+                    tgt,
+                    mnemonic_kind(&insn.mnemonic),
+                    format!("{} {}", insn.mnemonic, insn.operands),
+                    None,
+                ));
             }
         }
     }
-    finalize(&mut out);
+    finalize(prog, &mut out);
+    out
+}
+
+/// Scan call/jmp sites inside the function at `entry` (bounded listing).
+///
+/// Targets are resolved to containing function entries when analyzed.
+pub fn calls_callees(prog: &Program, entry: u64) -> Vec<CalleeEdge> {
+    let Some(f) = prog
+        .function_at(entry)
+        .or_else(|| prog.function_containing(entry))
+    else {
+        return Vec::new();
+    };
+    let start = f.entry;
+    let bound_end = f.end;
+    let Ok(listing) = disassemble_range_ex(
+        prog,
+        start,
+        4096,
+        true,
+        DisasmMode::Bounded,
+        Some(bound_end),
+    ) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for insn in &listing.insns {
+        let kind = mnemonic_kind(&insn.mnemonic);
+        if kind != "call" && kind != "jmp" {
+            continue;
+        }
+        for tgt in instruction_targets(insn) {
+            let (to_entry, to_function) = resolve_target_fn(prog, tgt);
+            out.push(CalleeEdge {
+                from: insn.address,
+                to: tgt,
+                kind,
+                to_entry,
+                to_function,
+            });
+        }
+    }
+    out.sort_by_key(|e| (e.from, e.to, e.kind));
+    out.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
     out
 }
 
@@ -167,7 +227,7 @@ pub fn xrefs_to_import(prog: &Program, import_name: &str) -> Vec<XRef> {
         }
         out.extend(refs);
     }
-    finalize(&mut out);
+    finalize(prog, &mut out);
     out
 }
 
@@ -234,7 +294,7 @@ pub fn xrefs_to_string_filter_opts(
             }
         }
     }
-    finalize(&mut out);
+    finalize(prog, &mut out);
     out
 }
 
@@ -364,13 +424,13 @@ fn scan_exec_xrefs_to(prog: &Program, target: u64, out: &mut Vec<XRef>) {
             match decode_one(slice, va) {
                 Ok(insn) => {
                     if instruction_targets(&insn).contains(&target) {
-                        out.push(XRef {
-                            from: insn.address,
-                            to: target,
-                            kind: mnemonic_kind(&insn.mnemonic),
-                            preview: format!("{} {}", insn.mnemonic, insn.operands),
-                            encoding: None,
-                        });
+                        out.push(xref(
+                            insn.address,
+                            target,
+                            mnemonic_kind(&insn.mnemonic),
+                            format!("{} {}", insn.mnemonic, insn.operands),
+                            None,
+                        ));
                     }
                     off += insn.length.max(1) as usize;
                 }
@@ -387,18 +447,58 @@ fn push_listing_xrefs_to(
 ) {
     for insn in listing {
         if instruction_targets(insn).contains(&target) {
-            out.push(XRef {
-                from: insn.address,
-                to: target,
-                kind: mnemonic_kind(&insn.mnemonic),
-                preview: format!("{} {}", insn.mnemonic, insn.operands),
-                encoding: None,
-            });
+            out.push(xref(
+                insn.address,
+                target,
+                mnemonic_kind(&insn.mnemonic),
+                format!("{} {}", insn.mnemonic, insn.operands),
+                None,
+            ));
         }
     }
 }
 
-fn finalize(out: &mut Vec<XRef>) {
+fn xref(
+    from: u64,
+    to: u64,
+    kind: &'static str,
+    preview: String,
+    encoding: Option<String>,
+) -> XRef {
+    XRef {
+        from,
+        to,
+        kind,
+        preview,
+        encoding,
+        from_entry: None,
+        from_function: None,
+        to_entry: None,
+    }
+}
+
+fn resolve_target_fn(prog: &Program, va: u64) -> (Option<u64>, Option<String>) {
+    if let Some(f) = prog.function_at(va).or_else(|| prog.function_containing(va)) {
+        (Some(f.entry), Some(f.name.clone()))
+    } else {
+        (None, None)
+    }
+}
+
+fn attribute(prog: &Program, r: &mut XRef) {
+    if let Some(f) = prog.function_containing(r.from) {
+        r.from_entry = Some(f.entry);
+        r.from_function = Some(f.name.clone());
+    }
+    if let Some(f) = prog.function_at(r.to).or_else(|| prog.function_containing(r.to)) {
+        r.to_entry = Some(f.entry);
+    }
+}
+
+fn finalize(prog: &Program, out: &mut Vec<XRef>) {
+    for r in out.iter_mut() {
+        attribute(prog, r);
+    }
     out.sort_by_key(|r| (r.from, r.to, r.kind));
     out.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.kind == b.kind);
 }
@@ -619,6 +719,54 @@ mod tests {
             refs.iter()
                 .any(|r| r.from == slot_va && r.to == str_va && r.kind == "ptr"),
             "{refs:?}"
+        );
+    }
+
+    #[test]
+    fn xref_from_entry_populated_when_functions_exist() {
+        use crate::program::FunctionInfo;
+
+        let mut prog = Program::new("t".into(), "PE32+");
+        let caller = 0x140001000u64;
+        let callee = 0x140001100u64;
+        // call rel32 to callee, then ret
+        let next = caller + 5;
+        let disp = (callee as i64) - (next as i64);
+        let mut code = vec![0xe8];
+        code.extend_from_slice(&(disp as i32).to_le_bytes());
+        code.push(0xc3);
+        // pad to callee
+        code.resize((callee - caller) as usize, 0xcc);
+        code.extend_from_slice(&[0x31, 0xc0, 0xc3]); // xor eax,eax; ret
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: caller,
+            size: code.len() as u64,
+            bytes: code,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog.analysis
+            .functions
+            .push(FunctionInfo::new(caller, caller + 6, "caller"));
+        prog.analysis
+            .functions
+            .push(FunctionInfo::new(callee, callee + 3, "callee"));
+
+        let refs = xrefs_from(&prog, caller, 8);
+        let call = refs
+            .iter()
+            .find(|r| r.kind == "call" && r.to == callee)
+            .expect(&format!("expected call xref, got {refs:?}"));
+        assert_eq!(call.from_entry, Some(caller));
+        assert_eq!(call.from_function.as_deref(), Some("caller"));
+        assert_eq!(call.to_entry, Some(callee));
+
+        let edges = calls_callees(&prog, caller);
+        assert!(
+            edges.iter().any(|e| e.to == callee && e.to_entry == Some(callee)),
+            "{edges:?}"
         );
     }
 }

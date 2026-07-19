@@ -25,6 +25,18 @@ pub struct SectionInfo {
     pub characteristics: u32,
 }
 
+/// How a function entry was first seeded into analysis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionSeedKind {
+    Pdata,
+    Export,
+    MethodPointer,
+    Prologue,
+    Manual,
+    Synthesized,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FunctionInfo {
     pub entry: u64,
@@ -37,6 +49,30 @@ pub struct FunctionInfo {
     pub parameters: Vec<String>,
     /// Stack locals as "offset:size" or name.
     pub stack_locals: Vec<String>,
+    /// Origin of this function record (`pdata`, `export`, `prologue`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed_kind: Option<FunctionSeedKind>,
+}
+
+impl FunctionInfo {
+    pub fn new(entry: u64, end: u64, name: impl Into<String>) -> Self {
+        Self {
+            entry,
+            end,
+            name: name.into(),
+            calling_convention: None,
+            noreturn: false,
+            varargs: false,
+            parameters: Vec::new(),
+            stack_locals: Vec::new(),
+            seed_kind: None,
+        }
+    }
+
+    pub fn with_seed_kind(mut self, kind: FunctionSeedKind) -> Self {
+        self.seed_kind = Some(kind);
+        self
+    }
 }
 
 /// One PE import / IAT slot (ELF imports may be added later).

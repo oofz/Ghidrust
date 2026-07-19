@@ -12,6 +12,7 @@ pub mod imports;
 pub mod inventory;
 pub mod io_util;
 pub mod pe;
+pub mod pe_functions;
 pub mod process;
 pub mod program;
 pub mod project;
@@ -47,8 +48,8 @@ pub use artifacts::{
     ArtifactEnvelope, ArtifactMeta, DEFAULT_PREVIEW_LIMIT,
 };
 pub use disasm::{
-    decode_one, disassemble_at, disassemble_range, disassemble_range_opts, DisasmRangeResult,
-    Instruction,
+    decode_one, disassemble_at, disassemble_range, disassemble_range_ex, disassemble_range_opts,
+    int3_padding_at, DisasmMode, DisasmRangeResult, DisasmStopReason, Instruction,
 };
 pub use imports::{filter_imports, load_imports, parse_pe_imports};
 pub use inventory::{
@@ -60,6 +61,10 @@ pub use process::{
     process_attach, process_detach, process_list, process_modules, process_read, process_regions,
     process_resolve, static_to_live, ModuleInfo, ProcessInfo, ProcessSession, ReadResult,
     RegionInfo, ResolveLive,
+};
+pub use pe_functions::{
+    create_function, create_function_with_kind, functions_from_runtime, grow_function,
+    parse_export_code_vas, parse_runtime_functions, runtime_function_containing, RuntimeFunction,
 };
 pub use resolve::{resolve_function, resolve_result_json, ResolveResult, ResolveStatus};
 pub use rtti_catalog::{
@@ -75,9 +80,8 @@ pub use edits::{
 pub use error::{Error, Result};
 pub use program::{
     AddressTableInfo, AddressTableRole, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch,
-    FunctionInfo,
-    ImportEntry, MediaHit, MemoryBlock, Program, ReferenceInfo, ResourceInfo, SectionInfo,
-    SwitchInfo, SymbolInfo,
+    FunctionInfo, FunctionSeedKind, ImportEntry, MediaHit, MemoryBlock, Program, ReferenceInfo,
+    ResourceInfo, SectionInfo, SwitchInfo, SymbolInfo,
 };
 pub use project::{
     AnalysisSummary, Project, ProjectFileEntry, ProjectMeta, ProjectTreeModel, ProjectTreeRow,
@@ -86,8 +90,9 @@ pub use project::{
 pub use rtti::{recover_rtti, RttiClass, RttiReport};
 pub use theme::{m3_tokens, ThemeMode, M3Tokens};
 pub use xrefs::{
-    instruction_targets, operand_addresses, rip_relative_targets, xrefs_from, xrefs_to,
-    xrefs_to_import, xrefs_to_string_filter, xrefs_to_string_filter_opts, XRef,
+    calls_callees, instruction_targets, operand_addresses, rip_relative_targets, xrefs_from,
+    xrefs_to, xrefs_to_import, xrefs_to_string_filter, xrefs_to_string_filter_opts, CalleeEdge,
+    XRef,
 };
 
 use std::path::{Path, PathBuf};

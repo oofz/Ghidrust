@@ -56,16 +56,10 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
                 if end > va + 2 {
                     recovered.push(DiscoveredRange { start: va, end });
                     if prog.function_at(va).is_none() {
-                        prog.analysis.functions.push(FunctionInfo {
-                            entry: va,
-                            end,
-                            name: format!("AIF_{va:08x}"),
-                            calling_convention: None,
-                            noreturn: false,
-                            varargs: false,
-                            parameters: Vec::new(),
-                            stack_locals: Vec::new(),
-                        });
+                        prog.analysis.functions.push(
+                            FunctionInfo::new(va, end, format!("AIF_{va:08x}"))
+                                .with_seed_kind(crate::program::FunctionSeedKind::Prologue),
+                        );
                     }
                     i += (end - va) as usize;
                     continue;

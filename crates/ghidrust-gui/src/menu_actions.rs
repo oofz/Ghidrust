@@ -700,16 +700,9 @@ mod tests {
         use ghidrust_core::FunctionInfo;
         let mut prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
         let entry = prog.entry.unwrap_or(prog.image_base);
-        prog.analysis.functions.push(FunctionInfo {
-            entry,
-            end: entry + 0x40,
-            name: "FUN_test".into(),
-            calling_convention: None,
-            noreturn: false,
-            varargs: false,
-            parameters: Vec::new(),
-            stack_locals: Vec::new(),
-        });
+        prog.analysis
+            .functions
+            .push(FunctionInfo::new(entry, entry + 0x40, "FUN_test"));
         assert_eq!(decompile_entry_for_va(&prog, entry + 0x10), entry);
         assert_eq!(decompile_entry_for_va(&prog, entry), entry);
     }

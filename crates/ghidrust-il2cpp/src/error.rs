@@ -15,6 +15,8 @@ pub const ENCRYPTED_METADATA_NEXT_STEPS: &[&str] = &[
     "Use engine PE strings + il2cpp icalls for native internal-call RVAs",
     "Treat GameAssembly resolve stubs as lazy thunks, not gameplay callers (xrefs --skip-stubs)",
     "Instance/type latch may require live inspection when metadata is unavailable",
+    "If you have a decrypted dump: il2cpp touch-map --meta PATH|--meta-sections DIR --filter SUB",
+    "meta-sections DIR expects global-metadata.dat (or clear metadata.dat); section dumps documented in docs/IL2CPP.md",
 ];
 
 impl Error {
@@ -71,5 +73,6 @@ mod tests {
         let steps = v["next_steps"].as_array().expect("next_steps");
         assert!(steps.len() >= 3);
         assert!(steps.iter().any(|s| s.as_str().unwrap_or("").contains("il2cpp icalls")));
+        assert!(steps.iter().any(|s| s.as_str().unwrap_or("").contains("touch-map")));
     }
 }

@@ -17,16 +17,11 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
                 f.varargs = true;
                 entries.push(s.va);
             } else {
-                prog.analysis.functions.push(FunctionInfo {
-                    entry: s.va,
-                    end: s.va + 1,
-                    name: s.name.clone(),
-                    calling_convention: Some("cdecl".into()),
-                    noreturn: false,
-                    varargs: true,
-                    parameters: vec!["format".into()],
-                    stack_locals: Vec::new(),
-                });
+                let mut fi = FunctionInfo::new(s.va, s.va + 1, s.name.clone());
+                fi.calling_convention = Some("cdecl".into());
+                fi.varargs = true;
+                fi.parameters = vec!["format".into()];
+                prog.analysis.functions.push(fi);
                 entries.push(s.va);
             }
         }
