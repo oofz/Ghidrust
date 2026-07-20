@@ -1,13 +1,13 @@
 //! Ghidrust GUI · Register Manager pane.
 //!
-//! Ghidra `RegisterPlugin` provider: hierarchical register tree on the left,
+//! `` provider: hierarchical register tree on the left,
 //! per-address-range value table on the right. The register lattice is a
-//! honest approximation of Ghidra's SLEIGH `register` spec for x86-64 —
+//! honest approximation of 's `register` spec for x86-64
 //! sub-registers are grouped under their parent (e.g. `RAX` contains `EAX`,
 //! `AX`, `AH`, `AL`).
 //!
-//! Register values (Ghidra "context register" style) are session-only until
-//! the SLEIGH register lattice lands in the backend. Editing / clearing
+//! Register values are session-only until
+//! the register lattice lands in the backend. Editing / clearing
 //! values here mutates the state passed in — the GUI decides how to
 //! persist / drop on program change.
 //!
@@ -184,10 +184,10 @@ macro_rules! rN {
     };
 }
 
-/// The Ghidra-analog x86-64 register lattice used by the pane.
+/// The x86-64 register lattice used by the pane.
 ///
 /// This is a hand-authored subset covering the registers listed in
-/// `Ghidra/Processors/x86/data/languages/x86-64.sinc` plus a few common
+/// `/Processors/x86/data/languages/x86-64.sinc` plus a few common
 /// convenience aliases. When multi-ISA lands the pane can pick a lattice
 /// off the `Program::format`.
 pub const X86_64_REGISTERS: &[RegisterNode] = &[
@@ -358,7 +358,7 @@ pub fn render(
     let arch = format.unwrap_or("(no program)");
     ui.small(
         egui::RichText::new(format!(
-            "Ghidra RegisterPlugin · {arch} register lattice · session-only values (backend pending SLEIGH lattice)"
+            "Register Manager · {arch} register lattice · session-only values"
         ))
         .color(muted),
     );

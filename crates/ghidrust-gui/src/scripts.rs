@@ -1,11 +1,10 @@
-//! Ghidrust GUI · Script Manager, Text Editor, and
+//! Ghidrust GUI ·, Text Editor, and
 //! MCP REPL / interpreter panes.
 //!
-//! Ghidra's `GhidraScriptMgrPlugin` (Script Manager),
-//! `TextEditorManagerPlugin` (Text Editor), and
-//! `InterpreterPanelPlugin` (Python REPL) get honest Ghidrust analogs:
+//! `` (Text Editor), and
+//! `` (Python REPL) get honest Ghidrust analogs:
 //!
-//! - **Script Manager** — categorised catalog of shipped Ghidrust MCP tools
+//! **** — categorised catalog of shipped Ghidrust MCP tools
 //!   (see `skill/SKILL.md`). Selecting a tool shows its description; the
 //!   `Run` button emits a Console message so users see the parity surface
 //!   without a live MCP host wired up.
@@ -21,18 +20,18 @@
 use eframe::egui::{self, Color32, Ui};
 use std::path::PathBuf;
 
-/// One Ghidra-analog script entry (Ghidrust MCP tools double as the catalog).
+/// One script entry (Ghidrust MCP tools double as the catalog).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScriptEntry {
     pub name: String,
     pub category: String,
     pub description: String,
-    /// Preferred keyboard shortcut (Ghidra "Assign Key Binding"), empty if none.
+    /// Preferred keyboard shortcut, empty if none.
     pub key_binding: String,
 }
 
 /// Built-in catalog — mirrors the MCP tool surface described in
-/// `skill/SKILL.md`. Order = Ghidra Script Manager order (alphabetical
+/// `skill/SKILL.md`. Order = order (alphabetical
 /// within category).
 pub fn builtin_catalog() -> Vec<ScriptEntry> {
     let s = |name: &str, cat: &str, desc: &str| ScriptEntry {
@@ -82,7 +81,7 @@ pub fn builtin_catalog() -> Vec<ScriptEntry> {
     ]
 }
 
-/// Script Manager session state.
+/// session state.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptManagerState {
     pub catalog: Vec<ScriptEntry>,
@@ -220,7 +219,7 @@ impl MacropadReplState {
 
 // ── Rendering ────────────────────────────────────────────────────────────────
 
-/// Render the Script Manager. Returns `Some(name)` if a Run was requested.
+/// Render the. Returns `Some(name)` if a Run was requested.
 pub fn render_script_manager(
     state: &mut ScriptManagerState,
     ui: &mut Ui,
@@ -230,7 +229,7 @@ pub fn render_script_manager(
     ui.heading("Script Manager");
     ui.small(
         egui::RichText::new(
-            "Ghidra GhidraScriptMgrPlugin analog · catalog is Ghidrust's MCP tool surface (see skill/SKILL.md)",
+            "Script Manager · catalog is Ghidrust's MCP tool surface (see skill/SKILL.md)",
         )
         .color(muted),
     );
@@ -353,7 +352,7 @@ pub fn render_text_editor(
 ) -> TextEditorRequest {
     ui.heading("Text Editor");
     ui.small(
-        egui::RichText::new("Ghidra TextEditorManagerPlugin analog · in-memory tabs on top of the local filesystem").color(muted),
+        egui::RichText::new("Text Editor · in-memory tabs on top of the local filesystem").color(muted),
     );
     ui.separator();
 
@@ -442,7 +441,7 @@ pub fn render_text_editor(
 pub fn render_mcp_repl(state: &mut MacropadReplState, ui: &mut Ui, muted: Color32, primary: Color32) {
     ui.heading("Python (MCP REPL)");
     ui.small(
-        egui::RichText::new("Ghidra InterpreterPanelPlugin analog · pipes to ghidrust mcp (stub; full wire lands in P17)").color(muted),
+        egui::RichText::new("MCP REPL · pipes to ghidrust mcp (stub)").color(muted),
     );
     ui.separator();
 

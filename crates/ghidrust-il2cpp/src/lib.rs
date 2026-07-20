@@ -1,6 +1,6 @@
 //! Hand-rolled IL2CPP metadata + binary correlation for Ghidrust.
 //!
-//! No Il2CppDumper / Cpp2IL / goblin at runtime — formats reimplemented in-tree.
+//! No Il2CppDumper / Cpp2IL / at runtime — formats reimplemented in-tree.
 //! See `docs/IL2CPP.md` for the supported version matrix.
 
 pub mod binary;

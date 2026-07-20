@@ -13,10 +13,14 @@ fn bin() -> Command {
 fn cli_load_and_rtti_fixture() {
     let pe = fixture_path("tiny_x64.pe");
     let out = bin()
-        .args(["rtti", pe.to_str().unwrap(), "--json"])
+        .args(["rtti", pe.to_str().unwrap(), "-json"])
         .output()
         .expect("run cli");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("Widget"), "stdout={s}");
 }
@@ -25,7 +29,7 @@ fn cli_load_and_rtti_fixture() {
 fn cli_disasm_fixture() {
     let pe = fixture_path("tiny_x64.pe");
     let out = bin()
-        .args(["disasm", pe.to_str().unwrap(), "--count", "5"])
+        .args(["disasm", pe.to_str().unwrap(), "-count", "5"])
         .output()
         .expect("run");
     assert!(out.status.success());
@@ -34,11 +38,77 @@ fn cli_disasm_fixture() {
 }
 
 #[test]
+fn cli_disasm_pretty_brief_and_text_out() {
+    let pe = fixture_path("tiny_x64.pe");
+    let pe_s = pe.to_str().unwrap();
+
+    let pretty = bin()
+        .args(["disasm", pe_s, "--count", "8", "--pretty"])
+        .output()
+        .expect("pretty");
+    assert!(
+        pretty.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&pretty.stderr)
+    );
+    let pretty_s = String::from_utf8_lossy(&pretty.stdout);
+    assert!(pretty_s.contains("; entry="), "{pretty_s}");
+    assert!(pretty_s.contains("push") || pretty_s.contains("ret"), "{pretty_s}");
+
+    let brief = bin()
+        .args(["disasm", pe_s, "-count", "5", "-brief"])
+        .output()
+        .expect("brief");
+    assert!(brief.status.success());
+    let brief_s = String::from_utf8_lossy(&brief.stdout);
+    assert!(brief_s.contains("0x") && brief_s.contains(':'), "{brief_s}");
+
+    let tmp = std::env::temp_dir().join("ghidrust_disasm_brief_out.txt");
+    let _ = std::fs::remove_file(&tmp);
+    let out = bin()
+        .args([
+            "disasm",
+            pe_s,
+            "-count",
+            "5",
+            "-brief",
+            "-out",
+            tmp.to_str().unwrap(),
+        ])
+        .output()
+        .expect("out");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let file = std::fs::read_to_string(&tmp).expect("read text out");
+    assert!(file.contains(':') && !file.trim_start().starts_with('{'), "{file}");
+    let _ = std::fs::remove_file(&tmp);
+
+    let json = bin()
+        .args(["disasm", pe_s, "-count", "5", "-json"])
+        .output()
+        .expect("json");
+    assert!(json.status.success());
+    let js = String::from_utf8_lossy(&json.stdout);
+    assert!(js.contains("listing_text"), "{js}");
+    assert!(js.contains("bounds_suspect"), "{js}");
+}
+
+#[test]
 fn cli_analyzers_all_implemented() {
-    let out = bin().args(["analyzers", "--json"]).output().expect("analyzers");
+    let out = bin()
+        .args(["analyzers", "-json"])
+        .output()
+        .expect("analyzers");
     assert!(out.status.success());
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(s.contains("\"status\": \"implemented\"") || s.contains("Implemented") || s.contains("implemented"));
+    assert!(
+        s.contains("\"status\": \"implemented\"")
+            || s.contains("Implemented")
+            || s.contains("implemented")
+    );
     assert!(!s.contains("not_implemented") && !s.contains("NotImplemented"));
 }
 
@@ -47,15 +117,19 @@ fn cli_analyze_multi_ok() {
     let pe = fixture_path("analysis_lab.pe");
     let out = bin()
         .args([
-            "analyze",
+ "analyze",
             pe.to_str().unwrap(),
-            "--analyzers",
-            "Function Start Search,Function ID,ASCII Strings,Call-Fixup Installer,Embedded Media,PDB Universal,Create Address Tables",
-            "--json",
+ "-analyzers",
+ "Function Start Search,Function ID,ASCII Strings,Call-Fixup Installer,Embedded Media,PDB Universal,Create Address Tables",
+ "-json",
         ])
         .output()
-        .expect("analyze");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+ .expect("analyze");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(!s.contains("not_implemented"));
     assert!(s.contains("security_cookie"), "{s}");
@@ -80,16 +154,20 @@ fn mcp_list_and_analyze() {
         "{}\n{}\n",
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-            "name":"analyze","arguments":{
-                "path": pe_s,
-                "analyzers": ["ASCII Strings", "WindowsPE x86 PE RTTI Analyzer", "Function Start Search"]
-            }
-        }}),
+        "name":"analyze","arguments":{
+        "path": pe_s,
+        "analyzers": ["ASCII Strings", "WindowsPE x86 PE RTTI Analyzer", "Function Start Search"]
+                   }
+               }}),
     );
     stdin.write_all(reqs.as_bytes()).unwrap();
     drop(stdin);
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("Widget") || s.contains("ok"), "{s}");
 }
@@ -101,16 +179,23 @@ fn cli_strings_utf16_and_json_no_bom() {
         .args([
             "strings",
             pe.to_str().unwrap(),
-            "--encoding",
+            "-encoding",
             "utf16",
-            "--filter",
+            "-filter",
             "WideLabString",
-            "--json",
+            "-json",
         ])
         .output()
         .expect("strings");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
-    assert!(!out.stdout.starts_with(&[0xEF, 0xBB, 0xBF]), "JSON must be BOM-free");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.stdout.starts_with(&[0xEF, 0xBB, 0xBF]),
+        "JSON must be BOM-free"
+    );
     assert_eq!(out.stdout.first().copied(), Some(b'['));
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("WideLabString"), "{s}");
@@ -124,13 +209,17 @@ fn cli_function_at_entry() {
         .args([
             "function-at",
             pe.to_str().unwrap(),
-            "--addr",
+            "-addr",
             "0x140001000",
-            "--json",
+            "-json",
         ])
         .output()
         .expect("function-at");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("0x140001000"), "{s}");
 }
@@ -139,10 +228,14 @@ fn cli_function_at_entry() {
 fn cli_imports_lists_slots() {
     let pe = fixture_path("analysis_lab.pe");
     let out = bin()
-        .args(["imports", pe.to_str().unwrap(), "--json"])
+        .args(["imports", pe.to_str().unwrap(), "-json"])
         .output()
         .expect("imports");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     // Lab fixture imports at least one named symbol when the PE directory is present.
     assert!(s.starts_with('[') || s.contains("iat_va"), "{s}");
@@ -181,8 +274,12 @@ fn mcp_lists_new_lookup_tools() {
 
 #[test]
 fn cli_version_matches_package() {
-    let out = bin().args(["--version"]).output().expect("version");
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let out = bin().args(["-version"]).output().expect("version");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(
         s.contains(env!("CARGO_PKG_VERSION")),
@@ -204,22 +301,29 @@ fn mcp_server_info_and_live_tools() {
     let reqs = format!(
         "{}\n{}\n{}\n",
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
-            "protocolVersion":"2024-11-05",
-            "capabilities":{},
-            "clientInfo":{"name":"test","version":"0"}
-        }}),
+        "protocolVersion":"2024-11-05",
+        "capabilities":{},
+        "clientInfo":{"name":"test","version":"0"}
+               }}),
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}),
         json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-            "name":"server_info","arguments":{}
-        }}),
+        "name":"server_info","arguments":{}
+               }}),
     );
     stdin.write_all(reqs.as_bytes()).unwrap();
     drop(stdin);
     let out = child.wait_with_output().unwrap();
-    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     let ver = env!("CARGO_PKG_VERSION");
-    assert!(s.contains(ver), "initialize/server_info missing version {ver}: {s}");
+    assert!(
+        s.contains(ver),
+        "initialize/server_info missing version {ver}: {s}"
+    );
     assert!(
         s.contains("toolSurface") || s.contains("tool_surface"),
         "missing tool_surface in {s}"
@@ -228,6 +332,8 @@ fn mcp_server_info_and_live_tools() {
         "server_info",
         "process_list",
         "process_attach",
+        "process_launch",
+        "process_resume",
         "process_resolve",
         "process_read",
         "artifact_query",

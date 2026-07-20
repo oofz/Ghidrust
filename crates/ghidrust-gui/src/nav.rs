@@ -1,13 +1,13 @@
-//! Ghidra-analog navigation history for Back / Forward (Alt+Left / Alt+Right).
+//! navigation history for Back / Forward (Alt+Left / Alt+Right).
 //!
-//! Semantics match Ghidra `NavigationHistoryPlugin`:
+//! Semantics match ``:
 //! - Cursor moves push a new location onto Back.
 //! - `back()` pops from Back and pushes the current onto Forward.
 //! - `forward()` inverts that.
 //! - Any *new* navigation while Forward is non-empty clears Forward (branch).
 //! - Bounded to `capacity` entries per stack (256 by default).
 
-/// One point of interest in a program (Ghidra `ProgramLocation`).
+/// One point of interest in a program.
 ///
 /// Kept minimal — VA only. Multi-program tools will need a program id later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

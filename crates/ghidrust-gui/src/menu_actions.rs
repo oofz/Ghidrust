@@ -1,9 +1,9 @@
-//! Pure helpers for CodeBrowser menu actions (Ghidra analogs).
+//! Pure helpers for menu actions.
 //! Unit-tested without egui click automation.
 
 use ghidrust_core::{Instruction, Program};
 
-/// Listing selection as inclusive instruction indices (Ghidra: selection in Listing).
+/// Listing selection as inclusive instruction indices.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListingSelection {
     pub start: Option<usize>,
@@ -42,7 +42,7 @@ impl ListingSelection {
 }
 
 /// Parse VA for Navigation → Go To Address (hex with optional 0x, or decimal).
-/// Ghidra analog: Navigation → Go To… accepts hex address.
+/// : Navigation → Go To… accepts hex address.
 pub fn parse_address(s: &str) -> Result<u64, String> {
     let t = s.trim();
     if t.is_empty() {
@@ -143,7 +143,7 @@ pub struct TextHit {
 /// Search → For Scalars — every scalar literal that appears in an operand
 /// within `[min, max]`.
 ///
-/// Ghidra `ScalarSearchPlugin` lists every scalar operand and lets the user
+/// `ScalarSearchPlugin` lists every scalar operand and lets the user
 /// filter by numeric range. Ghidrust's Stage-0 decoder emits scalars as either
 /// `0x...` (hex) or decimal literals inside the operand string; both are
 /// picked up here.
@@ -227,7 +227,7 @@ fn format_scalar(v: i64) -> String {
 /// matches `mnemonic_glob` (case-insensitive substring match) and whose
 /// operands contain `operand_substr` (empty = don't filter).
 ///
-/// Ghidra `BytePatternPlugin` supports a richer bit-pattern language; the
+/// `BytePatternPlugin` supports a richer bit-pattern language; the
 /// Stage-0 Ghidrust flavour uses the mnemonic + operand string that the
 /// decoder already produced so users can find e.g. every `cmp * , 0x0` or
 /// every `call ptr` without needing a full pcode search host.
@@ -383,7 +383,7 @@ pub fn listing_index_at_or_before(listing: &[Instruction], va: u64) -> Option<us
     best
 }
 
-/// Processor / language summary (Ghidra: Edit → Tool Options / language; we show Tools → Processor).
+/// Processor / language summary.
 #[derive(Debug, Clone)]
 pub struct ProcessorInfo {
     pub language: String,
@@ -405,8 +405,8 @@ pub fn processor_info(prog: &Program) -> ProcessorInfo {
         entry: prog.entry,
         endian: "little".into(),
         pointer_size: 8,
-        notes: "Ghidrust ships a fixed x86-64 decode path (no multi-processor SLEIGH editor). \
-                Analog to Ghidra language/processor display for the loaded program."
+        notes: "Ghidrust ships a fixed x86-64 decode path (no multi-processor language editor). \
+                Processor info reflects the loaded program."
             .into(),
     }
 }

@@ -139,8 +139,8 @@ impl<'a> SystemPromptBuilder<'a> {
         out.push_str("- Never invent analysis. If a binary hasn't been loaded, say so — do not fabricate addresses, symbols, or decompile output.\n");
         out.push_str("- Always acquire addresses through a tool call (`load`, `analyze`, `function_at`, `get_xrefs_*`). Never guess a VA.\n");
         out.push_str("- Use exact analyzer names from `list_analyzers` when calling `analyze` — no abbreviations.\n");
-        out.push_str("- Emit decompile output at the stage the tool returned. Do not claim Hex-Rays / Ghidra parity.\n");
-        out.push_str("- Do not conflate Ghidra MCP with Ghidrust MCP — this is Ghidrust.\n");
+        out.push_str("- Emit decompile output at the stage the tool returned. Do not claim parity with other decompilers.\n");
+        out.push_str("- Do not conflate other MCP servers with Ghidrust MCP — this is Ghidrust.\n");
 
         if self.read_only_note {
             out.push_str("- Session mode is currently **read-only**. Destructive tools (rename_*, set_comment, apply_patch, project_*) will be rejected. Ask the user to switch to `full` mode if you need them, and always show the intended change first.\n");

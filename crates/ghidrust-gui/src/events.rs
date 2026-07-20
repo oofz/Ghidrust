@@ -1,4 +1,4 @@
-//! Ghidrust plugin‑event bus (analog of Ghidra `PluginEvent`).
+//! Ghidrust plugin‑event bus.
 //!
 //! Providers announce cursor / selection / program‑mutation events by pushing a
 //! `GhidrustEvent` onto the app's `event_bus`. Each frame the app drains the bus and
@@ -13,7 +13,7 @@ use crate::nav::NavLocation;
 /// One published event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhidrustEvent {
-    /// Cursor / focused location changed (Ghidra `ProgramLocationPluginEvent`).
+    /// Cursor / focused location changed.
     ///
     /// `source` identifies the pane that emitted the event so subscribers can avoid
     /// echo loops.
@@ -21,7 +21,7 @@ pub enum GhidrustEvent {
         source: EventSource,
         location: NavLocation,
     },
-    /// Selection changed (Ghidra `ProgramSelectionPluginEvent`).
+    /// Selection changed.
     SelectionChanged {
         source: EventSource,
         start: NavLocation,

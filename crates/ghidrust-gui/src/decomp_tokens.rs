@@ -1,4 +1,4 @@
-//! Decompiler token model — Ghidra `ClangToken` analog for cross-highlight and nav.
+//! Decompiler token model — `` for cross-highlight and nav.
 //!
 //! **Design note.** Stage-1 may supply emit-time tokens via
 //! [`from_emit_tokens`]; otherwise this module tokenises the **pseudo-C

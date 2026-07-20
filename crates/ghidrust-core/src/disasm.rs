@@ -4,20 +4,123 @@
 //! [`crate::program::Program`] and maps errors into [`crate::Error`].
 
 use crate::error::{Error, Result};
+use crate::machine::{arch_mode_for_program, default_arch_mode};
 use crate::program::Program;
+use ghidrust_decode::{
+    Engine, MnemOverride, Opt, SkipdataConfig, Syntax,
+};
+use ghidrust_decode::{Arch, Mode};
 use serde::Serialize;
 use std::collections::{HashSet, VecDeque};
 pub use ghidrust_decode::{decode_one, Instruction};
+
+/// Optional engine overrides for a disassembly pass.
+#[derive(Debug, Clone, Default)]
+pub struct DisasmEngineOpts {
+    pub arch: Option<Arch>,
+    pub mode: Option<Mode>,
+    pub syntax: Option<Syntax>,
+    pub detail: Option<bool>,
+    pub detail_real: Option<bool>,
+    pub skipdata: Option<bool>,
+    pub skipdata_mnemonic: Option<String>,
+    pub skipdata_size: Option<usize>,
+    pub unsigned_imm: Option<bool>,
+    pub only_offset_branch: Option<bool>,
+    pub litbase: Option<u32>,
+    pub mnem_overrides: Option<Vec<(u32, String)>>,
+}
+
+impl DisasmEngineOpts {
+    pub fn open_engine(&self, prog: &Program) -> Result<Engine> {
+        open_engine_for(prog, Some(self))
+    }
+}
+
+fn open_engine_for(prog: &Program, opts: Option<&DisasmEngineOpts>) -> Result<Engine> {
+    let (mut arch, mut mode) = arch_mode_for_program(prog).unwrap_or_else(default_arch_mode);
+    if let Some(o) = opts {
+        if let Some(a) = o.arch {
+            arch = a;
+        }
+        if let Some(m) = o.mode {
+            mode = m;
+        }
+    }
+    let mut engine = Engine::open(arch, mode).map_err(|e| Error::Decode(e.to_string()))?;
+    if let Some(o) = opts {
+        apply_engine_opts(&mut engine, o)?;
+    }
+    Ok(engine)
+}
+
+fn apply_engine_opts(engine: &mut Engine, opts: &DisasmEngineOpts) -> Result<()> {
+    if let Some(v) = opts.syntax {
+        engine
+            .option(Opt::Syntax(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(v) = opts.detail {
+        engine
+            .option(Opt::Detail(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(v) = opts.detail_real {
+        engine
+            .option(Opt::DetailReal(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(v) = opts.skipdata {
+        engine
+            .option(Opt::Skipdata(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if opts.skipdata_mnemonic.is_some() || opts.skipdata_size.is_some() {
+        let mut cfg = SkipdataConfig::default();
+        if let Some(m) = &opts.skipdata_mnemonic {
+            cfg.mnemonic = m.clone();
+        }
+        engine
+            .option(Opt::SkipdataSetup(cfg))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(v) = opts.unsigned_imm {
+        engine
+            .option(Opt::Unsigned(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(v) = opts.only_offset_branch {
+        engine
+            .option(Opt::OnlyOffsetBranch(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(v) = opts.litbase {
+        engine
+            .option(Opt::Litbase(v))
+            .map_err(|e| Error::Decode(e.to_string()))?;
+    }
+    if let Some(list) = &opts.mnem_overrides {
+        for (id, mnemonic) in list {
+            engine
+                .option(Opt::Mnemonic(MnemOverride {
+                    id: *id,
+                    mnemonic: mnemonic.clone(),
+                }))
+                .map_err(|e| Error::Decode(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
 
 /// Disassembly walk strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DisasmMode {
-    /// Linear count-walk clamped to `[start, bound_end)` when set; stop on int3 padding.
+ /// Linear count-walk clamped to `[start, bound_end)` when set; stop on int3 padding.
     Bounded,
-    /// Follow fallthrough and branch targets; never leave `[start, bound_end)` when bound set.
+ /// Follow fallthrough and branch targets; never leave `[start, bound_end)` when bound set.
     Flow,
-    /// Legacy count-walk (no bound / int3 / seed stops).
+ /// Legacy count-walk (no bound / int3 / seed stops).
     Linear,
 }
 
@@ -33,10 +136,21 @@ pub enum DisasmStopReason {
 }
 
 pub fn disassemble_at(prog: &Program, va: u64) -> Result<Instruction> {
+    disassemble_at_opts(prog, va, None)
+}
+
+pub fn disassemble_at_opts(
+    prog: &Program,
+    va: u64,
+    engine_opts: Option<&DisasmEngineOpts>,
+) -> Result<Instruction> {
     let bytes = prog
         .read_va(va, 15)
-        .ok_or_else(|| Error::OutOfBounds(format!("no bytes at {va:#x}")))?;
-    Ok(decode_one(&bytes, va)?)
+ .ok_or_else(|| Error::OutOfBounds(format!("no bytes at {va:#x}")))?;
+    let mut engine = open_engine_for(prog, engine_opts)?;
+    engine
+        .disasm_one(&bytes, va)
+        .map_err(|e| Error::Decode(e.to_string()))
 }
 
 pub fn disassemble_range(prog: &Program, start: u64, max_insns: usize) -> Result<Vec<Instruction>> {
@@ -47,17 +161,17 @@ pub fn disassemble_range(prog: &Program, start: u64, max_insns: usize) -> Result
 #[derive(Debug, Clone, Serialize)]
 pub struct DisasmRangeResult {
     pub insns: Vec<Instruction>,
-    /// Number of undecodable byte positions skipped (soft-fail holes).
+ /// Number of undecodable byte positions skipped (soft-fail holes).
     pub decode_gaps: usize,
-    /// First gap VA when any gaps were skipped.
+ /// First gap VA when any gaps were skipped.
     pub first_gap_va: Option<u64>,
-    /// Why the walk stopped.
+ /// Why the walk stopped.
     pub stop_reason: DisasmStopReason,
-    /// Containing / resolved function entry when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
+ /// Containing / resolved function entry when known.
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<u64>,
-    /// Function / bound end when known.
-    #[serde(skip_serializing_if = "Option::is_none")]
+ /// Function / bound end when known.
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub end: Option<u64>,
 }
 
@@ -92,25 +206,74 @@ pub fn disassemble_range_ex(
     mode: DisasmMode,
     bound_end: Option<u64>,
 ) -> Result<DisasmRangeResult> {
+    disassemble_range_ex_opts(
+        prog,
+        start,
+        max_insns,
+        skip_bad,
+        mode,
+        bound_end,
+        None,
+    )
+}
+
+/// Extended disassembly with optional engine overrides.
+pub fn disassemble_range_ex_opts(
+    prog: &Program,
+    start: u64,
+    max_insns: usize,
+    skip_bad: bool,
+    mode: DisasmMode,
+    bound_end: Option<u64>,
+    engine_opts: Option<&DisasmEngineOpts>,
+) -> Result<DisasmRangeResult> {
     let meta_fn = prog.function_containing(start);
     let entry = meta_fn.map(|f| f.entry);
     let end = bound_end.or_else(|| meta_fn.map(|f| f.end));
     let self_entry = entry;
 
+    let mut engine = open_engine_for(prog, engine_opts)?;
+
     let mut result = match mode {
-        DisasmMode::Linear => disasm_linear(prog, start, max_insns, skip_bad)?,
+        DisasmMode::Linear => disasm_linear(prog, &mut engine, start, max_insns, skip_bad)?,
         DisasmMode::Bounded => {
-            disasm_bounded(prog, start, max_insns, skip_bad, bound_end, self_entry)?
+            disasm_bounded(
+                prog,
+                &mut engine,
+                start,
+                max_insns,
+                skip_bad,
+                bound_end,
+                self_entry,
+            )?
         }
-        DisasmMode::Flow => disasm_flow(prog, start, max_insns, skip_bad, bound_end, self_entry)?,
+        DisasmMode::Flow => disasm_flow(
+            prog,
+            &mut engine,
+            start,
+            max_insns,
+            skip_bad,
+            bound_end,
+            self_entry,
+        )?,
     };
     result.entry = entry;
     result.end = end;
     Ok(result)
 }
 
+fn disasm_at_engine(prog: &Program, engine: &mut Engine, va: u64) -> Result<Instruction> {
+    let bytes = prog
+        .read_va(va, 15)
+ .ok_or_else(|| Error::OutOfBounds(format!("no bytes at {va:#x}")))?;
+    engine
+        .disasm_one(&bytes, va)
+        .map_err(|e| Error::Decode(e.to_string()))
+}
+
 fn disasm_linear(
     prog: &Program,
+    engine: &mut Engine,
     start: u64,
     max_insns: usize,
     skip_bad: bool,
@@ -128,7 +291,7 @@ fn disasm_linear(
     };
     while out.len() < max_insns && steps < max_steps {
         steps += 1;
-        match disassemble_at(prog, va) {
+        match disasm_at_engine(prog, engine, va) {
             Ok(insn) => {
                 let len = insn.length.max(1) as u64;
                 va = va.wrapping_add(len);
@@ -149,7 +312,7 @@ fn disasm_linear(
         }
     }
     if out.is_empty() {
-        return Err(Error::Decode(format!("no instructions at {start:#x}")));
+ return Err(Error::Decode(format!("no instructions at {start:#x}")));
     }
     if out.len() >= max_insns {
         stop_reason = DisasmStopReason::Count;
@@ -166,6 +329,7 @@ fn disasm_linear(
 
 fn disasm_bounded(
     prog: &Program,
+    engine: &mut Engine,
     start: u64,
     max_insns: usize,
     skip_bad: bool,
@@ -199,11 +363,11 @@ fn disasm_bounded(
             break;
         }
         steps += 1;
-        match disassemble_at(prog, va) {
+        match disasm_at_engine(prog, engine, va) {
             Ok(insn) => {
                 let next = va.wrapping_add(insn.length.max(1) as u64);
                 if let Some(end) = bound_end {
-                    // Instruction must start inside the bound; do not walk past end.
+ // Instruction must start inside the bound; do not walk past end.
                     if va >= end {
                         stop_reason = DisasmStopReason::FunctionEnd;
                         break;
@@ -227,7 +391,7 @@ fn disasm_bounded(
         }
     }
     if out.is_empty() {
-        return Err(Error::Decode(format!("no instructions at {start:#x}")));
+ return Err(Error::Decode(format!("no instructions at {start:#x}")));
     }
     if out.len() >= max_insns && stop_reason == DisasmStopReason::Count {
         stop_reason = DisasmStopReason::Count;
@@ -244,6 +408,7 @@ fn disasm_bounded(
 
 fn disasm_flow(
     prog: &Program,
+    engine: &mut Engine,
     start: u64,
     max_insns: usize,
     skip_bad: bool,
@@ -272,7 +437,7 @@ fn disasm_flow(
         }
         if va != start && is_next_seed(prog, va, self_entry) {
             if out.is_empty() {
-                // Should not happen for start; keep scanning other paths.
+ // Should not happen for start; keep scanning other paths.
                 continue;
             }
             stop_reason = DisasmStopReason::NextSeed;
@@ -282,7 +447,7 @@ fn disasm_flow(
             stop_reason = DisasmStopReason::Int3;
             continue;
         }
-        match disassemble_at(prog, va) {
+        match disasm_at_engine(prog, engine, va) {
             Ok(insn) => {
                 let fallthrough = va.wrapping_add(insn.length.max(1) as u64);
                 let mnem = insn.mnemonic.clone();
@@ -321,7 +486,7 @@ fn disasm_flow(
     }
 
     if out.is_empty() {
-        return Err(Error::Decode(format!("no instructions at {start:#x}")));
+ return Err(Error::Decode(format!("no instructions at {start:#x}")));
     }
     if out.len() >= max_insns {
         stop_reason = DisasmStopReason::Count;
@@ -333,7 +498,7 @@ fn disasm_flow(
     {
         stop_reason = DisasmStopReason::FunctionEnd;
     }
-    // Stable address order for deterministic listings.
+ // Stable address order for deterministic listings.
     out.sort_by_key(|i| i.address);
     out.dedup_by_key(|i| i.address);
     Ok(DisasmRangeResult {
@@ -363,41 +528,41 @@ fn is_next_seed(prog: &Program, va: u64, self_entry: Option<u64>) -> bool {
 fn is_terminal_transfer(mnem: &str) -> bool {
     matches!(
         mnem,
-        "jmp" | "jmpq" | "ret" | "retn" | "retq" | "iret" | "iretd" | "iretq"
+ "jmp" | "jmpq" | "ret" | "retn" | "retq" | "iret" | "iretd" | "iretq"
     )
 }
 
 fn is_flow_mnemonic(mnem: &str) -> bool {
     matches!(
         mnem,
-        "call"
-            | "callq"
-            | "jmp"
-            | "jmpq"
-            | "je"
-            | "jne"
-            | "jz"
-            | "jnz"
-            | "jl"
-            | "jle"
-            | "jg"
-            | "jge"
-            | "ja"
-            | "jae"
-            | "jb"
-            | "jbe"
-            | "jo"
-            | "jno"
-            | "js"
-            | "jns"
-            | "jp"
-            | "jnp"
-            | "jcxz"
-            | "jecxz"
-            | "jrcxz"
-            | "loop"
-            | "loope"
-            | "loopne"
+ "call"
+ | "callq"
+ | "jmp"
+ | "jmpq"
+ | "je"
+ | "jne"
+ | "jz"
+ | "jnz"
+ | "jl"
+ | "jle"
+ | "jg"
+ | "jge"
+ | "ja"
+ | "jae"
+ | "jb"
+ | "jbe"
+ | "jo"
+ | "jno"
+ | "js"
+ | "jns"
+ | "jp"
+ | "jnp"
+ | "jcxz"
+ | "jecxz"
+ | "jrcxz"
+ | "loop"
+ | "loope"
+ | "loopne"
     )
 }
 
@@ -405,9 +570,9 @@ fn flow_targets(insn: &Instruction) -> Vec<u64> {
     if !is_flow_mnemonic(&insn.mnemonic) {
         return Vec::new();
     }
-    // Absolute hex / RIP-relative targets from operand text.
+ // Absolute hex / RIP-relative targets from operand text.
     let mut out = crate::xrefs::instruction_targets(insn);
-    // Prefer direct control-flow immediates; drop self-address noise.
+ // Prefer direct control-flow immediates; drop self-address noise.
     out.retain(|t| *t != insn.address);
     out
 }
@@ -421,31 +586,31 @@ mod tests {
     fn decode_push_rbp_mov_rbp_rsp() {
         let b = [0x55, 0x48, 0x89, 0xe5];
         let i0 = decode_one(&b, 0x1000).unwrap();
-        assert_eq!(i0.mnemonic, "push");
-        assert_eq!(i0.operands, "rbp");
+ assert_eq!(i0.mnemonic, "push");
+ assert_eq!(i0.operands, "rbp");
         assert_eq!(i0.length, 1);
         let i1 = decode_one(&b[1..], 0x1001).unwrap();
-        assert_eq!(i1.mnemonic, "mov");
-        assert_eq!(i1.operands, "rbp, rsp");
+ assert_eq!(i1.mnemonic, "mov");
+ assert_eq!(i1.operands, "rbp, rsp");
     }
 
     #[test]
     fn decode_xor_eax_eax_ret() {
         let b = [0x31, 0xc0, 0xc3];
         let i0 = decode_one(&b, 0).unwrap();
-        assert_eq!(i0.mnemonic, "xor");
-        assert_eq!(i0.operands, "eax, eax");
+ assert_eq!(i0.mnemonic, "xor");
+ assert_eq!(i0.operands, "eax, eax");
         let i1 = decode_one(&b[2..], 2).unwrap();
-        assert_eq!(i1.mnemonic, "ret");
+ assert_eq!(i1.mnemonic, "ret");
     }
 
     #[test]
     fn skip_bad_continues_after_hole() {
-        let mut prog = Program::new("t".into(), "PE32+");
-        // 0x06 is invalid in long mode; then xor eax,eax; ret
+ let mut prog = Program::new("t".into(), "PE32+");
+ // 0x06 is invalid in long mode; then xor eax,eax; ret
         let bytes = vec![0x06, 0x31, 0xc0, 0xc3];
         prog.blocks.push(MemoryBlock {
-            name: ".text".into(),
+ name: ".text".into(),
             va: 0x1000,
             size: bytes.len() as u64,
             bytes,
@@ -457,18 +622,18 @@ mod tests {
         assert!(listing.decode_gaps >= 1);
         assert_eq!(listing.first_gap_va, Some(0x1000));
         assert!(
-            listing.insns.iter().any(|i| i.mnemonic == "xor"),
-            "{:?}",
+ listing.insns.iter().any(|i| i.mnemonic == "xor"),
+ "{:?}",
             listing.insns
         );
-        assert!(listing.insns.iter().any(|i| i.mnemonic == "ret"));
+ assert!(listing.insns.iter().any(|i| i.mnemonic == "ret"));
         assert_eq!(listing.stop_reason, DisasmStopReason::Count);
     }
 
     #[test]
     fn bounded_excludes_adjacent_sibling_function() {
-        // fn_a: push rbp; mov rbp, rsp; ret; int3; int3
-        // fn_b: xor eax, eax; ret
+ // fn_a: push rbp; mov rbp, rsp; ret; int3; int3
+ // fn_b: xor eax, eax; ret
         let mut bytes = vec![0x55, 0x48, 0x89, 0xe5, 0xc3, 0xcc, 0xcc, 0x31, 0xc0, 0xc3];
         let base = 0x140001000u64;
         let fn_a_entry = base;
@@ -476,9 +641,9 @@ mod tests {
         let fn_b_entry = base + 7;
         let fn_b_end = base + bytes.len() as u64;
 
-        let mut prog = Program::new("t".into(), "PE32+");
+ let mut prog = Program::new("t".into(), "PE32+");
         prog.blocks.push(MemoryBlock {
-            name: ".text".into(),
+ name: ".text".into(),
             va: base,
             size: bytes.len() as u64,
             bytes: std::mem::take(&mut bytes),
@@ -488,10 +653,10 @@ mod tests {
         });
         prog.analysis
             .functions
-            .push(FunctionInfo::new(fn_a_entry, fn_a_end, "fn_a"));
+ .push(FunctionInfo::new(fn_a_entry, fn_a_end, "fn_a"));
         prog.analysis
             .functions
-            .push(FunctionInfo::new(fn_b_entry, fn_b_end, "fn_b"));
+ .push(FunctionInfo::new(fn_b_entry, fn_b_end, "fn_b"));
 
         let listing = disassemble_range_ex(
             &prog,
@@ -505,21 +670,21 @@ mod tests {
 
         assert!(
             listing.insns.iter().all(|i| i.address < fn_b_entry),
-            "bounded listing leaked into sibling: {:?}",
+ "bounded listing leaked into sibling: {:?}",
             listing.insns
         );
         assert!(
-            !listing.insns.iter().any(|i| i.mnemonic == "xor"),
-            "sibling xor must be excluded: {:?}",
+ !listing.insns.iter().any(|i| i.mnemonic == "xor"),
+ "sibling xor must be excluded: {:?}",
             listing.insns
         );
-        assert!(listing.insns.iter().any(|i| i.mnemonic == "ret"));
+ assert!(listing.insns.iter().any(|i| i.mnemonic == "ret"));
         assert!(
             matches!(
                 listing.stop_reason,
                 DisasmStopReason::FunctionEnd | DisasmStopReason::Int3 | DisasmStopReason::NextSeed
             ),
-            "stop_reason={:?}",
+ "stop_reason={:?}",
             listing.stop_reason
         );
         assert_eq!(listing.entry, Some(fn_a_entry));
@@ -528,9 +693,9 @@ mod tests {
 
     #[test]
     fn int3_padding_helper() {
-        let mut prog = Program::new("t".into(), "PE32+");
+ let mut prog = Program::new("t".into(), "PE32+");
         prog.blocks.push(MemoryBlock {
-            name: ".text".into(),
+ name: ".text".into(),
             va: 0x1000,
             size: 4,
             bytes: vec![0xcc, 0xcc, 0xc3, 0x90],

@@ -1,4 +1,4 @@
-//! Program cross-references (Ghidra `Symbol References` provider).
+//! Program cross-references.
 //!
 //! Sources:
 //! 1. `Program::analysis.references` — analyzer-deposited refs
@@ -20,10 +20,10 @@ pub struct XRef {
     pub from: u64,
     /// Target VA (where the reference points at).
     pub to: u64,
-    /// Ghidra-analog kind (`call`, `jmp`, `cond_jmp`, `data`, `ptr`, `ptr_table`,
+    /// kind (`call`, `jmp`, `cond_jmp`, `data`, `ptr`, `ptr_table`,
     /// `resource`, `xref`, `iat`).
     pub kind: &'static str,
-    /// Ghidra "From Preview" — mnemonic/operand text where computable.
+    /// "From Preview" — mnemonic/operand text where computable.
     pub preview: String,
     /// String encoding when this xref targets a string (`ascii`, `utf16le`); omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]

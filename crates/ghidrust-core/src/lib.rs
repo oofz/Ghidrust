@@ -2,7 +2,9 @@
 
 pub mod analyzers;
 pub mod artifacts;
+pub mod bounds_honesty;
 pub mod bulk_scan;
+pub mod callsite_hints;
 pub mod edits;
 pub mod gpu_analyzers;
 pub mod disasm;
@@ -11,6 +13,7 @@ pub mod error;
 pub mod imports;
 pub mod inventory;
 pub mod io_util;
+pub mod machine;
 pub mod pe;
 pub mod pe_functions;
 pub mod process;
@@ -48,8 +51,17 @@ pub use artifacts::{
     ArtifactEnvelope, ArtifactMeta, DEFAULT_PREVIEW_LIMIT,
 };
 pub use disasm::{
-    decode_one, disassemble_at, disassemble_range, disassemble_range_ex, disassemble_range_opts,
-    int3_padding_at, DisasmMode, DisasmRangeResult, DisasmStopReason, Instruction,
+    decode_one, disassemble_at, disassemble_at_opts, disassemble_range, disassemble_range_ex,
+    disassemble_range_ex_opts, disassemble_range_opts, int3_padding_at, DisasmEngineOpts,
+    DisasmMode, DisasmRangeResult, DisasmStopReason, Instruction,
+};
+pub use machine::{
+    arch_mode_for_program, arch_mode_from_elf_emachine, arch_mode_from_pe_machine,
+    default_arch_mode, elf_class_from_bytes, elf_emachine_from_bytes, pe_machine_from_bytes,
+};
+pub use ghidrust_decode::{
+    self, support, Arch, Engine, GroupId, InsnId, Mode, Opt, RegId, Syntax, SupportQuery,
+    VERSION as DECODE_VERSION,
 };
 pub use imports::{filter_imports, load_imports, parse_pe_imports};
 pub use inventory::{
@@ -58,10 +70,16 @@ pub use inventory::{
 };
 pub use io_util::{sanitize_path_component, sanitized_out_name, write_json_no_bom};
 pub use process::{
-    process_attach, process_detach, process_list, process_modules, process_read, process_regions,
-    process_resolve, static_to_live, ModuleInfo, ProcessInfo, ProcessSession, ReadResult,
-    RegionInfo, ResolveLive,
+    launch_command_line, process_attach, process_detach, process_is_suspended, process_launch,
+    process_list, process_modules, process_read, process_regions, process_resolve, process_resume,
+    static_to_live, LaunchRequest, LaunchResult, ModuleInfo, ProcessInfo, ProcessSession,
+    ReadResult, RegionInfo, ResolveLive,
 };
+pub use bounds_honesty::{
+    assess_bounds_honesty, assess_decompile_bounds, BoundsHonesty, SHORT_INSN_COUNT,
+    SHORT_SPAN_BYTES,
+};
+pub use callsite_hints::{collect_callsite_hints, CallsiteArg, CallsiteHint};
 pub use pe_functions::{
     create_function, create_function_with_kind, functions_from_runtime, grow_function,
     parse_export_code_vas, parse_runtime_functions, runtime_function_containing, RuntimeFunction,
@@ -105,7 +123,7 @@ pub fn load_bytes(data: &[u8], name: impl Into<String>) -> Result<Program> {
         elf::load_elf(data, name)
     } else {
         Err(Error::UnsupportedFormat(
-            "not a PE or ELF image (bad magic)".into(),
+ "not a PE or ELF image (bad magic)".into(),
         ))
     }
 }
@@ -116,12 +134,12 @@ pub fn load_bytes(data: &[u8], name: impl Into<String>) -> Result<Program> {
 /// the whole file is one memory block at VA 0.
 pub fn load_blob(data: &[u8], name: impl Into<String>) -> Program {
     let name = name.into();
-    let mut prog = Program::new(name, "blob");
+ let mut prog = Program::new(name, "blob");
     prog.image_base = 0;
     prog.file_bytes = data.to_vec();
     let size = data.len() as u64;
     prog.sections.push(program::SectionInfo {
-        name: ".blob".into(),
+ name: ".blob".into(),
         va: 0,
         virtual_size: size,
         raw_size: size,
@@ -129,7 +147,7 @@ pub fn load_blob(data: &[u8], name: impl Into<String>) -> Program {
         characteristics: 0,
     });
     prog.blocks.push(program::MemoryBlock {
-        name: ".blob".into(),
+ name: ".blob".into(),
         va: 0,
         size,
         bytes: data.to_vec(),
@@ -166,7 +184,7 @@ pub fn load_path_opts(path: impl AsRef<Path>, allow_blob: bool) -> Result<Progra
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "image".into());
+ .unwrap_or_else(|| "image".into());
     load_bytes_opts(&data, name, allow_blob)
 }
 
@@ -200,10 +218,10 @@ pub struct AnalysisBundle {
 
 /// Resolve path to committed fixtures (workspace `fixtures/`).
 pub fn fixture_path(name: &str) -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+ let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop();
     p.pop();
-    p.push("fixtures");
+ p.push("fixtures");
     p.push(name);
     p
 }
@@ -214,37 +232,37 @@ mod tests {
 
     #[test]
     fn load_pe_fixture_sections_and_bytes() {
-        let path = fixture_path("tiny_x64.pe");
-        let prog = load_path(&path).expect("load pe");
-        assert_eq!(prog.format, "PE32+");
+ let path = fixture_path("tiny_x64.pe");
+ let prog = load_path(&path).expect("load pe");
+ assert_eq!(prog.format, "PE32+");
         assert_eq!(prog.image_base, 0x140000000);
         assert_eq!(prog.entry, Some(0x140001000));
-        let bytes = prog.read_va(0x140001000, 8).expect("code bytes");
+ let bytes = prog.read_va(0x140001000, 8).expect("code bytes");
         assert_eq!(bytes, vec![0x55, 0x48, 0x89, 0xE5, 0x31, 0xC0, 0x5D, 0xC3]);
     }
 
     #[test]
     fn disassemble_pe_entry_matches_ground_truth() {
-        let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
+ let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
         let listing = disassemble_range(&prog, prog.entry.unwrap(), 8).unwrap();
         assert!(listing.len() >= 5);
-        assert_eq!(listing[0].mnemonic, "push");
-        assert_eq!(listing[4].mnemonic, "ret");
+ assert_eq!(listing[0].mnemonic, "push");
+ assert_eq!(listing[4].mnemonic, "ret");
     }
 
     #[test]
     fn rtti_recovers_widget() {
-        let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
+ let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
         let report = recover_rtti(&prog).unwrap();
-        assert!(report.classes.iter().any(|c| c.name == "Widget"));
+ assert!(report.classes.iter().any(|c| c.name == "Widget"));
     }
 
     #[test]
     fn analyze_path_bundle_all_default_ok() {
-        let b = analyze_path(fixture_path("tiny_x64.pe")).unwrap();
+ let b = analyze_path(fixture_path("tiny_x64.pe")).unwrap();
         assert!(!b.listing.is_empty());
         for r in &b.analysis.results {
-            assert_eq!(r.status, "ok", "{}", r.name);
+ assert_eq!(r.status, "ok", "{}", r.name);
         }
     }
 }

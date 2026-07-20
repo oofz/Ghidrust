@@ -2,14 +2,13 @@
 //!
 //! Coverage grows opcode-by-opcode. Unhandled forms fall through to
 //! [`ghidrust_ir::OpCode::Unimplemented`] so Stage-0 can still print the
-//! original mnemonic. Ghidra's `x86-64.sla` semantics tables are the reference
+//! original mnemonic. 's `x86-64.sla` semantics tables are the reference
 //! (read-only) but this crate is written in-tree per the dependency policy.
 //!
 //! # Design
 //!
 //! * Registers are mapped to a stable numeric id in [`AddrSpace::Register`] via
 //!   [`X86Reg`]. Sub-registers reuse the parent id with a smaller `Varnode.size`
-//!   (Ghidra's canonical layout).
 //! * Flags (`ZF`/`CF`/`SF`/`OF`/`PF`) live at reserved offsets in
 //!   [`AddrSpace::Register`] with size 1 so they participate in later
 //!   dataflow just like any other varnode.
@@ -915,7 +914,7 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
             }
         }
         // 1-operand imul / mul / div / idiv (F6/F7 group).
-        // Ghidra models these as writing to rax:rdx (rdx:rax) — we
+        // models these as writing to rax:rdx (rdx:rax) — we
         // conservatively update rax with the low half and drop rdx so
         // Stage-1 doesn't fabricate a phantom def.
         "imul" | "mul" | "idiv" | "div" if parts.len() == 1 => {
@@ -966,7 +965,7 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
         // don't (yet) have `INDIRECT`, materialize as `dst = cond ? src : dst`
         // via `BoolNegate` + two IntAnd-style guards is overkill: keep it
         // simple with a Copy + Unimplemented "predicated" note so DCE can
-        // still walk it. Ghidra's real MULTIEQUAL is a follow-up.
+        // still walk it. 's real MULTIEQUAL is a follow-up.
         m if is_cmov(m) => {
             let jcc_form = format!("j{}", &m[4..]);
             let (mut cond_ops, _cond_vn) = jcc_condition(&jcc_form, &mut ctx.unique_id);

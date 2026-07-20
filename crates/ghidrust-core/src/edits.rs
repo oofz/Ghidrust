@@ -1,11 +1,11 @@
-//! User-editable program state — Ghidra `ProgramDB` equivalent for the Ghidrust GUI.
+//! User-editable program state — `ProgramDB` equivalent for the Ghidrust GUI.
 //!
 //! Rename / retype / edit-signature / comment operations mutate this side-car
 //! store rather than the primary analysis output. This preserves the "analyzer
 //! output is honest" invariant while still letting the UI persist user
 //! decisions across saves.
 //!
-//! Keys are **virtual addresses** (Ghidra `Address`). Where a symbol has both
+//! Keys are **virtual addresses**. Where a symbol has both
 //! an analyzer-provided name and a user rename, the user rename wins in
 //! [`Program::display_name_at`] / [`Program::display_function_name_at`].
 
@@ -14,10 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::program::Program;
 
-/// Ghidra comment kinds attached to a code unit (per [Comment types] in
-/// `CodeUnit.EOL_COMMENT` etc).
-///
-/// [Comment types]: https://ghidra.re/ghidra_docs/api/ghidra/program/model/listing/CodeUnit.html
+/// Comment kinds attached to a code unit (EOL / pre / post / plate / repeatable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CommentKind {
     Eol,
@@ -47,7 +44,7 @@ impl CommentKind {
     }
 }
 
-/// One record for a function-signature edit (Ghidra's `Edit Function Signature`).
+/// One record for a function-signature edit.
 ///
 /// Values are captured as strings so Stage-0 doesn't need to depend on a real
 /// C parser; the plan is to attach a parsed `FunctionPrototype`
@@ -66,13 +63,13 @@ pub struct FunctionSignatureEdit {
     pub locals: Vec<String>,
 }
 
-/// One record for a variable/global retype (`Ctrl+L` in Ghidra).
+/// One record for a variable/global retype.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetypeEdit {
     pub type_desc: String,
 }
 
-/// One record for an equate — Ghidra `EquateTablePlugin` binds a symbolic name
+/// One record for an equate — `EquateTablePlugin` binds a symbolic name
 /// to a scalar so the Listing can render `MY_FLAG` instead of `0x1234`.
 ///
 /// Equates are attached to a (VA, operand-index) pair rather than to the raw
@@ -80,7 +77,7 @@ pub struct RetypeEdit {
 /// every occurrence in the program.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EquateEdit {
-    /// Ghidra display name (e.g. `SW_HIDE`, `O_RDONLY`).
+    /// display name (e.g. `SW_HIDE`, `O_RDONLY`).
     pub name: String,
     /// Underlying scalar value the equate stands in for.
     pub value: i64,
@@ -104,19 +101,19 @@ pub struct ProgramEdits {
     /// Function-signature edits keyed by function entry VA.
     #[serde(default)]
     pub function_signatures: BTreeMap<u64, FunctionSignatureEdit>,
-    /// User-defined data types (name → Ghidra-C style description).
+    /// User-defined data types.
     /// Stage-0 stores as strings; later upgrades to a parsed structure.
     #[serde(default)]
     pub user_types: BTreeMap<String, String>,
     /// User-applied types at specific VAs (Listing "Data Type" apply).
     #[serde(default)]
     pub applied_types: BTreeMap<u64, String>,
-    /// Equates keyed by `(va, op_index)` — Ghidra `EquateTablePlugin` model.
+    /// Equates keyed by `(va, op_index)` — `EquateTablePlugin` model.
     ///
     /// Serialized as a flat `Vec` because JSON map keys must be strings.
     #[serde(default, with = "equates_serde")]
     pub equates: BTreeMap<(u64, u8), EquateEdit>,
-    /// Per-function tags (Ghidra `FunctionTagPlugin`). Keyed by function entry VA.
+    /// Per-function tags. Keyed by function entry VA.
     #[serde(default)]
     pub function_tags: BTreeMap<u64, BTreeSet<String>>,
     /// The universe of tags the user has ever created — retained even when no
@@ -350,7 +347,7 @@ impl ProgramEdits {
         }
     }
 
-    // ─── Equates (Ghidra `EquateTablePlugin`) ────────────────────────────
+    // ─── Equates ────────────────────────────
 
     /// Attach an equate at `(va, op_index)`.
     pub fn set_equate(&mut self, va: u64, op: u8, name: impl Into<String>, value: i64) {
@@ -391,7 +388,7 @@ impl ProgramEdits {
             .collect()
     }
 
-    // ─── Function Tags (Ghidra `FunctionTagPlugin`) ─────────────────────
+    // ─── Function Tags ─────────────────────
 
     /// Whether `entry` currently has `tag` assigned.
     pub fn function_has_tag(&self, entry: u64, tag: &str) -> bool {
@@ -509,8 +506,8 @@ impl Program {
     }
 }
 
-/// Built-in data types Ghidra exposes in the "BuiltInTypes" archive (subset relevant
-/// to Ghidrust's Stage-0 rendering). Ordered as Ghidra shows them in the DTM.
+/// Built-in data types exposes in the "BuiltInTypes" archive (subset relevant
+/// to Ghidrust's Stage-0 rendering). Ordered as shows them in the DTM.
 pub const BUILTIN_TYPES: &[&str] = &[
     "void", "bool",
     "byte", "sbyte", "word", "sword", "dword", "sdword", "qword", "sqword",

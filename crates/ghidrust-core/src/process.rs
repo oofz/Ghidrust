@@ -1,23 +1,25 @@
 //! Live Process Bridge (Windows) — hand-rolled Win32 FFI.
 //!
-//! MVP: list / attach / modules / read / resolve / regions. No write or breakpoints.
+//! MVP: list / attach / launch(suspended) / resume / modules / read / resolve /
+//! regions. No write, breakpoints, or WaitForDebugEvent agent.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcessInfo {
     pub pid: u32,
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleInfo {
     pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     pub base: u64,
     pub size: u64,
@@ -45,11 +47,11 @@ pub struct ReadResult {
     pub bytes_read: usize,
     pub hex: String,
     pub bytes: Vec<u8>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub as_u64: Option<Vec<u64>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+ #[serde(skip_serializing_if = "Option::is_none")]
     pub as_f32: Option<Vec<f32>>,
 }
 
@@ -61,10 +63,34 @@ pub struct ResolveLive {
     pub live_va: u64,
 }
 
+/// Spawn a new process under the Live Process Bridge (CREATE_SUSPENDED).
+#[derive(Debug, Clone)]
+pub struct LaunchRequest {
+    pub image: PathBuf,
+    pub args: Option<String>,
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchResult {
+    pub session: ProcessSession,
+    pub image: String,
+ /// True until `process_resume` (CREATE_SUSPENDED; not a debug break-at-entry).
+    pub suspended: bool,
+    pub primary_tid: u32,
+}
+
 struct Attached {
     pid: u32,
     #[cfg(windows)]
     handle: isize,
+ /// Primary thread from CreateProcess (launch only); closed on detach.
+    #[cfg(windows)]
+    thread: Option<isize>,
+    suspended: bool,
+ /// Image path when created via [`process_launch`].
+    #[allow(dead_code)]
+    launched_image: Option<String>,
 }
 
 static SESSIONS: Mutex<Option<HashMap<String, Attached>>> = Mutex::new(None);
@@ -75,7 +101,7 @@ where
 {
     let mut guard = SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
-        *guard = Some(HashMap::new());
+ *guard = Some(HashMap::new());
     }
     f(guard.as_mut().unwrap())
 }
@@ -83,9 +109,9 @@ where
 #[cfg(windows)]
 mod win {
     use super::*;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::mem::{size_of, zeroed};
-    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::ptr;
 
     type HANDLE = isize;
@@ -103,7 +129,39 @@ mod win {
     const MEM_COMMIT: DWORD = 0x1000;
     const MEM_FREE: DWORD = 0x10000;
     const MEM_RESERVE: DWORD = 0x2000;
+    const CREATE_SUSPENDED: DWORD = 0x0000_0004;
+    const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x0000_0400;
     const MAX_PATH: usize = 260;
+
+    #[repr(C)]
+    struct STARTUPINFOW {
+        cb: DWORD,
+        lp_reserved: *mut u16,
+        lp_desktop: *mut u16,
+        lp_title: *mut u16,
+        dw_x: DWORD,
+        dw_y: DWORD,
+        dw_x_size: DWORD,
+        dw_y_size: DWORD,
+        dw_x_count_chars: DWORD,
+        dw_y_count_chars: DWORD,
+        dw_fill_attribute: DWORD,
+        dw_flags: DWORD,
+        w_show_window: u16,
+        cb_reserved2: u16,
+        lp_reserved2: *mut u8,
+        h_std_input: HANDLE,
+        h_std_output: HANDLE,
+        h_std_error: HANDLE,
+    }
+
+    #[repr(C)]
+    struct PROCESS_INFORMATION {
+        h_process: HANDLE,
+        h_thread: HANDLE,
+        dw_process_id: DWORD,
+        dw_thread_id: DWORD,
+    }
 
     #[repr(C)]
     struct PROCESSENTRY32W {
@@ -144,8 +202,8 @@ mod win {
         typ: DWORD,
     }
 
-    #[link(name = "kernel32")]
-    extern "system" {
+ #[link(name = "kernel32")]
+ extern "system" {
         fn OpenProcess(access: DWORD, inherit: BOOL, pid: DWORD) -> HANDLE;
         fn CloseHandle(h: HANDLE) -> BOOL;
         fn ReadProcessMemory(
@@ -172,6 +230,107 @@ mod win {
             buf: *mut u16,
             size: *mut DWORD,
         ) -> BOOL;
+        fn CreateProcessW(
+            app: *const u16,
+            cmdline: *mut u16,
+            proc_attr: *const u8,
+            thread_attr: *const u8,
+            inherit: BOOL,
+            flags: DWORD,
+            env: *const u8,
+            cwd: *const u16,
+            si: *const STARTUPINFOW,
+            pi: *mut PROCESS_INFORMATION,
+        ) -> BOOL;
+        fn ResumeThread(h: HANDLE) -> DWORD;
+        fn GetLastError() -> DWORD;
+    }
+
+    fn to_wide_z(s: &str) -> Vec<u16> {
+        let mut v: Vec<u16> = OsStr::new(s).encode_wide().collect();
+        v.push(0);
+        v
+    }
+
+ /// Build Win32 command line: quoted image path + optional args tail.
+    pub fn build_command_line(image: &Path, args: Option<&str>) -> String {
+        let img = image.to_string_lossy();
+ let quoted = if img.contains(char::is_whitespace) || img.contains('"') {
+ format!("\"{}\"", img.replace('"', ""))
+        } else {
+            img.into_owned()
+        };
+        match args.map(str::trim).filter(|a| !a.is_empty()) {
+ Some(a) => format!("{quoted} {a}"),
+            None => quoted,
+        }
+    }
+
+    pub fn launch(
+        image: &Path,
+        args: Option<&str>,
+        cwd: Option<&Path>,
+    ) -> Result<(String, HANDLE, HANDLE, u32, u32, String), String> {
+        if !image.is_file() {
+            return Err(format!(
+ "launch image not found or not a file: {}",
+                image.display()
+            ));
+        }
+        let image_str = image
+            .canonicalize()
+            .unwrap_or_else(|_| image.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        let cmdline = build_command_line(Path::new(&image_str), args);
+        let mut cmdline_w = to_wide_z(&cmdline);
+        let cwd_w = cwd.map(|c| to_wide_z(&c.to_string_lossy()));
+        let mut si: STARTUPINFOW = unsafe { zeroed() };
+        si.cb = size_of::<STARTUPINFOW>() as DWORD;
+        let mut pi: PROCESS_INFORMATION = unsafe { zeroed() };
+        let flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT;
+        let ok = unsafe {
+            CreateProcessW(
+                ptr::null(),
+                cmdline_w.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                flags,
+                ptr::null(),
+                cwd_w
+                    .as_ref()
+                    .map(|v| v.as_ptr())
+                    .unwrap_or(ptr::null()),
+                &si,
+                &mut pi,
+            )
+        };
+        if ok == 0 {
+            let err = unsafe { GetLastError() };
+            return Err(format!(
+ "CreateProcessW failed (GetLastError={err:#x}) for {cmdline}"
+            ));
+        }
+ let session_id = format!("ps-{}-{}", pi.dw_process_id, super::now_token());
+        Ok((
+            session_id,
+            pi.h_process,
+            pi.h_thread,
+            pi.dw_process_id,
+            pi.dw_thread_id,
+            image_str,
+        ))
+    }
+
+    pub fn resume_thread(h: HANDLE) -> Result<(), String> {
+        let prev = unsafe { ResumeThread(h) };
+ // ResumeThread returns previous suspend count, or u32::MAX on failure.
+        if prev == DWORD::MAX {
+            let err = unsafe { GetLastError() };
+ return Err(format!("ResumeThread failed (GetLastError={err:#x})"));
+        }
+        Ok(())
     }
 
     fn wide_to_string(w: &[u16]) -> String {
@@ -184,7 +343,7 @@ mod win {
     pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
         let snap = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
         if snap == 0 || snap == INVALID_HANDLE_VALUE {
-            return Err("CreateToolhelp32Snapshot failed".into());
+ return Err("CreateToolhelp32Snapshot failed".into());
         }
         let mut out = Vec::new();
         let mut pe: PROCESSENTRY32W = unsafe { zeroed() };
@@ -232,10 +391,10 @@ mod win {
         let h = unsafe { OpenProcess(access, 0, pid) };
         if h == 0 {
             return Err(format!(
-                "OpenProcess({pid}) failed — access denied, elevated rights, or process exited"
+ "OpenProcess({pid}) failed — access denied, elevated rights, or process exited"
             ));
         }
-        let session_id = format!("ps-{pid}-{}", super::now_token());
+ let session_id = format!("ps-{pid}-{}", super::now_token());
         Ok((session_id, h))
     }
 
@@ -244,7 +403,7 @@ mod win {
         let snap = unsafe { CreateToolhelp32Snapshot(flags, pid) };
         if snap == 0 || snap == INVALID_HANDLE_VALUE {
             return Err(
-                "Module snapshot failed (32-bit tool vs 64-bit process, or access denied)".into(),
+ "Module snapshot failed (32-bit tool vs 64-bit process, or access denied)".into(),
             );
         }
         let mut out = Vec::new();
@@ -295,7 +454,7 @@ mod win {
                 bytes_read: 0,
                 hex: String::new(),
                 bytes: vec![],
-                error: Some("ReadProcessMemory failed (access denied or unmapped)".into()),
+ error: Some("ReadProcessMemory failed (access denied or unmapped)".into()),
                 as_u64: None,
                 as_f32: None,
             };
@@ -321,7 +480,7 @@ mod win {
             None
         };
         let error = if read < size {
-            Some(format!("short_read: got {read} of {size}"))
+ Some(format!("short_read: got {read} of {size}"))
         } else {
             None
         };
@@ -374,18 +533,18 @@ mod win {
     }
 
     fn protect_str(p: DWORD) -> String {
-        format!("{p:#x}")
+ format!("{p:#x}")
     }
     fn state_str(s: DWORD) -> String {
         match s {
-            MEM_COMMIT => "commit".into(),
-            MEM_RESERVE => "reserve".into(),
-            MEM_FREE => "free".into(),
-            _ => format!("{s:#x}"),
+ MEM_COMMIT => "commit".into(),
+ MEM_RESERVE => "reserve".into(),
+ MEM_FREE => "free".into(),
+ _ => format!("{s:#x}"),
         }
     }
     fn type_str(t: DWORD) -> String {
-        format!("{t:#x}")
+ format!("{t:#x}")
     }
 
     pub fn close(h: HANDLE) {
@@ -394,7 +553,7 @@ mod win {
         }
     }
 
-    // silence unused import warning on ptr
+ // silence unused import warning on ptr
     #[allow(dead_code)]
     fn _touch() {
         let _ = ptr::null::<u8>();
@@ -416,7 +575,7 @@ pub fn process_list() -> Result<Vec<ProcessInfo>, String> {
     }
     #[cfg(not(windows))]
     {
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
     }
 }
 
@@ -430,6 +589,9 @@ pub fn process_attach(pid: u32) -> Result<ProcessSession, String> {
                 Attached {
                     pid,
                     handle,
+                    thread: None,
+                    suspended: false,
+                    launched_image: None,
                 },
             );
         });
@@ -438,7 +600,101 @@ pub fn process_attach(pid: u32) -> Result<ProcessSession, String> {
     #[cfg(not(windows))]
     {
         let _ = pid;
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
+    }
+}
+
+/// Launch `image` with CREATE_SUSPENDED, keep a live read session, leave primary thread frozen.
+///
+/// Not a Windows-debug break-at-entry — call [`process_resume`] to let the process run.
+/// Fails if another session is already open (one-session MVP).
+pub fn process_launch(req: &LaunchRequest) -> Result<LaunchResult, String> {
+    #[cfg(windows)]
+    {
+        with_sessions(|m| -> Result<(), String> {
+            if !m.is_empty() {
+                return Err(
+ "detach the current live session before launching a new process".into(),
+                );
+            }
+            Ok(())
+        })?;
+        let (session_id, h_proc, h_thread, pid, tid, image_str) =
+            win::launch(&req.image, req.args.as_deref(), req.cwd.as_deref())?;
+        with_sessions(|m| {
+            m.insert(
+                session_id.clone(),
+                Attached {
+                    pid,
+                    handle: h_proc,
+                    thread: Some(h_thread),
+                    suspended: true,
+                    launched_image: Some(image_str.clone()),
+                },
+            );
+        });
+        Ok(LaunchResult {
+            session: ProcessSession { session_id, pid },
+            image: image_str,
+            suspended: true,
+            primary_tid: tid,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = req;
+ Err("Live Process Bridge is Windows-only in this MVP".into())
+    }
+}
+
+/// Resume the primary thread of a launched (CREATE_SUSPENDED) session.
+pub fn process_resume(session_id: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        with_sessions(|m| {
+            let a = m
+                .get_mut(session_id)
+ .ok_or_else(|| format!("unknown or stale session: {session_id}"))?;
+            if !a.suspended {
+ return Err("session is not suspended (already running or attach-only)".into());
+            }
+            let h = a
+                .thread
+ .ok_or_else(|| "session has no primary thread handle to resume".to_string())?;
+            win::resume_thread(h)?;
+            a.suspended = false;
+            Ok(())
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = session_id;
+ Err("Live Process Bridge is Windows-only in this MVP".into())
+    }
+}
+
+/// Whether the session was launched suspended and has not been resumed yet.
+pub fn process_is_suspended(session_id: &str) -> Result<bool, String> {
+    with_sessions(|m| {
+        m.get(session_id)
+            .map(|a| a.suspended)
+ .ok_or_else(|| format!("unknown or stale session: {session_id}"))
+    })
+}
+
+/// Build the Win32 command line used by [`process_launch`] (also for tests).
+pub fn launch_command_line(image: &Path, args: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        win::build_command_line(image, args)
+    }
+    #[cfg(not(windows))]
+    {
+        let img = image.display().to_string();
+        match args.map(str::trim).filter(|a| !a.is_empty()) {
+ Some(a) => format!("\"{img}\" {a}"),
+            None => img,
+        }
     }
 }
 
@@ -447,17 +703,26 @@ pub fn process_detach(session_id: &str) -> Result<(), String> {
     {
         with_sessions(|m| {
             if let Some(a) = m.remove(session_id) {
+ // Avoid leaving a CREATE_SUSPENDED orphan frozen forever.
+                if a.suspended {
+                    if let Some(th) = a.thread {
+                        let _ = win::resume_thread(th);
+                    }
+                }
+                if let Some(th) = a.thread {
+                    win::close(th);
+                }
                 win::close(a.handle);
                 Ok(())
             } else {
-                Err(format!("unknown session: {session_id}"))
+ Err(format!("unknown session: {session_id}"))
             }
         })
     }
     #[cfg(not(windows))]
     {
         let _ = session_id;
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
     }
 }
 
@@ -467,13 +732,13 @@ fn session_handle(session_id: &str) -> Result<(u32, isize), String> {
         with_sessions(|m| {
             m.get(session_id)
                 .map(|a| (a.pid, a.handle))
-                .ok_or_else(|| format!("unknown or stale session: {session_id}"))
+ .ok_or_else(|| format!("unknown or stale session: {session_id}"))
         })
     }
     #[cfg(not(windows))]
     {
         let _ = session_id;
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
     }
 }
 
@@ -486,7 +751,7 @@ pub fn process_modules(session_id: &str) -> Result<Vec<ModuleInfo>, String> {
     #[cfg(not(windows))]
     {
         let _ = session_id;
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
     }
 }
 
@@ -499,7 +764,7 @@ pub fn process_read(session_id: &str, va: u64, size: usize) -> Result<ReadResult
     #[cfg(not(windows))]
     {
         let _ = (session_id, va, size);
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
     }
 }
 
@@ -512,7 +777,7 @@ pub fn process_regions(session_id: &str, max: usize) -> Result<Vec<RegionInfo>, 
     #[cfg(not(windows))]
     {
         let _ = (session_id, max);
-        Err("Live Process Bridge is Windows-only in this MVP".into())
+ Err("Live Process Bridge is Windows-only in this MVP".into())
     }
 }
 
@@ -530,7 +795,7 @@ pub fn process_resolve(
                 .as_deref()
                 .map(|p| p.to_ascii_lowercase().ends_with(&module.to_ascii_lowercase()))
                 .unwrap_or(false))
-        .ok_or_else(|| format!("module not found: {module}"))?;
+ .ok_or_else(|| format!("module not found: {module}"))?;
     Ok(ResolveLive {
         module: m.name.clone(),
         rva,
@@ -542,4 +807,37 @@ pub fn process_resolve(
 /// Alias: static file RVA → live VA.
 pub fn static_to_live(session_id: &str, module: &str, rva: u64) -> Result<ResolveLive, String> {
     process_resolve(session_id, module, rva)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_command_line_quotes_paths_with_spaces() {
+ let s = launch_command_line(Path::new(r"C:\Program Files\app.exe"), Some("-flag"));
+ assert!(s.starts_with('"'), "{s}");
+ assert!(s.contains("app.exe"), "{s}");
+ assert!(s.ends_with("-flag"), "{s}");
+    }
+
+    #[test]
+    fn launch_command_line_plain_path_no_extra_quotes() {
+ let s = launch_command_line(Path::new(r"C:\tools\app.exe"), None);
+ assert_eq!(s, r"C:\tools\app.exe");
+    }
+
+    #[test]
+    fn launch_fails_when_image_missing() {
+        let err = process_launch(&LaunchRequest {
+ image: PathBuf::from("Z:\\definitely\\missing\\ghidrust_launch_test.exe"),
+            args: None,
+            cwd: None,
+        })
+        .unwrap_err();
+        assert!(
+ err.contains("not found") || err.contains("Windows-only") || err.contains("CreateProcess"),
+ "{err}"
+        );
+    }
 }

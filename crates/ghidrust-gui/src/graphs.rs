@@ -1,8 +1,8 @@
 //! Ghidrust GUI · Function Graph, Function Call Graph,
 //! Function Call Trees, and shared graph-layout helpers.
 //!
-//! These render Ghidra-analog dockable panes (`FunctionGraphPlugin`,
-//! `FunctionCallGraphPlugin`, `CallTreePlugin`) directly on top of Stage-0 CFG
+//! These render dockable panes (``,
+//! ``, ``) directly on top of Stage-0 CFG
 //! output from `ghidrust-decomp::decompile_at` and analyzer-recovered call
 //! references (`Program::analysis.references` + `ghidrust-core::xrefs`).
 //!
@@ -37,16 +37,16 @@ pub struct GraphPaneState {
     pub call_tree_expanded_in: BTreeSet<u64>,
     #[allow(dead_code)]
     pub call_tree_expanded_out: BTreeSet<u64>,
-    /// Call Trees — filter out thunks (Ghidra `Toggle Filter Thunks`).
+    /// Call Trees — filter out thunks.
     pub call_tree_hide_thunks: bool,
     /// Call Trees — "References Only" mode (data refs, no call edges).
     pub call_tree_refs_only: bool,
 }
 
-/// Function Graph layout algorithm (Ghidra ships several; we implement two).
+/// Function Graph layout algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FunctionGraphLayout {
-    /// Top-down hierarchical layered layout (Ghidra default).
+    /// Top-down hierarchical layered layout.
     #[default]
     Hierarchical,
     /// Simple grid — one row per block, in address order.
@@ -66,7 +66,7 @@ impl FunctionGraphLayout {
     }
 }
 
-// ── Function Graph (Ghidra `FunctionGraphPlugin`) ────────────────────────────
+// ── Function Graph ────────────────────────────
 
 /// Positioned CFG block ready for egui rendering.
 #[derive(Debug, Clone)]
@@ -261,7 +261,7 @@ fn layout_grid(
     (positioned, out_edges)
 }
 
-/// Ghidra `FunctionGraphPlugin` — render blocks + edges. Returns clicked
+/// `` — render blocks + edges. Returns clicked
 /// block start VA if any so the caller can Go To in Listing.
 ///
 /// `focused_va` is drawn with a highlighted stroke so the current cursor
@@ -344,7 +344,7 @@ pub fn render_function_graph(
     clicked
 }
 
-// ── Function Call Graph (Ghidra `FunctionCallGraphPlugin`) ──────────────────
+// ── Function Call Graph ──────────────────
 
 /// Level-based call graph vertex.
 #[derive(Debug, Clone)]
@@ -565,7 +565,7 @@ pub fn render_call_graph(
     clicked
 }
 
-// ── Function Call Trees (Ghidra `CallTreePlugin`) ───────────────────────────
+// ── Function Call Trees ───────────────────────────
 
 /// One node of the incoming / outgoing call tree.
 #[derive(Debug, Clone)]

@@ -447,7 +447,7 @@ impl Project {
         self.analysis_bin_path(id).is_file() || self.analysis_path(id).is_file()
     }
 
-    /// Pure project-tree rows for UI (Ghidra Project Window style: project → files).
+    /// Pure project-tree rows for UI.
     pub fn tree_rows(&self) -> ProjectTreeModel {
         let active = self.meta.active_id.clone();
         let files = self
@@ -685,7 +685,7 @@ mod tests {
             .unwrap();
         let va = prog.entry.expect("entry va");
 
-        // Apply a Ghidra-style workflow: rename, retype, comment kinds,
+        // Apply a workflow: rename, retype, comment kinds,
         // signature commit, user type + apply @ cursor.
         prog.edits.set_rename(va, "my_main");
         if let Some(f) = prog.function_at_mut(va) {

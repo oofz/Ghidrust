@@ -1,10 +1,10 @@
 //! **Decompile bench harness** — per-function wall-clock breakdown across the
 //! Stage-0 and Stage-0.5 emit paths.
 //!
-//! The bench is the scaffolding for the roadmap's *"beat Ghidra wall-clock"*
+//! The bench is the scaffolding for the roadmap's *"beat wall-clock"*
 //! metric ([`docs/GPU_DECOMPILER_RESEARCH.md`] and the plan file
 //! `decompiler quality goals`). It intentionally captures only what we
-//! can *actually* measure today; head-to-head Ghidra timings are appended by a
+//! can *actually* measure today; head-to-head timings are appended by a
 //! future scripted oracle.
 //!
 //! Public callers (CLI, MCP, tests) go through [`bench_program`] with an
@@ -237,12 +237,12 @@ pub fn bench_program_stage1_parallel(
 /// **Stage-1 bench** — pick the shared entry set (or fall back to
 /// `prog.analysis.functions`) and time Stage-0, Stage-0.5, and Stage-1 on
 /// each. Captured Stage-1 text is stored so head-to-head oracles can run
-/// token-similarity metrics against Ghidra output without recomputing.
+/// token-similarity metrics against output without recomputing.
 ///
 /// `entries` is optional: `None` = use `prog.analysis.functions` capped by
 /// `max_functions`; `Some(list)` = use exactly that entry list (in order).
 /// This is the API [`crate::ghidra_oracle::compare`] uses to enforce the
-/// "shared entry set" fairness rule for the Ghidra head-to-head.
+/// "shared entry set" fairness rule for the head-to-head.
 pub fn bench_program_stage1(
     prog: &Program,
     entries: Option<&[u64]>,

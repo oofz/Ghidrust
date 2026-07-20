@@ -1,35 +1,47 @@
-//! Hand-rolled x86-64 instruction decode (no Capstone / iced-x86 / Zydis at runtime).
+//! Hand-rolled instruction decode (no third-party disassemblers at runtime).
 //!
-//! Length-disassembly + mnemonic/operand strings for common prologue and fixture
-//! opcodes. Program-aware helpers (`disassemble_at` / `disassemble_range`) remain
-//! in `ghidrust-core` and call [`decode_one`] here.
+//! engine API plus legacy helpers [`decode_one`] / [`decode_bytes`].
+//! Program-aware helpers (`disassemble_at` / `disassemble_range`) remain in
+//! `ghidrust-core` and call [`decode_one`] here.
 
-mod x86_64;
+// Arch packages keep register/helper tables for opcode-family growth; unused
+// today is intentional API surface, not dead product code.
+#![allow(dead_code)]
 
-pub use x86_64::{decode_one, Instruction};
+mod alloc_hooks;
+mod arch;
+mod engine;
+mod error;
+mod group;
+mod insn;
+mod names;
+mod operand;
+mod option;
+mod reg;
+mod skipdata;
+mod support;
 
-use std::fmt;
+pub use alloc_hooks::{global_hooks, AllocHooks, GlobalAllocHooks};
+pub use engine::{DisasmIter, Engine, RegsAccess, VERSION};
+pub use error::{Error, Result};
+pub use group::GroupId;
+pub use insn::{InsnDetail, InsnId, Instruction};
+pub use names::{group_name, insn_id_for_mnemonic, insn_name, reg_name};
+pub use operand::{OpType, Operand};
+pub use option::{EngineOptions, MnemOverride, Opt, Syntax};
+pub use reg::RegId;
+pub use skipdata::{SkipdataCb, SkipdataConfig, SkipdataFn, SkipdataHandler};
+pub use support::{support, Arch, Mode, SupportQuery};
 
-/// Decode failure (truncated stream, unhandled opcode, …).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Error {
-    Decode(String),
+/// Decode one instruction via the default x86-64 engine.
+pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
+    let mut engine = Engine::x86_64_default()?;
+    engine.disasm_one(bytes, address)
 }
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Decode(m) => write!(f, "decode: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 /// Decode a linear byte slice into a sequence of instructions (stops on first error).
 pub fn decode_bytes(bytes: &[u8], start_address: u64, max_insns: usize) -> Result<Vec<Instruction>> {
+    let mut engine = Engine::x86_64_default()?;
     let mut out = Vec::new();
     let mut off = 0usize;
     let mut va = start_address;
@@ -37,7 +49,7 @@ pub fn decode_bytes(bytes: &[u8], start_address: u64, max_insns: usize) -> Resul
         if off >= bytes.len() {
             break;
         }
-        match decode_one(&bytes[off..], va) {
+        match engine.disasm_one(&bytes[off..], va) {
             Ok(insn) => {
                 let len = insn.length as usize;
                 off += len;
@@ -54,7 +66,7 @@ pub fn decode_bytes(bytes: &[u8], start_address: u64, max_insns: usize) -> Resul
     }
     if out.is_empty() {
         return Err(Error::Decode(format!(
-            "no instructions at {start_address:#x}"
+ "no instructions at {start_address:#x}"
         )));
     }
     Ok(out)
@@ -69,8 +81,18 @@ mod tests {
         let b = [0x55, 0x48, 0x89, 0xe5, 0xc3];
         let insns = decode_bytes(&b, 0x1000, 8).unwrap();
         assert_eq!(insns.len(), 3);
-        assert_eq!(insns[0].mnemonic, "push");
-        assert_eq!(insns[1].mnemonic, "mov");
-        assert_eq!(insns[2].mnemonic, "ret");
+ assert_eq!(insns[0].mnemonic, "push");
+ assert_eq!(insns[1].mnemonic, "mov");
+ assert_eq!(insns[2].mnemonic, "ret");
+    }
+
+    #[test]
+    fn legacy_decode_one_matches_engine() {
+        let b = [0x55, 0x48, 0x89, 0xe5, 0xc3];
+        let legacy = decode_one(&b, 0x1000).unwrap();
+        let mut engine = Engine::open(Arch::X86, Mode::MODE_64).unwrap();
+        let via_engine = engine.disasm_one(&b, 0x1000).unwrap();
+        assert_eq!(legacy.mnemonic, via_engine.mnemonic);
+        assert_eq!(legacy.length, via_engine.length);
     }
 }

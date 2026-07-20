@@ -2,7 +2,7 @@
 
 Hand-rolled **Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra).
 
-Ghidrust loads PE/ELF (and raw blobs), produces x86-64 listings, runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / Unity install inventory, and saves durable projects — from a CLI, an MCP server for agents, or an egui CodeBrowser-style GUI.
+Ghidrust loads PE/ELF (and raw blobs), produces Capstone-class multi-arch listings (23 ISAs; x86-64 primary analyze/decompile pipeline), runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / Unity install inventory, and saves durable projects — from a CLI, an MCP server for agents, or an egui CodeBrowser-style GUI.
 
 It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyzers, decompile) is written in-tree so the core stays small, auditable, and freestanding.
 
@@ -14,9 +14,9 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 |------|---------------------|
 | **Surpass Ghidra (measurable)** | On x86-64 PE/ELF: faster Auto Analysis + decompile-all wall clock than Ghidra headless on the same machine/binary; ≥ Ghidra F1 on function discovery; structured typed C with expression folding (not mnemonic scaffolding); differential correctness vs Ghidra on a fixed corpus — **target**, not a claim of today’s quality. Human rubric: [docs/READABILITY_RUBRIC.md](docs/READABILITY_RUBRIC.md). Hex-Rays-class display is the ceiling after the Ghidra bar. |
 | **Ghidra-shaped workflow** | Familiar labels and surfaces (Auto Analysis names, project import/analyze/export, listing + click FUN → decompile) without depending on the Ghidra JVM stack |
-| **Custom core** | PE/ELF, x86-64 decode, RTTI, analyzers, and the IR → SSA → structure → typed-C pipeline implemented in Rust — third-party RE libraries are avoided at runtime ([DEPENDENCIES.md](DEPENDENCIES.md)); Ghidra sources are reference-only |
+| **Custom core** | PE/ELF, Capstone-class multi-arch decode (`ghidrust-decode`), x86-64 RTTI/analyzers, and the IR → SSA → structure → typed-C pipeline implemented in Rust — third-party RE libraries are avoided at runtime; Ghidra sources are reference-only |
 | **CPU-correct first** | CPU paths are the oracle; optional GPU paths must match or enrich them, not replace honesty with speed claims |
-| **Agent-ready** | Headless CLI + stdio MCP with artifact spill/drain, program identity (`path` or `project`+`file_id`), PE install inventory, RTTI catalog query, UTF-16 xref parity, function create / bounded disasm / call graphs, IL2CPP touch-map + body proof, live process bridge (Windows), and egui panes for every surface |
+| **Agent-ready** | Headless CLI + stdio MCP with artifact spill/drain, program identity (`path` or `project`+`file_id`), PE install inventory, RTTI catalog query, UTF-16 xref support, function create / bounded disasm / call graphs, IL2CPP touch-map + body proof, live process bridge (Windows), and egui panes for every surface. **2026-07-19:** Windows agent disasm pipeline + bounds honesty (`--brief`/`--pretty`, `bounds_suspect`, `listing_text`) — see [CHANGELOG.md](CHANGELOG.md) |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
 
 ---
@@ -86,9 +86,12 @@ cargo test -p ghidrust-decomp
 cargo run -p ghidrust-cli --release -- help
 # or: ./target/release/ghidrust help
 
-# Load / disassemble fixtures
+# Load / disassemble fixtures (Capstone-class engine; bounded by function end by default)
 ./target/release/ghidrust load fixtures/tiny_x64.pe
 ./target/release/ghidrust disasm fixtures/tiny_x64.pe --count 16
+./target/release/ghidrust decode-support --json
+./target/release/ghidrust decode-query --query insn_name --arch x86 --id 1 --json
+./target/release/ghidrust disasm fixtures/tiny_x64.pe --addr 0x140001000 --count 32 --detail --syntax intel --json
 
 # Lookups (no helper scripts required)
 ./target/release/ghidrust strings fixtures/analysis_lab.pe --encoding all --filter WideLab --json
@@ -181,7 +184,7 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 |---------|---------|-----------|
 | `ghidrust load <path\|--project DIR --file-id ID>` | Load PE/ELF; JSON includes `resolved_path`, `sections`, informational `section_notes` | `--json`, `--out` |
 | `ghidrust strings <path>` | Scan ASCII and/or UTF-16LE strings (PE/ELF or `--raw` blob) | `--encoding`, `--filter`, `--match substr\|token\|whole\|glob`, `--limit N`, `--out FILE`, `--raw`, `--json` |
-| `ghidrust xrefs <path>` | Cross-references (absolute + RIP-relative; string encoding parity); call edges | Exactly one of: `--to` / `--from` / `--string` / `--import` / `--calls`; `--encoding ascii\|utf16le\|all`; `--skip-stubs` / `--classify` |
+| `ghidrust xrefs <path>` | Cross-references (absolute + RIP-relative; string encoding modes); call edges | Exactly one of: `--to` / `--from` / `--string` / `--import` / `--calls`; `--encoding ascii\|utf16le\|all`; `--skip-stubs` / `--classify` |
 | `ghidrust imports <path>` | PE import directory → DLL + symbol + IAT VA | `--dll NAME`, `--name NAME`, `--json` |
 | `ghidrust function-at <path> --addr HEX` | Containing analyzed function for a body VA (runs Function Start Search if needed); JSON includes `seed_kind` | `--json` |
 | `ghidrust function create <path> --addr HEX` | Create/heal a function at VA (pdata/export/FSS complements; may synthesize) | `--end HEX`, `--json` |
@@ -191,10 +194,12 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 | `ghidrust inventory <dir>` | Generic PE install inventory (exe/dll + VERSIONINFO; artifact if large) | `--max-depth`, `--hash`, `--json` |
 | `ghidrust tree <path>` | Bounded file tree index (existence/size; no unpack) | `--max-depth`, `--ext`, `--name`, `--json` |
 | `ghidrust artifact get\|query\|list` | Drain spilled analysis artifacts (`next_offset`) | `--offset`, `--limit`, `--json` |
-| `ghidrust process list\|attach\|detach\|modules\|read\|resolve\|regions` | Live Process Bridge (Windows; read-only MVP) | session_id / `--addr` / `--module` / `--rva` / `--max` |
+| `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions` | Live Process Bridge (Windows; read-only MVP; launch = CREATE_SUSPENDED) | session_id / `--args` / `--cwd` / `--addr` / `--module` / `--rva` / `--max` |
 | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls` | IL2CPP metadata + touch-map + method map (body proof / baseline) + stubs + icalls | See [docs/IL2CPP.md](docs/IL2CPP.md) |
 | `ghidrust unity-inventory <dir>` | Unity player layout (reuses PE VERSIONINFO helpers) | `--json`, `--out FILE` |
-| `ghidrust disasm <path>` | Listing bounded by function end by default; `decode_gaps` when `--skip-bad`; JSON `stop_reason` | `--addr HEX`, `--count N`, `--skip-bad`, `--linear`/`--flow`, `--json` |
+| `ghidrust disasm <path>` | Capstone-class listing; bounded by function end by default; `decode_gaps` when `--skip-bad`; JSON `stop_reason` | `--addr HEX`, `--count N` (default 16), `--skip-bad`, `--linear`/`--flow`, `--arch`, `--mode`, `--syntax`, `--detail`/`--no-detail`, `--detail-real`, `--skipdata`, `--skipdata-mnemonic`, `--skipdata-size`, `--unsigned-imm`, `--only-offset-branch`, `--litbase`, `--mnem-override ID:MNEMONIC`, `--out`, `--json` |
+| `ghidrust decode-support` | Engine version, 23 supported arches, options, syntax values, compile features | `--json` |
+| `ghidrust decode-query` | Engine introspection (`insn_name`, `reg_name`, `group_name`, `insn_group`, `reg_read`, `reg_write`, `op_count`, `op_index`, `regs_access`) | `--query NAME`, `--arch`, `--mode`, `--id`, `--index`, `--bytes HEX`, `--addr HEX`, `--detail`, `--json` |
 
 ```bash
 # Wide + ASCII string search (token match + limit; BOM-free --out)
@@ -314,6 +319,8 @@ ghidrust artifact query <id> --offset 0 --limit 64 --json
 # Live process (Windows; read-only)
 ghidrust process list --json
 ghidrust process attach <pid>
+ghidrust process launch C:\path\to\app.exe --args "--flag" --cwd C:\path\to --json
+ghidrust process resume <session_id>
 ghidrust process modules <session_id> --json
 ghidrust process resolve <session_id> --module app.exe --rva 0x1234 --json
 ghidrust process read <session_id> --addr 0x7ff… --size 64 --json
@@ -382,7 +389,9 @@ MyProject/
 | Command | What it does |
 |---------|----------------|
 | `ghidrust load <path\|--project DIR --file-id ID> [--json]` | Load PE/ELF; JSON includes `resolved_path`, `sections`, informational `section_notes` |
-| `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--linear\|--flow] [--json]` | x86-64 listing bounded by function end by default; `--linear` escapes; JSON `stop_reason` |
+| `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--linear\|--flow] [--arch ARCH] [--mode MODE] [--syntax SYNTAX] [--detail] [--detail-real] [--skipdata] [--skipdata-mnemonic S] [--skipdata-size N] [--unsigned-imm] [--only-offset-branch] [--litbase HEX] [--mnem-override ID:MNEM]… [--json]` | Capstone-class listing; bounded by function end by default; `--linear` escapes; JSON `stop_reason` + `decode_gaps` |
+| `ghidrust decode-support [--json]` | Decode engine catalog (version, arches, options, syntax values) |
+| `ghidrust decode-query [--query NAME] [--arch ARCH] [--mode MODE] [--id N] [--index N] [--bytes HEX] [--addr HEX] [--detail] [--json]` | Engine introspection queries |
 | `ghidrust bytes <path> --addr HEX [--count N] [--json]` | Raw VA hex dump |
 | `ghidrust strings <path> [--raw] [--encoding …] [--filter SUB] [--match MODE] [--limit N] [--out FILE] [--json]` | String scan (blob-capable) |
 | `ghidrust xrefs <path> (--to\|--from\|--string\|--import\|--calls) [--encoding ascii\|utf16le\|all] [--skip-stubs] [--classify] [--json]` | RIP-aware xrefs; `--calls` = callee edges; attribution fields when functions exist |
@@ -392,7 +401,7 @@ MyProject/
 | `ghidrust inventory <dir> [--max-depth N] [--hash] [--json]` | Generic PE install inventory (exe/dll + VERSIONINFO) |
 | `ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB] [--json]` | Bounded file tree index (existence/size; no unpack) |
 | `ghidrust artifact get\|query\|list …` | Drain / list spilled analysis artifacts (`next_offset`) |
-| `ghidrust process list\|attach\|detach\|modules\|read\|resolve\|regions …` | Live Process Bridge (Windows; read-only MVP) |
+| `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions …` | Live Process Bridge (Windows; read-only MVP; launch = CREATE_SUSPENDED) |
 | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls …` | IL2CPP metadata / touch-map / RVA map (`body_class`, `--baseline` → `build_skew`, `--meta-sections`) / stubs / icalls ([docs/IL2CPP.md](docs/IL2CPP.md)) |
 | `ghidrust unity-inventory <dir> [--out FILE] [--json]` | Unity player install inventory |
 | `ghidrust rtti <path> [--filter\|--name\|--exact] [--match MODE] [--json]` | RTTI catalog (filter/exact; multi-vtable honest) |
@@ -500,7 +509,9 @@ On Linux/macOS:
 |------|------|---------|
 | `server_info` | — | Package `version`, monotonic `tool_surface`, features, live session_model |
 | `load` | `path` **or** `project`+`file_id` | Load PE/ELF; `resolved_path`, `sections`, `section_notes` |
-| `disassemble` | `path`, optional `addr`, `count`, `linear` | Bounded by function end by default; `linear:true` escapes; JSON `stop_reason` + `decode_gaps` |
+| `decode_support` | — | Engine version, 23 arches, options, syntax values, compile features |
+| `decode_query` | `query`, optional `arch`, `mode`, `id`, `index`, `bytes`, `addr`, `detail` | Introspection: `insn_name`, `reg_name`, `group_name`, `insn_group`, `reg_read`, `reg_write`, `op_count`, `op_index`, `regs_access` |
+| `disassemble` | `path`, optional `addr`, `count`, `skip_bad`, `linear`, `flow`, `arch`, `mode`, `syntax`, `detail`, `detail_real`, `skipdata`, `skipdata_mnemonic`, `skipdata_size`, `unsigned_imm`, `only_offset_branch`, `litbase`, `mnem_overrides` | Bounded by function end by default; `linear:true` escapes; JSON `stop_reason` + `decode_gaps` |
 | `rtti` | `path` | Full RTTI recover dump |
 | `rtti_query` | `path`, optional `filter`, `exact`, `match` | Catalog query; multi-vtable; artifact if large |
 | `artifact_get` / `artifact_query` / `artifact_list` | `id` / optional `offset`/`limit` / optional `max` | Drain or list spilled results (`next_offset`) |
@@ -528,13 +539,13 @@ On Linux/macOS:
 | `list_gpu_strategies` | — | Per-analyzer GPU strategy matrix |
 | `gpu_decompile` | `path`, optional `addr`, `out` | GPU decompile at VA; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI with PCIe/device split |
-| `process_list` / `process_attach` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | session / pid / module / rva / max | Live Process Bridge (Windows; no write in MVP) |
+| `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | session / pid / image / module / rva / max | Live Process Bridge (Windows; no write in MVP) |
 
 #### Live process (Windows)
 
-Attach read-only (`PROCESS_VM_READ`): `process list` → `attach <pid>` → `modules` → `resolve --module NAME --rva HEX` (`static_to_live`) → `read --addr LIVE --size N` → optional `regions` / `detach`. Multi-step attach **must** use the long-lived MCP (or GUI) process — CLI `ghidrust process` cannot reuse `session_id` across separate spawns. Short reads and access denied are explicit errors. Bytes ≠ recovered types — do not invent structs from live reads. GUI: Debugger → Targets / Modules / Memory Bytes / Regions / Static Mappings.
+Attach read-only (`PROCESS_VM_READ`): `process list` → `attach <pid>` → `modules` → `resolve --module NAME --rva HEX` (`static_to_live`) → `read --addr LIVE --size N` → optional `regions` / `detach`. **Launch** creates a process with `CREATE_SUSPENDED`, opens a live session, then `process resume` lets it run — not a Ghidra/CE debug break-at-entry. Multi-step work **must** use the long-lived MCP (or GUI) process — CLI `ghidrust process` cannot reuse `session_id` across separate spawns. Short reads and access denied are explicit errors. Bytes ≠ recovered types — do not invent structs from live reads. GUI: one **Debugger** window; Attach/Launch auto-populate modules, regions, and Memory Bytes.
 
-Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface`: **minimum `3`** (touch-map / body_class / function_create); **prefer `>= 4`** for bounded disasm / `get_calls_from`; **current is `4`**.
+Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface`: **minimum `3`** (touch-map / body_class / function_create); **prefer `>= 4`** for bounded disasm / `get_calls_from`; **require `>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags; **current is `5`**. `server_info.decode` mirrors `decode-support` (version, arches, options, syntax_values).
 
 #### Analysis artifacts
 
@@ -550,7 +561,7 @@ Large MCP/CLI dumps spill to `%TEMP%/ghidrust-artifacts/`. Tool envelopes includ
 | Artifact spill | **Analysis Artifacts** |
 | GPU decompile | Analysis → **GPU Decompile…** |
 | Encoding / xrefs / RTTI / notes | Defined Strings, Symbol References, Symbol Tree Classes, Memory Map |
-| Live process | Debugger Targets / Modules / Memory Bytes / Regions |
+| Live process | **Debugger** (tabbed): Targets / Modules / Memory Bytes / Regions |
 
 IL2CPP version matrix and Unity inventory schema: [docs/IL2CPP.md](docs/IL2CPP.md).
 
@@ -564,7 +575,9 @@ Example agent-facing call shapes (conceptual):
 { "name": "get_import_xrefs", "arguments": { "path": "…/app.exe", "name": "ShellExecuteW" } }
 { "name": "function_at", "arguments": { "path": "…/app.exe", "addr": "0x14000d8ad" } }
 { "name": "function_create", "arguments": { "path": "…/app.exe", "addr": "0x14000d8ad" } }
-{ "name": "disassemble", "arguments": { "path": "…/app.exe", "addr": "0x14000d890", "count": 40 } }
+{ "name": "decode_support", "arguments": {} }
+{ "name": "decode_query", "arguments": { "query": "insn_name", "arch": "x86", "id": 1 } }
+{ "name": "disassemble", "arguments": { "path": "…/app.exe", "addr": "0x14000d890", "count": 40, "detail": true, "syntax": "intel" } }
 { "name": "get_calls_from", "arguments": { "path": "…/app.exe", "addr": "0x14000d8ad" } }
 { "name": "unity_inventory", "arguments": { "path": "…/GameDir" } }
 { "name": "il2cpp_touch_map", "arguments": { "meta": "…/global-metadata.dat", "filter": "Camera" } }
@@ -579,6 +592,8 @@ Example agent-facing call shapes (conceptual):
 { "name": "artifact_query", "arguments": { "id": "<artifact_id>", "offset": 0, "limit": 64 } }
 { "name": "process_list", "arguments": {} }
 { "name": "process_attach", "arguments": { "pid": 1234 } }
+{ "name": "process_launch", "arguments": { "image": "C:/path/to/app.exe", "args": "--flag", "cwd": "C:/path/to" } }
+{ "name": "process_resume", "arguments": { "session_id": "…" } }
 { "name": "process_resolve", "arguments": { "session_id": "…", "module": "app.exe", "rva": "0x1234" } }
 ```
 
@@ -612,9 +627,9 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
         │              │            │              │
   ┌──────────┐  ┌─────────────┐ ┌────────────┐ ┌──────────────┐
   │ decode   │  │    lift     │ │     ir     │ │     ssa      │  hand-rolled
-  │ x86-64   │→│ x86-64→IR   │→│ pcode-like │→│ cfg/dom/DF/  │  decompile
-  │ length + │  │ + flag model│ │ ops+varnode│ │ phi placement│  pipeline
-  │ mnemonics│  │             │ │            │ │              │
+  │ Capstone-│→│ x86-64→IR   │→│ pcode-like │→│ cfg/dom/DF/  │  decompile
+  │ class 23 │  │ + flag model│ │ ops+varnode│ │ phi placement│  pipeline
+  │ ISAs     │  │             │ │            │ │              │
   └──────────┘  └─────────────┘ └────────────┘ └──────────────┘
                              │
                              ▼
@@ -628,7 +643,7 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 | Crate | Role |
 |-------|------|
 | `ghidrust-core` | PE/ELF/blob, x86-64, analyzers, imports/IAT, xrefs, projects, bulk scan |
-| `ghidrust-decode` | Hand-rolled x86-64 length-disasm + mnemonic/operand strings |
+| `ghidrust-decode` | Hand-rolled Capstone-class multi-arch `Engine` (23 ISAs); no Capstone/iced/zydis at runtime |
 | `ghidrust-ir` | Architecture-neutral pcode-like IR (varnodes, ops, tagged blocks, address spaces) |
 | `ghidrust-lift` | x86-64 → IR semantics with flag model + `LiftCoverage` reporting |
 | `ghidrust-ssa` | CFG-on-IR, Cooper–Harvey–Kennedy dominators, Cytron dominance frontiers, phi placement |
@@ -649,7 +664,6 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 | [docs/GPU_ANALYZER_MATRIX.md](docs/GPU_ANALYZER_MATRIX.md) | Per-analyzer GPU strategy + bench CLI |
 | [docs/PARALLEL_RE_RESEARCH.md](docs/PARALLEL_RE_RESEARCH.md) | CPU pool vs GPU bulk RE |
 | [docs/IL2CPP.md](docs/IL2CPP.md) | IL2CPP metadata matrix + Unity player inventory |
-| [DEPENDENCIES.md](DEPENDENCIES.md) | Dependency policy |
 | [skill/README.md](skill/README.md) | Agent skill install |
 
 ---

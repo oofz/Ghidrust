@@ -2,7 +2,7 @@
 //! of high-level [`Region`]s (`Seq`, `IfThen`, `IfThenElse`, `While`,
 //! `DoWhile`, `Loop`, `Return`) suitable for structured C emission.
 //!
-//! Ghidra `Ghidra/Features/Decompiler` and Cifuentes' 1994 thesis are the
+//! `/Features/Decompiler` and Cifuentes' 1994 thesis are the
 //! *reference*; the code below is hand-rolled per the workspace dependency
 //! policy.
 //!
@@ -33,7 +33,7 @@
 //! detect blocks whose terminator is a computed jump matching a known
 //! `jump_va` and emit [`Region::Switch`] with per-case body regions rather
 //! than dropping to a raw `Goto`. This is the wired-up path for the
-//! Ghidra-equivalent "switch analyzer + decompiler switch case rendering"
+//! equivalent "switch analyzer + decompiler switch case rendering"
 //! contract.
 //!
 //! ## Short-circuit flattening (`switch-recovery` roadmap todo, `&&`/`||`)
@@ -158,7 +158,7 @@ pub enum Region {
 }
 
 /// One arm of a recovered `switch`. `selector` is the integer case value
-/// (matching the Ghidra `SwitchInfo::cases` shape), `body` is a full
+/// , `body` is a full
 /// [`Region`] the case falls into. Terminating with `break` is Stage-1
 /// emit's responsibility (via `Region::Goto` / `Region::Return`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

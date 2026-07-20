@@ -1,21 +1,19 @@
 ---
 name: ghidrust
 description: >
-  Use Ghidrust (Rust RE toolkit: PE/ELF/blob load, x86-64 disasm, Auto Analysis, projects,
-  CLI/MCP, egui GUI, IL2CPP metadata, Unity player inventory, GPU analyzer kernels +
-  multipass decompile) to reverse-engineer binaries without Ghidra. Exhaustive feature
-  catalog with when-to-use guidance.
-  Triggers: /ghidrust, reverse engineer, RE a PE/ELF, disassemble, RTTI, auto analysis,
-  analyze binary, Ghidrust project, MCP ghidrust, strings/functions, GPU decompile,
-  IL2CPP, global-metadata, unity-inventory, GameAssembly, analyzer-bench,
-  rtti-gpu-bench, bulk-bench.
+  x86-64 Auto Analysis, projects, CLI/MCP, egui GUI, IL2CPP metadata, Unity player inventory,
+ GPU analyzer kernels + multipass decompile) to reverse-engineer binaries without .
+  Exhaustive feature catalog with when-to-use guidance.
+  Triggers: /ghidrust, reverse engineer, RE a PE/ELF, disassemble, decode-support, decode-query,
+  MCP ghidrust, strings/functions, GPU decompile, IL2CPP, global-metadata, unity-inventory,
+  GameAssembly, analyzer-bench, rtti-gpu-bench, bulk-bench.
 metadata:
-  short-description: "Ghidrust RE — CLI, MCP, IL2CPP, Unity, analyzers, GPU"
+  short-description: "Ghidrust RE — multi-arch decode, CLI, MCP, IL2CPP, Unity, analyzers, GPU"
 ---
 
 # Ghidrust — agent skill
 
-Hand-rolled **Rust** reverse-engineering core (Ghidra-inspired labels; measurable **Ghidra-surpass** target on x86-64, Stage-0 decompile today). Prefer **CLI or MCP** for agents; GUI is for humans. **Never invent analysis** — if a fixture has no evidence, outputs are empty/honest.
+**Rust** reverse-engineering core (-inspired labels; measurable **-surpass** target on x86-64, Stage-0 decompile today). Prefer **CLI or MCP** for agents; GUI is for humans. **Never invent analysis** — if a fixture has no evidence, outputs are empty/honest.
 
 ## Paths & binaries
 
@@ -26,6 +24,7 @@ Hand-rolled **Rust** reverse-engineering core (Ghidra-inspired labels; measurabl
 | GUI | `cargo run -p ghidrust-gui --release` |
 | Fixtures | `fixtures/tiny_x64.pe`, `fixtures/analysis_lab.pe`, `fixtures/tiny_x64.elf`, `fixtures/il2cpp/*` |
 | Docs | `README.md`, `docs/IL2CPP.md`, `docs/GPU_ANALYZER_MATRIX.md`, `docs/PARALLEL_RE_RESEARCH.md` |
+| Decode API | `ghidrust-decode::Engine` — `open`, `disasm`, `disasm_one`, `option`, `insn_name`, `reg_name`, `group_name`, `regs_access`; re-exported from `ghidrust-core` |
 | Core API | `load_path` / `load_path_opts` / `load_blob`, `collect_strings_opts`, `run_analyzers_opts`, `Project`, `gpu_analyzers`, `bulk_scan` |
 
 CLI always builds with `gpu` feature on deps. On Windows PowerShell: `.\target\release\ghidrust.exe …`.
@@ -37,18 +36,243 @@ cargo build -p ghidrust-gui --release
 
 ---
 
+
+Hand-rolled **`ghidrust-decode`** crate — Capstone-compatible `Engine` API over **23 ISAs**, implemented entirely in-tree. **No Capstone, iced-x86, or Zydis at runtime.** Program-aware disasm (`ghidrust-core::disassemble_range_ex_opts`) wraps the engine with bounded/flow/linear walks, loader-derived arch/mode, and JSON instruction records.
+
+Library entry points: `Engine::open(arch, mode)`, `disasm` / `disasm_one` / `disasm_iter`, `option(Opt::…)`, introspection helpers (`insn_name`, `reg_name`, `group_name`, `op_count`, `regs_access`, …). Legacy x86-64 helper: `decode_one`.
+
+### Decode support — `decode-support` / `server_info.decode`
+
+Run **`ghidrust decode-support [--json]`** or MCP **`decode_support`** / read **`server_info.decode`** after connect.
+
+JSON shape:
+
+| Field | Meaning |
+|-------|---------|
+| `version` | `DECODE_VERSION` (crate version) |
+| `arches[]` | `{ name, supported }` for every `Arch::ALL` entry (all `supported: true`) |
+| `options[]` | Engine option names: `syntax`, `detail`, `detail_real`, `mode`, `skipdata`, `skipdata_setup`, `mnemonic`, `unsigned`, `only_offset_branch`, `litbase` |
+| `syntax_values[]` | Allowed `--syntax` / MCP `syntax` strings |
+| `features.decode_diet` | `false` — full detail path (not diet build) |
+| `features.x86_reduce` | `false` — full x86 table (not x86 reduce build) |
+
+`server_info` also sets **`tool_surface: 5`** and lists `decode_support` / `decode_query` under `features.surface`.
+
+### CLI — `disasm`, `decode-support`, `decode-query`
+
+Add `--json` for structured stdout. Shared decode flags come from `DecodeOpts` (`crates/ghidrust-cli/src/decode_opts.rs`).
+
+#### `ghidrust disasm <path>` (alias `disassemble`)
+
+**Path modes:** PE/ELF (loader arch/mode) · raw blob when **`--arch`** is set (reads file bytes; `--addr` offset into blob).
+
+| Flag | Purpose |
+|------|---------|
+| `--addr HEX` | Start VA (default: program entry or image base) |
+| `--count N` | Max instructions (default **16**) |
+| `--skip-bad` | Skip undecodable bytes; JSON reports `decode_gaps`, `first_gap_va` |
+| `--linear` | Unbounded linear walk — **ground truth** when bounds are unknown/suspect |
+| `--flow` | Control-flow walk within function bounds (trusted ends only) |
+| `--brief` | One line per insn: `addr: mnemonic operands` (no hex); no `python -c` needed |
+| `--pretty` | Header `entry/end/n/mode/stop_reason` + brief lines + bounds warning if any |
+| `--arch NAME` | Override architecture (see catalog; aliases below) |
+| `--mode NAME\|INT` | mode bits or named mode (`64`, `thumb`, `mips32`, `le`, …) |
+| `--syntax SYNTAX` | Assembly syntax flavor (see options catalog) |
+| `--detail` | Enable structured `detail` on each instruction |
+| `--no-detail` | Force detail off |
+| `--detail-real` | Real-number detail formatting where applicable |
+| `--skipdata` | Treat unknown bytes as data (skip-data mode) |
+| `--skipdata-mnemonic S` | Mnemonic for skip-data pseudo-instructions |
+| `--skipdata-size N` | Default skip size hint |
+| `--unsigned-imm` | Print immediates unsigned |
+| `--only-offset-branch` | Branch targets as offsets only |
+| `--litbase HEX` | Literal base for architectures that use it |
+| `--mnem-override ID:MNEMONIC` | Repeatable per-instruction-id mnemonic override |
+| `--out FILE` | With `--json`: JSON file. Without: human listing text (default/`--brief`/`--pretty`). UTF-8, no BOM |
+| `--json` | Structured stdout / JSON `--out` |
+
+JSON envelope (mapped binary): `insns`, `decode_gaps`, `first_gap_va`, `stop_reason`, `mode`, `entry`, `end`, plus honesty fields when relevant (`bounds_suspect`, `bounds_warning`, `suggested_end`, `heal_hint`, `callsite_hints`). MCP `disassemble` adds `resolve`, `listing_text` (brief lines).
+
+**PowerShell-safe:** never nest `python -c "..."` in agent shell pipelines (ScriptBlock / quoting kills the job). Prefer `ghidrust disasm … --pretty` / `--brief`, or `--json --out file.json` then `Get-Content` / `ConvertFrom-Json`. Flags accept `--name` or `-name`.
+
+#### `ghidrust decode-support [--json]`
+
+No arguments. Emits engine catalog (see above).
+
+#### `ghidrust decode-query`
+
+| Flag | Purpose |
+|------|---------|
+| `--query NAME` | **Required.** One of: `insn_name`, `reg_name`, `group_name`, `insn_group`, `reg_read`, `reg_write`, `op_count`, `op_index`, `regs_access` |
+| `--arch NAME` | Architecture (default `x86`) |
+| `--mode NAME\|INT` | Mode (default `64` for x86, `little_endian` otherwise) |
+| `--id N` | Instruction / register / group id (`insn_name`, `reg_name`, `group_name`) |
+| `--index N` | Operand / group / reg index (default 0) |
+| `--bytes HEX` | Instruction bytes for insn-dependent queries |
+| `--addr HEX` | Address for decode context (default 0) |
+| `--detail` | Enable detail before decode (required for `regs_access`) |
+| `--json` | Structured stdout |
+
+Positional query name (without `--query`) is also accepted: `ghidrust decode-query insn_name --arch x86 --id 1 --json`.
+
+### MCP — `disassemble`, `decode_support`, `decode_query`
+
+Requires **`tool_surface >= 5`** (check `server_info` before assuming these tools/args exist).
+
+#### `decode_support`
+
+Arguments: `{}`. Returns same JSON as CLI `decode-support`.
+
+#### `decode_query`
+
+| Arg | Type | Purpose |
+|-----|------|---------|
+| `query` | string **required** | `insn_name` \| `reg_name` \| `group_name` \| `insn_group` \| `reg_read` \| `reg_write` \| `op_count` \| `op_index` \| `regs_access` |
+| `arch` | string | Architecture name |
+| `mode` | string \| integer | Mode name or bitfield |
+| `id` | integer | Insn/reg/group id |
+| `index` | integer | Operand/group/reg index |
+| `bytes` | string | Hex bytes for instruction-dependent queries |
+| `addr` | string | Address for decode |
+| `detail` | boolean | Enable detail (needed for `regs_access`) |
+
+#### `disassemble`
+
+| Arg | Type | Purpose |
+|-----|------|---------|
+| `path` | string **required** | PE/ELF path |
+| `addr` | string | Start VA |
+| `count` | integer | Max insns (default 16) |
+| `skip_bad` | boolean | Skip bad bytes |
+| `linear` | boolean | Unbounded linear walk |
+| `flow` | boolean | Control-flow walk within function |
+| `arch` | string | Arch override |
+| `mode` | string \| integer | Mode override |
+| `syntax` | string | `default` \| `intel` \| `att` \| `noregname` \| `masm` \| `motorola` \| `cs_reg_alias` \| `percent` \| `no_dollar` \| `no_alias_text` \| `no_alias_text_compressed` |
+| `detail` | boolean | Structured detail |
+| `detail_real` | boolean | Real-number detail |
+| `skipdata` | boolean | Skip-data mode |
+| `skipdata_mnemonic` | string | Skip-data mnemonic |
+| `skipdata_size` | integer | Skip-data size hint |
+| `unsigned_imm` | boolean | Unsigned immediates |
+| `only_offset_branch` | boolean | Offset-only branches |
+| `litbase` | string \| integer | Literal base |
+| `mnem_overrides` | array | `"ID:MNEMONIC"` strings or `{ id, mnemonic }` objects |
+
+Returns: `resolve`, `mode`, `stop_reason`, `entry`, `end`, `decode_gaps`, `first_gap_va`, `insns`.
+
+### Options catalog
+
+| Option | CLI flag | MCP field | Values / notes |
+|--------|----------|-----------|----------------|
+| **syntax** | `--syntax` | `syntax` | `default`, `intel`, `att`, `noregname`, `masm`, `motorola`, `cs_reg_alias`, `percent`, `no_dollar`, `no_alias_text`, `no_alias_text_compressed` |
+| **detail** | `--detail` / `--no-detail` | `detail` | boolean — structured operands + register access lists |
+| **detail_real** | `--detail-real` | `detail_real` | boolean |
+| **mode** | `--mode` | `mode` | Integer bitfield or named: `16`, `32`, `64`, `thumb`, `mclass`, `v8`, `mips32`, `mips64`, `ppc32`, `ppc64`, `riscv32`, `riscv64`, `riscv_c`, `le`/`little`, `be`/`big`, `bpf_classic`, `bpf_extended`, `6502`, `65c02`, … |
+| **skipdata** | `--skipdata` | `skipdata` | boolean |
+| **skipdata_setup** | `--skipdata-mnemonic`, `--skipdata-size` | `skipdata_mnemonic`, `skipdata_size` | Mnemonic + size hint (`skipdata_setup` in engine) |
+| **mnemonic** | `--mnem-override ID:MNEM` | `mnem_overrides[]` | Per-instruction-id override |
+| **unsigned** | `--unsigned-imm` | `unsigned_imm` | boolean |
+| **only_offset_branch** | `--only-offset-branch` | `only_offset_branch` | boolean |
+| **litbase** | `--litbase HEX` | `litbase` | u32 |
+
+### Architectures catalog (`Arch::ALL` — 23)
+
+All report `"supported": true` from `decode-support`. CLI/MCP `--arch` / `arch` accepts the aliases below (from `parse_arch`); other canonical names are engine-supported — use `Engine::open` in library code or extend CLI aliases if needed.
+
+| Name | CLI/MCP `--arch` aliases |
+|------|--------------------------|
+| `arm` | `arm` |
+| `arm64` | `arm64`, `aarch64` |
+| `mips` | `mips` |
+| `x86` | `x86`, `x86_64`, `x64`, `amd64` |
+| `ppc` | `ppc`, `powerpc` |
+| `sparc` | `sparc` |
+| `sysz` | `sysz`, `s390` |
+| `xcore` | *(canonical `xcore` — engine only until CLI alias added)* |
+| `m68k` | `m68k`, `68k` |
+| `tms320c64x` | *(engine only)* |
+| `m680x` | *(engine only)* |
+| `evm` | `evm` |
+| `mos65xx` | `mos65xx`, `6502` |
+| `wasm` | `wasm` |
+| `bpf` | `bpf`, `ebpf` |
+| `riscv` | `riscv`, `riscv32`, `riscv64` |
+| `sh` | *(engine only)* |
+| `tricore` | *(engine only)* |
+| `alpha` | `alpha` |
+| `hppa` | *(engine only)* |
+| `loongarch` | *(engine only)* |
+| `xtensa` | *(engine only)* |
+| `arc` | *(engine only)* |
+
+Per-arch notes: [docs/DECODE_COVERAGE.md](../docs/DECODE_COVERAGE.md).
+
+### Groups catalog
+
+
+| ID | Name | Meaning |
+|----|------|---------|
+| 0 | `Invalid` | Placeholder |
+| 1 | `Jump` | Jump group |
+| 2 | `Call` | Call group |
+| 3 | `Ret` | Return group |
+| 4 | `Int` | Interrupt |
+| 5 | `Iret` | Interrupt return |
+| 6 | `Privilege` | Privileged |
+| 7 | `BranchRelative` | PC-relative branch |
+| ≥8 | `Arch(n)` | Architecture-specific groups — resolve with `decode-query --query group_name --id N` |
+
+### Instruction JSON fields
+
+Each entry in `insns[]`:
+
+| Field | Type | When present |
+|-------|------|--------------|
+| `address` | u64 | Always |
+| `bytes` | `[u8]` | Always — raw opcode bytes |
+| `mnemonic` | string | Always |
+| `operands` | string | Always — formatted operand text |
+| `length` | u8 | Always |
+| `detail` | object | When `--detail` / `detail: true` |
+| `detail.operands[]` | array | Structured operands: `Reg`, `Imm { value, size }`, `Mem { base, index, scale, disp, segment, size }`, `Fp`, `Invalid` |
+| `detail.groups[]` | array | `GroupId` membership |
+| `detail.regs_read[]` | array | Explicit read registers |
+| `detail.regs_write[]` | array | Explicit write registers |
+| `detail.implicit_read[]` | array | Implicit reads |
+| `detail.implicit_write[]` | array | Implicit writes |
+
+Human text line (non-JSON default): `{addr:016x}: {hex bytes} {mnemonic} {operands}`.
+Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
+
+### Decode SOPs (required)
+
+- **`tool_surface` check**: Call `server_info` first. This skill requires **`tool_surface >= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode args. If below 5 or tools missing from `tools/list` → rebuild `ghidrust`, restart MCP. (Broader Ghidrust surface still requires **`>= 3`**, prefer **`>= 4`** for bounded disasm / `get_calls_from`.)
+- **Decode mode decision tree**:
+  - Need body of **unknown / wrong / suspect** bounds? → `disasm --linear --count N` first (ground truth) → `function create --addr` to heal → then `--flow` / `decompile` on healed range.
+  - Need CFG inside a **known-good** function? → `--flow` (or default bounded).
+  - If JSON/text shows `bounds_suspect` or stop after a handful of insns with `function_end` → do **not** treat that as the full body; heal first.
+- **Bounded disasm**: Default **`Bounded`** clamps to containing function end. Trust it only when ends look honest (not prologue-only). Prefer `--linear` before decompile when unsure.
+- **Detail-first**: Pass **`--detail`** / `detail: true` when you need structured operands, **`regs_access`**, or `callsite_hints`. Without detail, rely on mnemonic/operand / listing_text strings only.
+- **Arch/mode from loader**: Omit **`--arch`/`--mode`** on PE/ELF so `arch_mode_for_program` selects from machine type. Override only for cross-arch blobs or deliberate experiments.
+- **Query helpers**: Use **`decode-query`** for `insn_name`/`reg_name`/`group_name` tables and per-instruction **`op_count`/`op_index`/`regs_access`** — do not guess ids from strings alone.
+- **Skipdata**: Enable **`--skipdata`** when linear sweeps hit inline data pools; tune **`--skipdata-mnemonic`** / **`--skipdata-size`** for readable `.byte`-style placeholders.
+
+---
+
 ## Agent friction SOPs (required)
 
-- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer `>= 4` when using bounded disasm / `get_calls_from`. If `server_info` is missing, `tool_surface` is below that minimum, or `process_list` / `artifact_query` / `il2cpp_touch_map` / `function_create` are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
+- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer **`>= 4`** for bounded disasm / `get_calls_from`. Require **`>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags. If `server_info` is missing, `tool_surface` is below the needed minimum, or expected tools are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
 - **Artifacts**: When envelope `entry_count` > preview or the host truncates tool text, drain via `artifact_query` / `artifact get` until `next_offset` is null. Never assume truncated MCP text is complete.
 - **Program identity**: Prefer `load` with absolute `path`, or `project` + `file_id`. Facts always include `resolved_path` or honest null — resolve before analyze/decompile.
 - **Inventory / tree**: Use `inventory <dir>` (PE VERSIONINFO + exe/dll) before OS `dir`/`Get-Item`. Use `tree` / `list_tree` for non-PE sidecars (existence/size only; no unpack).
-- **Seed pipeline**: Exception Directory / FSS → `function_create` (heal orphans) → tagged synthesize when still missing. Never invent managed names on synthesized ranges.
-- **Bounded disasm**: Prefer default bounded/flow disasm clamped to function body; `--linear` / `linear:true` is an escape hatch only.
+- **Seed pipeline**: Exception Directory / FSS → `function_create` (heal orphans **and** re-grow truncated stored ends) → tagged synthesize when still missing. Never invent managed names on synthesized ranges.
+- **PowerShell / agent shell**: Never recommend `python -c` with nested quotes in PS pipelines. Prefer `ghidrust disasm … --pretty` / `--brief`, or `--json --out FILE` + `ConvertFrom-Json` / MCP `disassemble` (`listing_text`, `insns[].mnemonic`/`operands`).
+- **Bounded disasm honesty**: Default bounded/flow clamps to function end. When `bounds_suspect` / short `function_end` / &lt;~8 insns then stop → `--linear` first, then `function create --addr`, then `--flow`/decompile. Never treat a 5-insn bounded result as a full function.
 - **Address→function**: Always pass `addr` to `decompile` / `disassemble` / `gpu_decompile`; trust `resolved_entry` / `resolve` meta. Mid-body hits resolve to containing entry; unmapped → create/synthesize or honest `no_containing_function` (no invented 1-insn fn).
 - **RTTI catalog**: Prefer `rtti_query` (`--filter`/`--exact`) before mangled `.?AV` string archaeology. Multi-vtable types report `vtable_vas[]` honestly.
 - **UTF-16 xrefs**: If `search_strings` returns `utf16le`, query `get_string_xrefs` with `encoding=all` (or `utf16le`) before concluding “no refs”.
-- **Live process (Windows)**: Multi-step live work **must** use MCP (or one long-lived process) — `process_list` → `process_attach` → `process_modules` → `process_resolve` (`static_to_live`) → `process_read` → optional `process_regions` / `process_detach`. Never chain separate CLI `ghidrust process` spawns expecting the same `session_id` (sessions are in-process). Bytes ≠ types. No write/breakpoints in MVP.
+- **Live process (Windows)**: Multi-step live work **must** use MCP (or one long-lived process) — `process_list` → `process_attach` **or** `process_launch` (CREATE_SUSPENDED) → `process_modules` → `process_resolve` (`static_to_live`) → `process_read` → optional `process_resume` / `process_regions` / `process_detach`. Launch is suspended spawn + read session, **not** debug break-at-entry. Never chain separate CLI `ghidrust process` spawns expecting the same `session_id` (sessions are in-process). Bytes ≠ types. No write/breakpoints in MVP.
 - **IL2CPP offline → live**: (1) `il2cpp_touch_map` / `il2cpp_meta` / `il2cpp_map` for names + method RVAs (null = unknown offline; encrypted → `next_steps` with meta-sections/touch-map). (2) Require `body_class` not `shared_stub` / `semantics_mismatch` before treating a name as a hook target. (3) `decompile` + `follow_stub` for resolve stubs with mapped slots. (4) On `runtime_unresolved` / `trampoline_or_invoker` → live attach → `process_resolve(module, rva)` → `process_read`. (5) Multi-build work: `il2cpp map --baseline PREV.json` → inspect `build_skew` (stale **map catalog**, not only stale MCP binary).
 - **Skill bootstrap**: GUI project open / Start writes `.grok/skills/ghidrust/SKILL.md` (disk or embedded fallback) and shows a fail-loud checklist (mcp/skill/agents/context + hash).
 - **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only); hook shared stubs as unique gameplay methods.
@@ -56,12 +280,24 @@ cargo build -p ghidrust-gui --release
 ## Decision tree
 
 ```
+Need body of unknown/wrong bounds?
+  → disasm PATH --addr HEX --count N --linear [--pretty|--brief|--json --out FILE]
+  → if bounds_suspect / truncated end → function create PATH --addr HEX
+  → then disasm --flow / decompile on healed range
+
+Need CFG inside known-good function?
+  → disasm --flow (or default bounded)
+
+Avoid:
+  → treating short bounded (e.g. 5-insn function_end) as full body
+  → PowerShell python -c nested-quote pipelines
+
 Need durable workspace?
   YES → project create → import → analyze [--analyzer …] [--gpu] → export
   NO  → load | disasm | rtti | analyze [--analyzer …] [--gpu]
 
-Need machine-readable?
-  → --json  OR  ghidrust mcp
+Need machine-readable without python -c?
+  → disasm --pretty / --brief   OR  --json --out FILE   OR  MCP disassemble
   → large dumps → artifact spill + artifact_query drain
 
 Need install layout without shell?
@@ -97,27 +333,25 @@ Need decompiled C?
                                 docs/READABILITY_RUBRIC.md. Falls back when lift <50% or
                                 irreducible — no fabrication.
      Stage-0    (oracle):  `decompile PATH --stage0` → CFG→goto / mnemonic-style pseudo-C.
-                                Kept as regression baseline; Ghidra head-to-head uses this only
+ Kept as regression baseline; head-to-head uses this only
                                 for pre-Stage-1 checks, never for external comparison tables.
      Stage-0.5  (oracle):  `decompile PATH --stage05` → IR-informed emit (xor a,a → a=0, augmented
                                 assign, push/pop, direct call, flag-driven jcc). Same fallback
                                 rules — Stage-0.5 is IR-informed but pre-SSA.
-     typed-C    (in progress → Hex-Rays ceiling): expression fold + naming shipped;
-                                unions/bitfields/EH still evidence-gated after Ghidra bar.
-  → Do not invent Hex-Rays-quality C; emit only what the current stage produces.
+ unions/bitfields/EH still evidence-gated after bar.
     See docs/READABILITY_RUBRIC.md (readability checklist).
 
 Need Stage-0 vs Stage-0.5 vs Stage-1 wall-clock + lift-ratio numbers?
   → `decompile-bench PATH [--functions N] [--count N] [--out FILE] [--json]`
 
-Need Ghidra ↔ Ghidrust head-to-head?
-  → `ghidra-headtohead PATH [--ghidra DIR] [--captured JSON] [--out FILE] [--json]`
-  → `--ghidra DIR` auto-spawns `analyzeHeadless` (locates `support/analyzeHeadless(.bat)`,
+Need ↔ Ghidrust head-to-head?
+ → `-headtohead PATH [-- DIR] [--captured JSON] [--out FILE] [--json]`
+ → `-- DIR` auto-spawns `` (locates `support/(.bat)`,
      writes the embedded `DecompileAndReport.java`, parses per-function `wall_us`).
   → `--captured JSON` replays a manual capture for offline / airgapped hosts.
-  → When neither is supplied, the report is methodology-only: Ghidra column left blank
+ → When neither is supplied, the report is methodology-only: column left blank
      + full runbook (dev/GHIDRA_HEADTOHEAD.md). Spawn failures surface as factual
-     `ghidra spawn failed: <reason>` notes — no fabricated timings.
+ ` spawn failed: <reason>` notes — no fabricated timings.
 
 Unity player / IL2CPP?
   → unity-inventory GAME_DIR for install layout (assemblies, plugins, metadata)
@@ -182,13 +416,15 @@ ghidrust project analyze PROJ_DIR --file ID \
 
 ### MCP (`ghidrust mcp`)
 
-Requires **`tool_surface >= 3`** (prefer `>= 4` for bounded disasm / `get_calls_from`; current is `4`). Check with `server_info` after connect.
+Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_calls_from`; **`>= 5`** for decode tools). Check with `server_info` after connect.
 
 | Tool | Args | Notes |
 |------|------|-------|
-| `server_info` | — | Package `version`, `tool_surface`, features, live session_model |
+| `server_info` | — | Package `version`, `tool_surface`, `decode` block, features, live session_model |
 | `load` | `path` **or** `project`+`file_id` | Map + `section_notes` + `resolved_path` |
-| `disassemble` | `path`, optional `addr`, `count`, **`linear`** | Bounded by function end by default; `linear:true` escapes; JSON `stop_reason` + `decode_gaps` |
+| `decode_support` | — | Engine version, 23 arches, options, syntax values, compile features |
+| `decode_query` | `query`, optional `arch`, `mode`, `id`, `index`, `bytes`, `addr`, `detail` | Introspection queries (see decode section) |
+| `disassemble` | `path`, optional `addr`, `count`, `skip_bad`, `linear`, `flow`, `arch`, `mode`, `syntax`, `detail`, `detail_real`, `skipdata`, `skipdata_mnemonic`, `skipdata_size`, `unsigned_imm`, `only_offset_branch`, `litbase`, `mnem_overrides` | Bounded by function end by default; JSON `stop_reason` + `decode_gaps` |
 | `rtti` / `rtti_query` | `path`, optional `filter`/`exact`/`match` | Catalog; multi-vtable; artifact if large |
 | `artifact_get` / `artifact_query` / `artifact_list` | `id` / optional `offset`/`limit` / optional `max` | Drain or list spilled results |
 | `inventory` | `path`, optional `max_depth`/`hash` | PE VERSIONINFO + exe/dll catalog |
@@ -199,7 +435,7 @@ Requires **`tool_surface >= 3`** (prefer `>= 4` for bounded disasm / `get_calls_
 | `get_xrefs_to` | `path`, `addr`, optional **`skip_stubs`**, **`classify`** | RIP/tables + data ptrs; IL2CPP stubs; `to_entry` |
 | `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs from VA; `from_entry` / `from_function` / `to_entry` |
 | `get_calls_from` | `path`, `addr` | Callee edges inside containing function (CLI: `xrefs --calls`) |
-| `get_string_xrefs` | `path`, `filter`, optional `encoding` | UTF-16LE parity (`ascii`\|`utf16le`\|`all`) |
+| `get_string_xrefs` | `path`, `filter`, optional `encoding` | UTF-16LE / ASCII modes (`ascii`\|`utf16le`\|`all`) |
 | `list_imports` / `get_import_xrefs` | `path`, optional `dll`/`name` | PE IAT |
 | `function_at` / `get_function_by_address` | `path`, `addr` | Containing function + `seed_kind` |
 | `read_bytes` | `path`, `addr`, optional `count` | Raw VA hex dump |
@@ -214,7 +450,7 @@ Requires **`tool_surface >= 3`** (prefer `>= 4` for bounded disasm / `get_calls_
 | `list_gpu_strategies` | — | Strategy matrix |
 | `gpu_decompile` | `path`, optional `addr`, `out` | VA resolve; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI |
-| `process_list` / `process_attach` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | pid / session / module / rva / max | Live Process Bridge (Windows; read-only) |
+| `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | pid / image / session / module / rva / max | Live Process Bridge (Windows; read-only; launch = CREATE_SUSPENDED) |
 
 MCP launch: `ghidrust mcp` / `target/release/ghidrust.exe mcp` (stdio; no host-specific paths).
 
@@ -261,7 +497,9 @@ Add `--json` for structured stdout.
 | Help | `ghidrust help` |
 | Version | `ghidrust version` / `--version` / `-V` `[--json]` (package + `tool_surface`) |
 | Load | `ghidrust load <path\|--project DIR --file-id ID>` |
-| Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--linear\|--flow]` (bounded by fn end by default; JSON `stop_reason`) |
+| Disasm | `ghidrust disasm <path> [--addr HEX] [--count N] [--skip-bad] [--linear\|--flow] [--brief\|--pretty] [--arch ARCH] [--mode MODE] [--syntax SYNTAX] [--detail] [--no-detail] [--detail-real] [--skipdata] [--skipdata-mnemonic S] [--skipdata-size N] [--unsigned-imm] [--only-offset-branch] [--litbase HEX] [--mnem-override ID:MNEM]… [--out FILE] [--json]` |
+| Decode support | `ghidrust decode-support [--json]` |
+| Decode query | `ghidrust decode-query --query NAME [--arch] [--mode] [--id] [--index] [--bytes HEX] [--addr HEX] [--detail] [--json]` |
 | Strings | `ghidrust strings <path> [--raw] [--encoding …] [--match MODE] [--limit N] [--out FILE] [--filter SUB]` |
 | Xrefs | `ghidrust xrefs <path> (--to\|--from\|--string\|--import\|--calls) [--encoding ascii\|utf16le\|all] [--skip-stubs] [--classify] [--out FILE]` |
 | Bytes | `ghidrust bytes <path> --addr HEX [--count N] [--out FILE]` |
@@ -271,7 +509,7 @@ Add `--json` for structured stdout.
 | Inventory | `ghidrust inventory <dir> [--max-depth N] [--hash]` |
 | Tree | `ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB]` |
 | Artifact | `ghidrust artifact get\|query\|list …` |
-| Process (Windows) | `ghidrust process list\|attach\|detach\|modules\|read\|resolve\|regions …` |
+| Process (Windows) | `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions …` |
 | IL2CPP | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls …` (`--baseline` / `--meta-sections`; see `docs/IL2CPP.md`) |
 | Unity inventory | `ghidrust unity-inventory <game-dir>` |
 | RTTI catalog | `ghidrust rtti <path> [--filter\|--name\|--exact] [--match MODE]` |
@@ -282,7 +520,7 @@ Add `--json` for structured stdout.
 | Decompile (Stage-0 CFG scaffolding, oracle) | `ghidrust decompile <path> --stage0` |
 | Decompile (Stage-0.5 IR-informed, oracle) | `ghidrust decompile <path> --stage05` |
 | Decompile bench (Stage-0 vs Stage-0.5 vs Stage-1) | `ghidrust decompile-bench <path> [--functions N] [--count N] [--out F]` |
-| Ghidra head-to-head (shared-entry, Stage-1) | `ghidrust ghidra-headtohead <path> [--ghidra DIR] [--captured JSON] [--out F]` |
+| head-to-head (shared-entry, Stage-1) | `ghidrust -headtohead <path> [-- DIR] [--captured JSON] [--out F]` |
 | **GPU decompile** | `ghidrust gpu-decompile <path> [--addr HEX] [--out F] [--metrics F]` |
 | RE bench | `ghidrust re-bench <path>` |
 | Analyzer CPU/GPU matrix bench | `ghidrust analyzer-bench <path> [--large] [--out F]` |
@@ -294,8 +532,19 @@ Add `--json` for structured stdout.
 ### Recipes
 
 ```bash
+# Unknown / suspect function body (linear-first; PowerShell-safe — no python -c)
+ghidrust disasm PATH --addr 0x140001234 --count 90 --linear --pretty
+ghidrust disasm PATH --addr 0x140001234 --count 90 --linear --json --out enum.json
+ghidrust function create PATH --addr 0x140001234
+ghidrust decompile PATH --addr 0x140001234 --json --out enum_decomp.json
+# Typed-object enum pattern (generic): manager* + type_bit:u32 + out* at a FindObjects-style call;
+# walk table slots; field offsets are evidence-gated from listing/callsite_hints — do not invent names.
+
 # Quick triage
 ghidrust load PATH --json
+ghidrust decode-support --json
+ghidrust decode-query --query insn_name --arch x86 --id 1 --json
+ghidrust disasm PATH --addr 0x140001234 --count 32 --detail --syntax intel --pretty
 ghidrust load --project PROJ --file-id ID --json
 ghidrust strings PATH --encoding all --filter SomeName --match token --limit 50 --json
 ghidrust xrefs PATH --string SomeName --encoding all --skip-stubs --json
@@ -318,6 +567,8 @@ ghidrust artifact get ARTIFACT_ID
 # Live process (Windows; read-only)
 ghidrust process list --json
 ghidrust process attach PID
+ghidrust process launch PATH.exe --args "…" --cwd DIR --json
+ghidrust process resume SESSION
 ghidrust process modules SESSION --json
 ghidrust process resolve SESSION --module app.exe --rva 0x1234 --json
 ghidrust process read SESSION --addr LIVE_VA --size 64 --json
@@ -434,7 +685,6 @@ the exact evidence (blocks / insns / ir_ops / lift ratio / GPU backend).
 | **Stage-0** (oracle) | `ghidrust decompile PATH --stage0 [--addr HEX] [--count N]` | CFG → pseudo-C: `void FUN_<va>() { block_0: … goto/return; }`. Mnemonic-style scaffolding — no fabricated locals or types. | stdout `pseudo_c`; stderr `[name] stage=0 blocks=… edges=… insns=… lines=…`; `--json` ⇒ `Decompile { name, blocks[], edges[], insn_count, pseudo_c }`. |
 | **Stage-0.5 IR** (oracle) | `ghidrust decompile PATH --stage05 [--addr HEX] [--count N]` | IR-informed emit from x86-64 lifter → `ghidrust-ir`: `xor a,a → a=0`, augmented assign, `push`/`pop`, direct `call`, flag-driven `jcc`. Falls back to Stage-0 for uncovered ops. | stdout `pseudo_c`; stderr adds `ir_ops=… lift=…%`; `--json` ⇒ `{decompile: …, lift_coverage: {total_ops, unimplemented_ops, source_instructions, ratio}}`. |
 | **decompile-bench** | `ghidrust decompile-bench PATH [--functions N] [--count N] [--out F]` | Runs default analyzers, then benches Stage-0 vs Stage-0.5 vs Stage-1 across all discovered functions: totals `insns`, `ir_ops`, per-stage `µs`, avg `lift_ratio`. | Text (or JSON via `--json`); writes to `--out FILE` too. |
-| **ghidra-headtohead** | `ghidrust ghidra-headtohead PATH [--functions N] [--count N] [--ghidra DIR] [--captured JSON] [--out F]` | Fair oracle: shared-entry intersection between Ghidra `DecompInterface` output and Ghidrust analyzer function list; compares Stage-1 vs Ghidra with normalized-token similarity metric and per-entry Stage-1 wall-time. Without `--ghidra` / `--captured` the report is methodology-only. | Text or JSON; rows carry `token_similarity`, `ghidrust_stage1_us`, `ghidra_wall_us`. |
 | **gpu-decompile** | `ghidrust gpu-decompile PATH [--out F] [--metrics F]` | Full GPU-resident VRAM multipass decompile of entry: decode → leaders → blocks → emit; single final download; asserts `mid_pipeline_host_reads == 0` and matches CPU multipass oracle. | `.gdecomp` binary dump; stdout `pseudo_c`; `--json`/`--metrics` ⇒ `{gpu_backend, gpu_device, gpu_ms, mid_pipeline_host_reads, kernels, dump_path, dump_bytes, gpu_ir_count, gpu_block_count, gpu_edge_count, equivalence_multipass, pseudo_c_head}`. Non-zero exit on equivalence break. |
 | **re-bench** | `ghidrust re-bench PATH [--out F]` | CPU decompile of entry + bulk RE on a padded haystack, once on CPU parallel and once on GPU/fallback. Asserts equal bulk hit counts. | Text (or JSON): `decompile_cpu {backend, ms, entry, name, blocks, edges, insns, lines, chars, pseudo_c_head}`, `bulk_cpu`, `bulk_gpu` (each: `{mode, backend, ms, hits, haystack_bytes}`), `note`. |
 
@@ -449,7 +699,6 @@ Related GPU / matrix benches (shipped, callable, **not** part of the eval sweep)
 
 Guardrails to respect:
 
-- Don't claim Hex-Rays or Ghidra C parity. Emit only what the current stage produces (Stage-0 scaffolding or Stage-0.5 IR-informed lines).
 - If `gpu-decompile` exits non-zero (`equivalence_multipass = false` or `mid_pipeline_host_reads != 0`), treat the GPU output as suspect — CPU multipass is the oracle.
 - Small binaries often show GPU wall-clock slower than CPU: `pcie_upload` and adapter init dominate. Always read the `device_ms` split, not the wall-clock alone, when arguing about GPU perf.
 
@@ -471,7 +720,6 @@ Guardrails to respect:
 
 **Do:** exact analyzer names; `--analyzer` or `--analyzers`; `--gpu` when GPU enrich wanted; `--json` for scripts; `analyzer-bench-matrix` for strategy list; prefer `decompile --stage05` when you want the IR-informed emit; `decompile-bench` to capture wall-clock + lift-ratio numbers.
 
-**Don't:** invent typed/Hex-Rays C beyond the emit stage in use; claim Ghidra MCP is Ghidrust; claim Ghidra-surpass metrics without captured benches; skip empty-result honesty; conflate PCIe with on-device time; claim absence of managed types from PE strings alone when IL2CPP metadata exists (run `il2cpp meta`); invent method RVAs when the map leaves them null.
 
 ---
 

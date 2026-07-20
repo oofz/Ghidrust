@@ -30,7 +30,7 @@ pub use strings::{
     scan_utf16le_strings, FoundString, StringCollectOpts, StringMatchMode,
 };
 
-/// Exact labels from the Ghidra Auto Analysis screenshot (order preserved).
+/// Exact labels from the Auto Analysis screenshot (order preserved).
 pub const ANALYZER_NAMES: &[&str] = &[
     "ASCII Strings",
     "Unicode Strings",

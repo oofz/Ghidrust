@@ -1,6 +1,6 @@
 # IL2CPP + Unity inventory (Ghidrust)
 
-Hand-rolled support for Unity IL2CPP metadata and player-install inventory. No Il2CppDumper, Cpp2IL, or goblin at runtime — see [DEPENDENCIES.md](../DEPENDENCIES.md).
+Hand-rolled support for Unity IL2CPP metadata and player-install inventory. No Il2CppDumper, Cpp2IL, or goblin at runtime.
 
 ## Commands
 

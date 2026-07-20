@@ -1,8 +1,8 @@
 //! **Ghidrust SSA layer**: CFG construction, dominators, and full Cytron-
 //! style SSA rename over [`ghidrust_ir::IrSequence`].
 //!
-//! Ghidra `Ghidra/Features/Decompiler` is the *reference* — implementation is
-//! hand-rolled per the workspace [DEPENDENCIES.md](../../DEPENDENCIES.md)
+//! `/Features/Decompiler` is the *reference* — implementation is
+//! hand-rolled (no third-party SSA crates at runtime)
 //! policy.
 //!
 //! # Overview

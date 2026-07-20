@@ -763,7 +763,7 @@ fn unop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
 
 /// Render a pointer dereference. When the pointer base has a recovered
 /// [`RustType::StructPtr`] and the address is `base + K` for a known
-/// field offset, render as `base->field_<hex>` — the same shape Ghidra's
+/// field offset, render as `base->field_<hex>` — the same shape 's
 /// PrintC uses when a struct DataType is committed. Falls back to plain
 /// `*(addr)` when the shape isn't recognized.
 fn format_deref(addr: &SsaOperand, ctx: &RenderCtx) -> String {

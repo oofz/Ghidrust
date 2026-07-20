@@ -1,8 +1,8 @@
 //! Hand-rolled reverse-engineering **decompile method**.
 //!
-//! **Aspirational target:** structured, typed C that is measurable against Ghidra
+//! **Aspirational target:** structured, typed C that is measurable against
 //! (wall clock, function discovery, readability, differential correctness on a
-//! fixed x86-64 corpus). Hex-Rays-class quality is a later ceiling after that bar.
+//! fixed x86-64 corpus). quality is a later ceiling after that bar.
 //!
 //! ## Emit stages (add capability without removing the oracle)
 //!

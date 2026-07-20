@@ -1,6 +1,6 @@
 //! Ghidrust GUI · Entropy strip + Overview banner.
 //!
-//! Renders the Ghidra `EntropyPlugin` and `OverviewPlugin` header strips as
+//! Renders the `` and `` header strips as
 //! horizontal color bars sampled from executable memory blocks. Entropy is
 //! computed via `ghidrust-core::bulk_scan::entropy_windows_seq` (Shannon
 //! bits/byte, 0..8) so the strip is real, not fabricated.
@@ -24,7 +24,7 @@ pub struct Sample {
 
 /// Compute per-block entropy samples across every mapped memory block.
 ///
-/// `window` is bytes per sample (Ghidra default = 256). Result is flat,
+/// `window` is bytes per sample. Result is flat,
 /// address-ordered, and honest: only mapped bytes are sampled.
 pub fn entropy_samples(prog: &Program, window: usize) -> Vec<Sample> {
     let mut out = Vec::new();
@@ -57,7 +57,7 @@ pub fn entropy_samples(prog: &Program, window: usize) -> Vec<Sample> {
     out
 }
 
-/// Palette helper — map an entropy value to a Ghidra-like color ramp.
+/// Palette helper — map an entropy value to a color ramp.
 pub fn entropy_color(e: f64) -> Color32 {
     // Cold (blue) → high entropy warm (red).
     let t = (e / 8.0).clamp(0.0, 1.0) as f32;
@@ -141,7 +141,7 @@ pub fn render_entropy_strip(
     None
 }
 
-/// Render the Ghidra Overview banner (memory-block colour map).
+/// Render the Overview banner (memory-block colour map).
 pub fn render_overview_strip(
     ui: &mut Ui,
     prog: &Program,

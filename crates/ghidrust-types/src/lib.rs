@@ -1,7 +1,7 @@
 //! **Ghidrust type lattice + local/parameter recovery** over
 //! [`ghidrust_ssa::SsaFunction`].
 //!
-//! Ghidra `Ghidra/Features/Decompiler`'s `DataType` and `typeprop` pass are
+//! `/Features/Decompiler`'s `DataType` and `typeprop` pass are
 //! the *reference*. Everything here is hand-rolled per the workspace
 //! dependency policy — we deliberately keep the initial lattice small so
 //! Stage-1 emit has enough information to name locals/params without

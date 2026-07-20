@@ -1,7 +1,7 @@
 //! Native method-body fingerprinting for IL2CPP map enrichment.
 //!
 //! Classifies tiny thunks / empty returns / bool getters so agents can
-//! reject shared-stub false leads before hooking (Inspector/IDA FUNC_THUNK bar).
+//! reject shared-stub false leads before hooking.
 
 use crate::stubs::{classify_at, follow_stub_target};
 use ghidrust_core::{disassemble_range, Program};

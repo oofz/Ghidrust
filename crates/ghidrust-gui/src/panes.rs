@@ -1,7 +1,7 @@
-//! Ghidra CodeBrowser provider catalog for visible parity.
+//! provider catalog for visible.
 //!
-//! Every provider bundled with Ghidra's default `CodeBrowser.tool`, plus commonly-reached
-//! providers from `Window` menu, is enumerated here with the exact Ghidra title so muscle
+//! Every provider bundled with 's default `.tool`, plus commonly-reached
+//! providers from `Window` menu, is enumerated here with the exact title so muscle
 //! memory transfers. Providers whose backing analysis is not yet implemented render a
 //! clearly labelled empty state that names the analyzer/model required — never fake data.
 //!
@@ -9,13 +9,13 @@
 
 use eframe::egui::{self, Color32, RichText, Ui};
 
-/// One CodeBrowser provider (window / dockable pane).
+/// One provider (window / dockable pane).
 ///
-/// Ordering matches the Ghidra `Window` menu (roughly alphabetical). Titles are the
-/// exact strings Ghidra uses so the Window menu is a drop-in mental map.
+/// Ordering matches the `Window` menu (roughly alphabetical). Titles are the
+/// exact strings uses so the Window menu is a drop-in mental map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PaneKind {
-    /// Ghidrust addition (not present in Ghidra): the Grok Build agent
+    /// Ghidrust addition: the Grok Build agent
     /// console. Rendered as the primary tab in the bottom dock (next to the
     /// plain `Console`) so RE users can chat with an agent that already
     /// speaks the full Ghidrust MCP tool surface.
@@ -51,7 +51,7 @@ pub enum PaneKind {
     SymbolTable,
     SymbolTree,
     TextEditor,
-    // Project Window providers (Ghidrust fuses Project + CodeBrowser today).
+    // Project Window providers (Ghidrust fuses Project + today).
     ProjectTree,
     // ── Agent Friction Closure §13 — tool panes (real backends, no stubs) ──
     /// `global-metadata.dat` parser (ghidrust-il2cpp) — types / methods / images.
@@ -69,8 +69,8 @@ pub enum PaneKind {
 }
 
 impl PaneKind {
-    /// Every provider Ghidrust ships (matches Ghidra's default + off-layout catalog).
-    /// Order = Ghidra `Window` menu order (alphabetical within group, then special).
+    /// Every provider Ghidrust ships.
+    /// Order = `Window` menu order (alphabetical within group, then special).
     pub const ALL: &'static [PaneKind] = &[
         // Left dock defaults
         PaneKind::ProjectTree,
@@ -83,7 +83,7 @@ impl PaneKind {
         PaneKind::DecompiledView,
         // Ghidrust-specific (bottom dock primary tab).
         PaneKind::AgentConsole,
-        // Alphabetical from here (Ghidra Window menu order)
+        // Alphabetical from here
         PaneKind::Bookmarks,
         PaneKind::Bytes,
         PaneKind::ChecksumGenerator,
@@ -118,7 +118,7 @@ impl PaneKind {
         PaneKind::AnalysisArtifacts,
     ];
 
-    /// Ghidra display title (Window menu label / provider `TITLE`).
+    /// display title (Window menu label / provider `TITLE`).
     pub const fn title(self) -> &'static str {
         match self {
             PaneKind::AgentConsole => "Grok",
@@ -171,7 +171,7 @@ impl PaneKind {
         self.title()
     }
 
-    /// Ghidra plugin owner (for empty-state hint text).
+    /// plugin owner (for empty-state hint text).
     pub const fn plugin(self) -> &'static str {
         match self {
             PaneKind::AgentConsole => "GhidrustAgentConsole",
@@ -202,7 +202,7 @@ impl PaneKind {
             PaneKind::Python => "InterpreterPanelPlugin",
             PaneKind::RegisterManager => "RegisterPlugin",
             PaneKind::RelocationTable => "RelocationTablePlugin",
-            PaneKind::ScriptManager => "GhidraScriptMgrPlugin",
+            PaneKind::ScriptManager => "ScriptMgrPlugin",
             PaneKind::SymbolReferences => "SymbolTablePlugin",
             PaneKind::SymbolTable => "SymbolTablePlugin",
             PaneKind::SymbolTree => "SymbolTreePlugin",
@@ -303,7 +303,7 @@ impl PaneKind {
     }
 }
 
-/// Bookmark type — Ghidra ships 5 standard categories + a plugin-registered Unknown.
+/// Bookmark type — ships 5 standard categories + a plugin-registered Unknown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BookmarkKind {
     Note,
@@ -332,7 +332,7 @@ impl BookmarkKind {
         }
     }
 
-    /// Ghidra-analog color for margin marker / row tint.
+    /// color for margin marker / row tint.
     pub fn color(self) -> Color32 {
         match self {
             BookmarkKind::Note => Color32::from_rgb(0x9C, 0x27, 0xB0),      // purple
@@ -344,7 +344,7 @@ impl BookmarkKind {
     }
 }
 
-/// One bookmark row (Ghidra `BookmarkPlugin` model).
+/// One bookmark row.
 #[derive(Debug, Clone)]
 pub struct Bookmark {
     pub va: u64,
@@ -367,8 +367,8 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
             .italics(),
     );
     ui.add_space(4.0);
-    ui.small(RichText::new("Pane is present for Ghidra visibility parity . Backing analysis \
-                            and interactive actions land in later phases — see \
+    ui.small(RichText::new("Pane is present in the shell catalog. Backing analysis \
+                            and interactive actions land in later work — see \
                             internal UI notes.").color(muted));
 }
 
@@ -401,7 +401,7 @@ pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
         PaneKind::ProgramTree => "",
         PaneKind::ProjectTree => "",
         PaneKind::Python => "Backend pending — scripting host / MCP REPL lands in .",
-        PaneKind::RegisterManager => "Backend pending — SLEIGH register lattice lands in .",
+        PaneKind::RegisterManager => "Backend pending — register lattice values from live/debug backends.",
         PaneKind::RelocationTable => "Uses Program::sections metadata; full PE/ELF reloc parse lands in .",
         PaneKind::ScriptManager => "Backend pending — script catalog lands in .",
         PaneKind::SymbolReferences => "",
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn ghidra_default_toolbar_providers_present() {
-        // 28 default `CodeBrowser.tool` providers must all be enumerated.
+        // 28 default `.tool` providers must all be enumerated.
         let names: Vec<&'static str> = PaneKind::ALL.iter().map(|k| k.title()).collect();
         for expected in [
             "Program Trees",
@@ -488,7 +488,7 @@ mod tests {
         ] {
             assert!(
                 names.contains(&expected),
-                "missing Ghidra provider `{expected}` in PaneKind::ALL"
+                "missing provider `{expected}` in PaneKind::ALL"
             );
         }
     }

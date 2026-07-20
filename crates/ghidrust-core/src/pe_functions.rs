@@ -1,6 +1,6 @@
 //! PE Exception Directory (.pdata) RUNTIME_FUNCTION + export seeds + function create.
 //!
-//! Hand-rolled PE parse (no goblin). Industry-aligned function seeding for PE64.
+//! Hand-rolled PE parse. Industry-aligned function seeding for PE64.
 
 use crate::disasm::decode_one;
 use crate::program::{FunctionInfo, FunctionSeedKind, Program};
@@ -179,6 +179,17 @@ pub fn create_function_with_kind(
                 if end > f.end {
                     f.end = end;
                 }
+                if f.seed_kind.is_none() {
+                    f.seed_kind = Some(kind);
+                }
+            }
+            return prog.function_at(addr).cloned().unwrap_or(existing);
+        }
+        // Re-grow truncated stored ends (heal path when --end omitted).
+        let grown = grow_function(prog, addr, None);
+        if grown > existing.end {
+            if let Some(f) = prog.function_at_mut(addr) {
+                f.end = grown;
                 if f.seed_kind.is_none() {
                     f.seed_kind = Some(kind);
                 }
@@ -552,5 +563,31 @@ mod tests {
         assert_eq!(f.end, 0x1005); // after ret
         assert_eq!(f.seed_kind, Some(FunctionSeedKind::Manual));
         assert_eq!(prog.analysis.functions.len(), 1);
+    }
+
+    #[test]
+    fn create_function_regrows_truncated_existing() {
+        let mut prog = Program::new("t".into(), "PE32+");
+        let code = vec![
+            0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+            0x31, 0xC0, 0x5D, 0xC3, 0xCC, 0xCC,
+        ];
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: 0x1000,
+            size: code.len() as u64,
+            bytes: code,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        // Truncated end (prologue-only style).
+        prog.analysis.functions.push(
+            FunctionInfo::new(0x1000, 0x1011, "FUN_1000")
+                .with_seed_kind(FunctionSeedKind::Manual),
+        );
+        let f = create_function(&mut prog, 0x1000, None);
+        assert!(f.end > 0x1011, "expected re-grow past truncated end, got {:#x}", f.end);
+        assert_eq!(prog.function_at(0x1000).unwrap().end, f.end);
     }
 }

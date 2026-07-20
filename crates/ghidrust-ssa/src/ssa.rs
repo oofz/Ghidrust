@@ -11,7 +11,7 @@
 //! shape (`OpCode`, inputs, output) but wraps each varnode in
 //! [`SsaOperand`] so callers can distinguish real defs from constant
 //! literals. `Phi` nodes are stored on the block, not fused into the op
-//! vector, which matches Ghidra Decompiler's internal representation.
+//! vector, which matches Decompiler's internal representation.
 
 use crate::{Cfg, ENTRY_BLOCK};
 use ghidrust_ir::{AddrSpace, OpCode, Varnode};
@@ -38,7 +38,7 @@ impl SsaValue {
 
 /// An SSA operand: a constant literal or a versioned SSA value.
 ///
-/// Constants (Ghidra `AddrSpace::Constant`) are **not** renamed —
+/// Constants are **not** renamed
 /// they aren't storage locations. Ram/branch-target constants are also
 /// carried as `Const` since they name absolute addresses, not defs.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -572,7 +572,7 @@ pub fn dead_code_eliminate(func: &mut SsaFunction) -> usize {
         // writes (e.g. `xor eax, eax` before `ret`) aren't discarded. On
         // x86-64 SysV / Windows the integer return register is rax (offset
         // 0); we also treat rdx (offset 2) as a potential high-half return
-        // to be safe. This matches Ghidra Decompiler's default liveness for
+        // to be safe. This matches Decompiler's default liveness for
         // integer functions — we don't yet track floating-point returns.
         for b in &func.blocks {
             for op in &b.ops {

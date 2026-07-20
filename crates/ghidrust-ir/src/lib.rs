@@ -1,6 +1,6 @@
 //! Architecture-neutral **pcode-like IR** for the Ghidrust decompile pipeline.
 //!
-//! Inspired by Ghidra’s `PcodeOp` / `Varnode` model (reference only — reimplemented
+//! Inspired by ’s `PcodeOp` / `Varnode` model (reference only — reimplemented
 //! in-tree). This crate owns the type surface; SSA, structuring, and emit live
 //! elsewhere.
 //!
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SpaceId(pub u16);
 
-/// Built-in address spaces (Ghidra-like stubs).
+/// Built-in address spaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AddrSpace {
     /// Physical / image memory (RAM).
@@ -86,7 +86,7 @@ impl Varnode {
     }
 }
 
-/// Pcode-like operation codes (Ghidra `PcodeOp` inspired subset).
+/// Pcode-like operation codes.
 ///
 /// New ops are added conservatively as lift coverage grows; unknown ISA semantics
 /// stay as [`OpCode::Unimplemented`] with the mnemonic preserved in
@@ -173,25 +173,25 @@ pub enum OpCode {
     /// SSA/structuring can decide whether the block terminates. Consumers
     /// treat this as an opaque side-effect with no def.
     Trap,
-    /// `out = concat(in0, in1)` — Ghidra `PIECE`: joins two subwords into a
+    /// `out = concat(in0, in1)` — `PIECE`: joins two subwords into a
     /// wider value. `in0` is the high half, `in1` is the low half, and
     /// `out.size == in0.size + in1.size`.
     Piece,
-    /// `out = in0 >> (in1 * 8)` truncated to `out.size` — Ghidra
+    /// `out = in0 >> (in1 * 8)` truncated to `out.size`
     /// `SUBPIECE`. `in1` names the byte offset from the LSB.
     Subpiece,
-    /// `out = in0 + in1 * <element size>` — Ghidra `PTRADD`. Semantically
+    /// `out = in0 + in1 * <element size>` — `PTRADD`. Semantically
     /// identical to `IntAdd` for byte arithmetic but preserves the "array
     /// index" shape so type recovery / emit can print `p[i]`.
     Ptradd,
-    /// `out = (T)in0` — Ghidra `CAST`. Bit-preserving reinterpretation
+    /// `out = (T)in0` — `CAST`. Bit-preserving reinterpretation
     /// used when Stage-1 emit needs to insert an explicit `(uint32_t)`.
     Cast,
     /// ISA op not yet lifted — mnemonic preserved in [`PcodeOp::note`].
     Unimplemented,
 }
 
-/// One IR operation (Ghidra `PcodeOp` analogue).
+/// One IR operation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PcodeOp {
     pub opcode: OpCode,
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn opcode_set_covers_division_trap_and_bitops() {
-        // Division family, Trap for int3/hlt, and Ghidra bit-manipulation
+        // Division family, Trap for int3/hlt, and bit-manipulation
         // ops (PIECE/SUBPIECE/PTRADD/CAST) that Stage-1 emit will need as
         // lift coverage grows.
         for op in [

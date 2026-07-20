@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// ClangToken-analog kinds used by the GUI highlighter.
+/// kinds used by the GUI highlighter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmitTokenKind {

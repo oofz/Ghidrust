@@ -43,8 +43,10 @@ fn decompile_tiny_pe_nonempty_structure() {
         .or_else(|| v["decompile"]["pseudo_c"].as_str())
         .unwrap_or("");
     assert!(
-        pseudo.contains("void ") || pseudo.contains("uint")
-            || pseudo.contains("int32_t") || pseudo.contains("int64_t"),
+        pseudo.contains("void ")
+            || pseudo.contains("uint")
+            || pseudo.contains("int32_t")
+            || pseudo.contains("int64_t"),
         "expected typed function header, got:\n{pseudo}"
     );
     let blocks = v["blocks"]

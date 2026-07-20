@@ -12,6 +12,7 @@
 !.cursor/rules/**
 terminals/
 mcps/
+okf/*
 
 # OS
 .DS_Store
@@ -24,6 +25,10 @@ re_metrics.log
 headtohead_*.json
 headtohead_*.txt
 
-# Local development notes (parity tracking, roadmaps, private benches)
+# Local development notes (checklists, roadmaps, private benches)
 # Not published — research/metrics stay in docs/
 dev/
+
+# OKF (okf/): code-only sources (crates/**/*.rs, Cargo.toml). Never invent
+# concepts from the blocked paths above, nor from docs/skill/fixtures/README.
+# Rule: .cursor/rules/okf-code-only.mdc — regen: python scripts/gen_okf.py

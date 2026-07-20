@@ -2,7 +2,7 @@
 
 ## What Ghidrust is
 
-Ghidrust is a **Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra) — not a fork. It loads PE/ELF (and raw blobs), disassembles x86-64 (bounded by function end by default), creates/heals functions, runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / touch-maps / Unity install inventory, spills large analysis artifacts, inventories PE installs, queries RTTI catalogs, and (on Windows) attaches read-only to live processes — via **CLI**, **MCP** (stdio), and an **egui** CodeBrowser-style GUI. The skill file is also **embedded** in the agent crate so Start works without a source-tree checkout.
+Ghidrust is a **Rust** reverse-engineering toolkit inspired by [](https://github.com/NationalSecurityAgency/) — not a fork. It loads PE/ELF (and raw blobs), disassembles x86-64 (bounded by function end by default), creates/heals functions, runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / touch-maps / Unity install inventory, spills large analysis artifacts, inventories PE installs, queries RTTI catalogs, and (on Windows) attaches read-only to live processes — via **CLI**, **MCP** (stdio), and an **egui** -style GUI. The skill file is also **embedded** in the agent crate so Start works without a source-tree checkout.
 
 **Aims:** a freestanding, auditable RE core; CPU-correct analysis first; optional experimental GPU bulk scan + VRAM-resident decompile; agent-friendly headless use.
 

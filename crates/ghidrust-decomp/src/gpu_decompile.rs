@@ -546,13 +546,13 @@ fn ir_to_instructions(entry: u64, ir: &[GpuIrSlot]) -> Vec<ghidrust_core::Instru
                     _ => String::new(),
                 }
             };
-            Instruction {
-                address: entry + s.off as u64,
-                bytes: vec![0u8; s.length as usize],
-                mnemonic: op_name(s.opcode).into(),
+            Instruction::with_text(
+                entry + s.off as u64,
+                vec![0u8; s.length as usize],
+                op_name(s.opcode),
                 operands,
-                length: s.length as u8,
-            }
+                s.length as u8,
+            )
         })
         .collect()
 }
