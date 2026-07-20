@@ -37,11 +37,17 @@ pub fn preferred_bulk_mode() -> BulkScanMode {
 #[serde(rename_all = "snake_case")]
 pub enum BulkBackend {
     Sequential,
-    ParallelCpu { threads: usize },
+    ParallelCpu {
+        threads: usize,
+    },
     /// Physical GPU compute (feature `gpu` + live adapter).
-    Gpu { device: String },
+    Gpu {
+        device: String,
+    },
     /// Same work-item kernel on CPU when GPU unavailable.
-    CpuFallback { reason: String },
+    CpuFallback {
+        reason: String,
+    },
 }
 
 /// Inclusive printable-run hit in a flat haystack (byte offset + length).
@@ -357,7 +363,10 @@ pub fn scan_printable_runs_gpu_or_fallback(hay: &[u8], min_len: usize) -> GpuSca
 }
 
 /// GPU-shaped schedule on CPU: one workgroup tile → classify bytes → host compact runs.
-fn scan_printable_runs_parallel_workitems(hay: &[u8], min_len: usize) -> (Vec<BulkHit>, BulkBackend) {
+fn scan_printable_runs_parallel_workitems(
+    hay: &[u8],
+    min_len: usize,
+) -> (Vec<BulkHit>, BulkBackend) {
     // Work-item path builds a printable mask in parallel tiles, then sequential compact.
     // For large inputs this mirrors a GPU mark + host compact pipeline.
     if hay.len() < GPU_WORKGROUP_BYTES * 2 {
@@ -650,9 +659,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 /// Unified entry: pick mode, return hits + backend.
-pub fn scan_printable_runs(hay: &[u8], min_len: usize, mode: BulkScanMode) -> (Vec<BulkHit>, BulkBackend) {
+pub fn scan_printable_runs(
+    hay: &[u8],
+    min_len: usize,
+    mode: BulkScanMode,
+) -> (Vec<BulkHit>, BulkBackend) {
     match mode {
-        BulkScanMode::Sequential => (scan_printable_runs_seq(hay, min_len), BulkBackend::Sequential),
+        BulkScanMode::Sequential => (
+            scan_printable_runs_seq(hay, min_len),
+            BulkBackend::Sequential,
+        ),
         BulkScanMode::ParallelCpu => scan_printable_runs_parallel(hay, min_len),
         BulkScanMode::GpuOrFallback => {
             let r = scan_printable_runs_gpu_or_fallback(hay, min_len);
@@ -690,8 +706,8 @@ pub fn scan_ascii_strings_bulk(
             let end = h.offset + h.length;
             let nul_term = end < block.bytes.len() && block.bytes[end] == 0;
             if h.length >= min_len && (nul_term || h.length >= 6) {
-                let value =
-                    String::from_utf8_lossy(&block.bytes[h.offset..h.offset + h.length]).into_owned();
+                let value = String::from_utf8_lossy(&block.bytes[h.offset..h.offset + h.length])
+                    .into_owned();
                 if value.chars().any(|c| c.is_ascii_alphabetic()) {
                     out.push(FoundString::ascii(
                         block.va + h.offset as u64,
@@ -829,10 +845,7 @@ mod tests {
         assert!(plan_dispatch_workgroup_chunks(0, 65535).is_empty());
         assert_eq!(plan_dispatch_workgroup_chunks(1, 65535), vec![1]);
         assert_eq!(plan_dispatch_workgroup_chunks(65535, 65535), vec![65535]);
-        assert_eq!(
-            plan_dispatch_workgroup_chunks(65536, 65535),
-            vec![65535, 1]
-        );
+        assert_eq!(plan_dispatch_workgroup_chunks(65536, 65535), vec![65535, 1]);
     }
 
     #[test]
@@ -860,7 +873,10 @@ mod tests {
         let max = MAX_COMPUTE_WORKGROUPS_PER_DIMENSION_DEFAULT;
         let n_bytes = (max as usize) * GPU_WORKGROUP_BYTES + 4096;
         let total_groups = ((n_bytes + GPU_WORKGROUP_BYTES - 1) / GPU_WORKGROUP_BYTES) as u32;
-        assert!(total_groups > max, "fixture must exceed single-dispatch limit");
+        assert!(
+            total_groups > max,
+            "fixture must exceed single-dispatch limit"
+        );
         let chunks = plan_dispatch_workgroup_chunks(total_groups, max);
         assert!(chunks.len() >= 2);
 

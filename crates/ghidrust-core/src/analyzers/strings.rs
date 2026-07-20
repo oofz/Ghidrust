@@ -167,7 +167,11 @@ fn scan_utf16le_in_bytes(base_va: u64, bytes: &[u8], min_len: usize) -> Vec<Foun
             let asciiish = value.chars().filter(|c| c.is_ascii()).count();
             let ratio = asciiish as f64 / value.len() as f64;
             if value.chars().any(|c| c.is_ascii_alphabetic()) && ratio >= 0.85 {
-                out.push(FoundString::utf16le(base_va + start as u64, value, chars.len()));
+                out.push(FoundString::utf16le(
+                    base_va + start as u64,
+                    value,
+                    chars.len(),
+                ));
             }
             i = j + 2;
             continue;
@@ -298,8 +302,7 @@ fn token_match(pat: &str, value: &str) -> bool {
     let mut start = 0usize;
     let bytes = value.as_bytes();
     for i in 0..=bytes.len() {
-        let boundary = i == bytes.len()
-            || !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_';
+        let boundary = i == bytes.len() || !bytes[i].is_ascii_alphanumeric() && bytes[i] != b'_';
         if boundary {
             if i > start && &value[start..i] == pat {
                 return true;
@@ -355,7 +358,8 @@ mod tests {
         });
         let hits = scan_utf16le_strings(&prog, 4);
         assert!(
-            hits.iter().any(|s| s.value.contains("UserConfigSelections")),
+            hits.iter()
+                .any(|s| s.value.contains("UserConfigSelections")),
             "{hits:?}"
         );
         assert!(hits.iter().all(|s| s.encoding == "utf16le"));

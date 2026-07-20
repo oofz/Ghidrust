@@ -54,10 +54,8 @@ pub enum FunctionGraphLayout {
 }
 
 impl FunctionGraphLayout {
-    pub const ALL: &'static [FunctionGraphLayout] = &[
-        FunctionGraphLayout::Hierarchical,
-        FunctionGraphLayout::Grid,
-    ];
+    pub const ALL: &'static [FunctionGraphLayout] =
+        &[FunctionGraphLayout::Hierarchical, FunctionGraphLayout::Grid];
     pub const fn label(self) -> &'static str {
         match self {
             FunctionGraphLayout::Hierarchical => "Hierarchical",
@@ -399,12 +397,7 @@ pub fn callees_of(prog: &Program, entry: u64) -> Vec<u64> {
             continue;
         }
         // Snap to the enclosing function's entry when possible.
-        if let Some(f) = prog
-            .analysis
-            .functions
-            .iter()
-            .find(|f| xr.to == f.entry)
-        {
+        if let Some(f) = prog.analysis.functions.iter().find(|f| xr.to == f.entry) {
             out.insert(f.entry);
         } else if prog
             .analysis
@@ -454,7 +447,10 @@ pub fn layout_call_graph(
         if next.is_empty() {
             break;
         }
-        per_level.entry(lvl).or_default().extend(next.iter().copied());
+        per_level
+            .entry(lvl)
+            .or_default()
+            .extend(next.iter().copied());
         frontier = next;
     }
 

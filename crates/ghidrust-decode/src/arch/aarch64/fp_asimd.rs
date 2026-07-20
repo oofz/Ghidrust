@@ -28,16 +28,16 @@ fn decode_fadd(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let rn = bit(wd, 5, 9);
     let rm = bit(wd, 16, 20);
     let sz = bit(wd, 22, 22);
- let mnemonic = if sz != 0 { "fadd" } else { "fadd" };
- let suffix = if sz != 0 { ".d" } else { ".s" };
+    let mnemonic = if sz != 0 { "fadd" } else { "fadd" };
+    let suffix = if sz != 0 { ".d" } else { ".s" };
     let reg = if sz != 0 { d(rd) } else { s(rd) };
     let reg_n = if sz != 0 { d(rn) } else { s(rn) };
     let reg_m = if sz != 0 { d(rm) } else { s(rm) };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- format!("{mnemonic}{suffix}"),
- format!("{}, {}, {}", reg, reg_n, reg_m),
+        format!("{mnemonic}{suffix}"),
+        format!("{}, {}, {}", reg, reg_n, reg_m),
         4,
     ))
 }
@@ -47,15 +47,15 @@ fn decode_fmul(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let rn = bit(wd, 5, 9);
     let rm = bit(wd, 16, 20);
     let sz = bit(wd, 22, 22);
- let suffix = if sz != 0 { ".d" } else { ".s" };
+    let suffix = if sz != 0 { ".d" } else { ".s" };
     let reg = if sz != 0 { d(rd) } else { s(rd) };
     let reg_n = if sz != 0 { d(rn) } else { s(rn) };
     let reg_m = if sz != 0 { d(rm) } else { s(rm) };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- format!("fmul{suffix}"),
- format!("{}, {}, {}", reg, reg_n, reg_m),
+        format!("fmul{suffix}"),
+        format!("{}, {}, {}", reg, reg_n, reg_m),
         4,
     ))
 }
@@ -65,15 +65,15 @@ fn decode_fsub(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let rn = bit(wd, 5, 9);
     let rm = bit(wd, 16, 20);
     let sz = bit(wd, 22, 22);
- let suffix = if sz != 0 { ".d" } else { ".s" };
+    let suffix = if sz != 0 { ".d" } else { ".s" };
     let reg = if sz != 0 { d(rd) } else { s(rd) };
     let reg_n = if sz != 0 { d(rn) } else { s(rn) };
     let reg_m = if sz != 0 { d(rm) } else { s(rm) };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- format!("fsub{suffix}"),
- format!("{}, {}, {}", reg, reg_n, reg_m),
+        format!("fsub{suffix}"),
+        format!("{}, {}, {}", reg, reg_n, reg_m),
         4,
     ))
 }
@@ -83,15 +83,15 @@ fn decode_fdiv(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let rn = bit(wd, 5, 9);
     let rm = bit(wd, 16, 20);
     let sz = bit(wd, 22, 22);
- let suffix = if sz != 0 { ".d" } else { ".s" };
+    let suffix = if sz != 0 { ".d" } else { ".s" };
     let reg = if sz != 0 { d(rd) } else { s(rd) };
     let reg_n = if sz != 0 { d(rn) } else { s(rn) };
     let reg_m = if sz != 0 { d(rm) } else { s(rm) };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- format!("fdiv{suffix}"),
- format!("{}, {}, {}", reg, reg_n, reg_m),
+        format!("fdiv{suffix}"),
+        format!("{}, {}, {}", reg, reg_n, reg_m),
         4,
     ))
 }
@@ -105,8 +105,8 @@ fn decode_fmov(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- if sz != 0 { "fmov.d" } else { "fmov.s" },
- format!("{}, {}", reg, reg_n),
+        if sz != 0 { "fmov.d" } else { "fmov.s" },
+        format!("{}, {}", reg, reg_n),
         4,
     ))
 }
@@ -121,16 +121,21 @@ fn try_asimd(wd: u32, address: u64, raw: &[u8]) -> Option<Result<Instruction>> {
         return None;
     }
     let mnemonic = match size {
- 0b00 => "add.8b",
- 0b01 => "add.16b",
- 0b10 => "add.4h",
- _ => "add.2s",
+        0b00 => "add.8b",
+        0b01 => "add.16b",
+        0b10 => "add.4h",
+        _ => "add.2s",
     };
     Some(Ok(Instruction::with_text(
         address,
         raw.to_vec(),
         mnemonic,
- format!("{}, {}, {}", v(rd | if q != 0 { 16 } else { 0 }), v(rn), v(rm)),
+        format!(
+            "{}, {}, {}",
+            v(rd | if q != 0 { 16 } else { 0 }),
+            v(rn),
+            v(rm)
+        ),
         4,
     )))
 }

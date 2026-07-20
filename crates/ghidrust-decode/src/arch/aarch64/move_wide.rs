@@ -27,8 +27,8 @@ fn decode_movz(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- "movz",
- format!("{}, #{imm:#x}", reg),
+        "movz",
+        format!("{}, #{imm:#x}", reg),
         4,
     ))
 }
@@ -44,8 +44,8 @@ fn decode_movk(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- "movk",
- format!("{}, #{imm:#x}", reg),
+        "movk",
+        format!("{}, #{imm:#x}", reg),
         4,
     ))
 }
@@ -61,8 +61,8 @@ fn decode_movn(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- "movn",
- format!("{}, #{imm:#x}", reg),
+        "movn",
+        format!("{}, #{imm:#x}", reg),
         4,
     ))
 }
@@ -76,12 +76,12 @@ pub fn try_decode_adr(wd: u32, address: u64, raw: &[u8]) -> Option<Result<Instru
         let imm = sign_extend_pc((immhi as u64) << 2 | immlo as u64, 21);
         let target = (address as i64).wrapping_add(imm) as u64;
         let reg = if bit(wd, 31, 31) != 0 { x(rd) } else { w(rd) };
- let m = if op != 0 { "adrp" } else { "adr" };
+        let m = if op != 0 { "adrp" } else { "adr" };
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),
             m,
- format!("{}, #{target:#x}", reg),
+            format!("{}, #{target:#x}", reg),
             4,
         )));
     }

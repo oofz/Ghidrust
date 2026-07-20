@@ -15,7 +15,7 @@ pub fn decode(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Instructi
         0b1101 => decode_load_store_reg(hw, bytes, address, be, true),
         0b1110 => decode_fmt1110(hw, bytes, address, be),
         0b1111 => decode_svc(hw, bytes, address, be),
- _ => Err(Error::Decode(format!("unhandled T16 {hw:#06x}"))),
+        _ => Err(Error::Decode(format!("unhandled T16 {hw:#06x}"))),
     }
 }
 
@@ -33,17 +33,23 @@ fn decode_mov_shift(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Ins
     let rs = (hw >> 3) & 0x7;
     let rd = hw & 0x7;
     let mnemonic = match op {
- 0b00 => "lsls",
- 0b01 => "lsrs",
- 0b10 => "asrs",
- _ => "movs",
+        0b00 => "lsls",
+        0b01 => "lsrs",
+        0b10 => "asrs",
+        _ => "movs",
     };
     let operands = if op == 0b11 {
- format!("{}, {}", gpr(rs as u32), gpr(rd as u32))
+        format!("{}, {}", gpr(rs as u32), gpr(rd as u32))
     } else {
- format!("{}, {}, #{offset}", gpr(rs as u32), gpr(rd as u32))
+        format!("{}, {}, #{offset}", gpr(rs as u32), gpr(rd as u32))
     };
-    Ok(Instruction::with_text(address, raw2(bytes, be), mnemonic, operands, 2))
+    Ok(Instruction::with_text(
+        address,
+        raw2(bytes, be),
+        mnemonic,
+        operands,
+        2,
+    ))
 }
 
 fn decode_load_store_imm5(
@@ -56,12 +62,12 @@ fn decode_load_store_imm5(
     let imm = ((hw >> 6) & 0x1f) << 2;
     let rb = (hw >> 3) & 0x7;
     let rd = hw & 0x7;
- let mnemonic = if load { "ldr" } else { "str" };
+    let mnemonic = if load { "ldr" } else { "str" };
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{}, [{}, #{imm}]", gpr(rd as u32), gpr(rb as u32)),
+        format!("{}, [{}, #{imm}]", gpr(rd as u32), gpr(rb as u32)),
         2,
     ))
 }
@@ -76,12 +82,12 @@ fn decode_load_store_h(
     let imm = ((hw >> 6) & 0x1f) << 1;
     let rb = (hw >> 3) & 0x7;
     let rd = hw & 0x7;
- let mnemonic = if load { "ldrh" } else { "strh" };
+    let mnemonic = if load { "ldrh" } else { "strh" };
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{}, [{}, #{imm}]", gpr(rd as u32), gpr(rb as u32)),
+        format!("{}, [{}, #{imm}]", gpr(rd as u32), gpr(rb as u32)),
         2,
     ))
 }
@@ -95,12 +101,12 @@ fn decode_load_store_sp(
 ) -> Result<Instruction> {
     let imm = ((hw >> 4) & 0xff) << 2;
     let rd = hw & 0x7;
- let mnemonic = if load { "ldr" } else { "str" };
+    let mnemonic = if load { "ldr" } else { "str" };
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{}, [sp, #{imm}]", gpr(rd as u32)),
+        format!("{}, [sp, #{imm}]", gpr(rd as u32)),
         2,
     ))
 }
@@ -110,12 +116,12 @@ fn decode_add_sub(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Instr
     let imm = (hw >> 6) & 0x7;
     let rn = (hw >> 3) & 0x7;
     let rd = hw & 0x7;
- let mnemonic = if add { "add" } else { "sub" };
+    let mnemonic = if add { "add" } else { "sub" };
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{}, {}, #{imm}", gpr(rd as u32), gpr(rn as u32)),
+        format!("{}, {}, #{imm}", gpr(rd as u32), gpr(rn as u32)),
         2,
     ))
 }
@@ -157,17 +163,17 @@ fn decode_push_pop(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Inst
         }
     }
     if lr && push {
- regs.push("lr");
+        regs.push("lr");
     }
     if pc && !push {
- regs.push("pc");
+        regs.push("pc");
     }
- let mnemonic = if push { "push" } else { "pop" };
+    let mnemonic = if push { "push" } else { "pop" };
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{{{}}}", regs.join(", ")),
+        format!("{{{}}}", regs.join(", ")),
         2,
     ))
 }
@@ -178,16 +184,16 @@ fn decode_misc(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Instruct
     let rd = (hw & 0x7) | if h1 { 8 } else { 0 };
     let rm = ((hw >> 3) & 0x7) | if h2 { 8 } else { 0 };
     let mnemonic = match (hw >> 9) & 0x3 {
- 0b00 => "add",
- 0b01 => "cmp",
- 0b10 => "mov",
- _ => "bx",
+        0b00 => "add",
+        0b01 => "cmp",
+        0b10 => "mov",
+        _ => "bx",
     };
- if mnemonic == "bx" {
+    if mnemonic == "bx" {
         return Ok(Instruction::with_text(
             address,
             raw2(bytes, be),
- "bx",
+            "bx",
             gpr(rm as u32),
             2,
         ));
@@ -196,7 +202,7 @@ fn decode_misc(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Instruct
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{}, {}", gpr(rd as u32), gpr(rm as u32)),
+        format!("{}, {}", gpr(rd as u32), gpr(rm as u32)),
         2,
     ))
 }
@@ -210,7 +216,7 @@ fn decode_branch_cond(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<I
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
- format!("b{suffix}"),
+        format!("b{suffix}"),
         fmt_imm_hex(target as i64),
         2,
     ))
@@ -226,12 +232,17 @@ fn decode_load_store_reg(
     let ro = (hw >> 6) & 0x7;
     let rb = (hw >> 3) & 0x7;
     let rd = hw & 0x7;
- let mnemonic = if load { "ldr" } else { "str" };
+    let mnemonic = if load { "ldr" } else { "str" };
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
         mnemonic,
- format!("{}, [{}, {}]", gpr(rd as u32), gpr(rb as u32), gpr(ro as u32)),
+        format!(
+            "{}, [{}, {}]",
+            gpr(rd as u32),
+            gpr(rb as u32),
+            gpr(ro as u32)
+        ),
         2,
     ))
 }
@@ -245,16 +256,16 @@ fn decode_add_sp_pc(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Ins
         return Ok(Instruction::with_text(
             address,
             raw2(bytes, be),
- "adr",
- format!("{}, {:#x}", gpr(rd as u32), target),
+            "adr",
+            format!("{}, {:#x}", gpr(rd as u32), target),
             2,
         ));
     }
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
- "add",
- format!("{}, sp, #{imm}", gpr(rd as u32)),
+        "add",
+        format!("{}, sp, #{imm}", gpr(rd as u32)),
         2,
     ))
 }
@@ -266,7 +277,7 @@ fn decode_branch(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Instru
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
- "b",
+        "b",
         fmt_imm_hex(target as i64),
         2,
     ))
@@ -277,8 +288,8 @@ fn decode_svc(hw: u16, bytes: &[u8], address: u64, be: bool) -> Result<Instructi
     Ok(Instruction::with_text(
         address,
         raw2(bytes, be),
- "svc",
- format!("#{imm}"),
+        "svc",
+        format!("#{imm}"),
         2,
     ))
 }

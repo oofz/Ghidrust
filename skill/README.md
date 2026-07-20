@@ -33,7 +33,34 @@ cargo run -p ghidrust-gui --release
 
 Windows: `.\target\release\ghidrust.exe` / `.\target\release\ghidrust-gui.exe`. Friction surfaces (`inventory`, `tree`, `artifact`, `process`, `rtti --filter`) match MCP tool names in `tool_defs()` — see [`SKILL.md`](SKILL.md).
 
-Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Agents need MCP `tool_surface >= 3` (touch-map / body_class / function_create); prefer `>= 4` for bounded disasm / `get_calls_from` (current is `4`). Restart MCP after rebuild if those or `process_*` are missing.
+Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Agents need MCP `tool_surface >= 3` (touch-map / body_class / function_create); prefer `>= 4` for bounded disasm / `get_calls_from`; `>= 5` for decode tools; **`>= 6`** for `crypt_constants` / `recover_strings` / `decode_bake` / `decode_magic` / `list_crypto_capabilities` (current is `6`). Restart MCP after rebuild if those or `process_*` are missing.
+
+Smoke crypto surfaces:
+
+```bash
+./target/release/ghidrust crypt-constants fixtures/analysis_lab.pe --json
+./target/release/ghidrust recover-strings fixtures/analysis_lab.pe --json
+./target/release/ghidrust crypto-capabilities fixtures/analysis_lab.pe --json
+./target/release/ghidrust decode bake -b64 SGVsbG8= -op FromBase64 --json
+./target/release/ghidrust decode magic -b64 SGVsbG8= -depth 3 --crib Hello --json
+./target/release/ghidrust decode bake -path fixtures/analysis_lab.pe -addr 0x140001000 -op Gunzip --annotate-va 0x140001000 --json
+```
+
+## Crypto how-to
+
+Run the four tiers in order: **Find Crypt**, recovered strings, capability matching, then explicit or automatic recipe decoding.
+
+```bash
+./target/release/ghidrust analyze PATH --analyzer "Find Crypt" --json
+./target/release/ghidrust crypt-constants PATH --algo AES --json
+./target/release/ghidrust recover-strings PATH --only stack,tight,decoded --json
+./target/release/ghidrust crypto-capabilities PATH --tag decrypt --json
+./target/release/ghidrust decode bake -b64 SGVsbG8= -op FromBase64 --json
+./target/release/ghidrust decode bake -hex CIPHERTEXT -op RC4 -key-hex KEY --json
+./target/release/ghidrust decode magic -b64 SGVsbG8= -depth 3 -crib Hello --json
+```
+
+For agent calls, use `crypt_constants`, `recover_strings`, `list_crypto_capabilities`, `decode_bake`, and `decode_magic`. AES-GCM returns only the unauthenticated counter-mode plaintext path; it does not verify a tag. The living coverage matrix is [decrypt-feature-test-log.md](decrypt-feature-test-log.md).
 
 MCP for agents (register in Cursor / Claude Desktop / other MCP clients — see root README):
 

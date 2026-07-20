@@ -2,7 +2,9 @@
 
 use super::ansi::{char_cell_width, Color, TerminalGrid, DEFAULT_BG};
 use super::session::{encode_key, GrokTermSession};
-use eframe::egui::{self, Color32, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Ui, Vec2};
+use eframe::egui::{
+    self, Color32, FontId, Key, Modifiers, PointerButton, Pos2, Rect, Sense, Ui, Vec2,
+};
 
 const FONT_SIZE: f32 = 13.0;
 
@@ -69,11 +71,7 @@ pub fn show_terminal(
             i.events.iter().any(|e| {
                 matches!(
                     e,
-                    egui::Event::Text(_)
-                        | egui::Event::Key {
-                            pressed: true,
-                            ..
-                        }
+                    egui::Event::Text(_) | egui::Event::Key { pressed: true, .. }
                 )
             })
         });
@@ -133,9 +131,7 @@ fn handle_pointer(
                     .input(|i| i.pointer.hover_pos())
                     .map(|p| pos_to_cell(p, origin, cell_w, cell_h, cols, rows))
                     .unwrap_or((0, 0));
-                session.write_bytes(
-                    format!("\x1b[<{};{};{}M", btn, c + 1, r + 1).as_bytes(),
-                );
+                session.write_bytes(format!("\x1b[<{};{};{}M", btn, c + 1, r + 1).as_bytes());
             }
         }
     }
@@ -163,9 +159,7 @@ fn handle_pointer(
         session.update_selection(cell.0, cell.1);
     }
     if response.drag_stopped_by(PointerButton::Primary) {
-        let was_drag = session
-            .selection
-            .is_some_and(|s| !s.is_empty_cell());
+        let was_drag = session.selection.is_some_and(|s| !s.is_empty_cell());
         if was_drag {
             finish_host_selection(ui, session);
         } else {
@@ -190,21 +184,14 @@ fn paint_copied_toast(painter: &egui::Painter, term_rect: Rect) {
     let font = FontId::proportional(13.0);
     let galley = painter.layout_no_wrap(label.to_owned(), font, Color32::WHITE);
     let size = galley.size() + pad * 2.0;
-    let origin = Pos2::new(
-        term_rect.max.x - size.x - 10.0,
-        term_rect.min.y + 10.0,
-    );
+    let origin = Pos2::new(term_rect.max.x - size.x - 10.0, term_rect.min.y + 10.0);
     let rect = Rect::from_min_size(origin, size);
     painter.rect_filled(
         rect,
         4.0,
         Color32::from_rgba_unmultiplied(0x1B, 0x5E, 0x20, 220),
     );
-    painter.galley(
-        origin + pad,
-        galley,
-        Color32::WHITE,
-    );
+    painter.galley(origin + pad, galley, Color32::WHITE);
 }
 
 fn paint_grid(
@@ -256,9 +243,8 @@ fn paint_grid(
 
             if cell.ch != ' ' && !cell.ch.is_control() {
                 let clipped = painter.with_clip_rect(rect);
-                let g = ui.fonts(|f| {
-                    f.layout_no_wrap(cell.ch.to_string(), font.clone(), to_color32(fg))
-                });
+                let g = ui
+                    .fonts(|f| f.layout_no_wrap(cell.ch.to_string(), font.clone(), to_color32(fg)));
                 let ty = y + ((cell_h - g.size().y) * 0.5).max(0.0);
                 let tx = x + ((cell_w * span as f32 - g.size().x) * 0.5).max(0.0);
                 clipped.galley(Pos2::new(tx, ty), g, to_color32(fg));
@@ -314,9 +300,7 @@ fn handle_input(ui: &mut Ui, session: &mut GrokTermSession) {
     // exists, Copy means clipboard; otherwise Copy is Grok's Ctrl+C (0x03).
     let mut paste: Option<String> = None;
     let mut copy_event = false;
-    let has_sel = session
-        .selection
-        .is_some_and(|s| !s.is_empty_cell());
+    let has_sel = session.selection.is_some_and(|s| !s.is_empty_cell());
 
     ui.input_mut(|i| {
         i.events.retain(|ev| match ev {
@@ -374,9 +358,7 @@ fn handle_input(ui: &mut Ui, session: &mut GrokTermSession) {
 
     // Ctrl+Shift+C or Copy with selection → clipboard (do not interrupt Grok).
     let force_clipboard = ui.input(|i| {
-        (i.modifiers.ctrl || i.modifiers.command)
-            && i.modifiers.shift
-            && i.key_pressed(Key::C)
+        (i.modifiers.ctrl || i.modifiers.command) && i.modifiers.shift && i.key_pressed(Key::C)
     });
     if (copy_event && has_sel) || force_clipboard {
         if session.copy_selection_and_clear(ui.ctx()) {

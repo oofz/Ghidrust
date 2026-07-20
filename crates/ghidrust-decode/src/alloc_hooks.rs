@@ -2,7 +2,7 @@
 pub trait AllocHooks: Send + Sync {
     fn malloc(&self, size: usize) -> *mut u8 {
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| {
- std::alloc::Layout::from_size_align(1, 1).expect("fallback layout")
+            std::alloc::Layout::from_size_align(1, 1).expect("fallback layout")
         });
         unsafe { std::alloc::alloc(layout) }
     }
@@ -21,7 +21,7 @@ pub trait AllocHooks: Send + Sync {
             return self.malloc(size);
         }
         let layout = std::alloc::Layout::from_size_align(size, 8).unwrap_or_else(|_| {
- std::alloc::Layout::from_size_align(1, 1).expect("fallback layout")
+            std::alloc::Layout::from_size_align(1, 1).expect("fallback layout")
         });
         unsafe { std::alloc::realloc(ptr, layout, size) }
     }
@@ -30,7 +30,7 @@ pub trait AllocHooks: Send + Sync {
         if ptr.is_null() {
             return;
         }
- let layout = std::alloc::Layout::from_size_align(1, 1).expect("free layout");
+        let layout = std::alloc::Layout::from_size_align(1, 1).expect("free layout");
         unsafe { std::alloc::dealloc(ptr, layout) }
     }
 }

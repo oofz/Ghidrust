@@ -110,15 +110,16 @@ pub fn render_entropy_strip(
     let per = (avail / samples.len() as f32).max(1.0);
     for (i, s) in samples.iter().enumerate() {
         let x = rect.min.x + i as f32 * per;
-        let r = Rect::from_min_size(
-            egui::pos2(x, rect.min.y),
-            Vec2::new(per, strip_h),
-        );
+        let r = Rect::from_min_size(egui::pos2(x, rect.min.y), Vec2::new(per, strip_h));
         painter.rect_filled(r, 0.0, entropy_color(s.entropy));
     }
     // Focus cursor line.
     if let Some(va) = focused_va {
-        if let Some((i, _)) = samples.iter().enumerate().find(|(_, s)| va >= s.va && va < s.end_va) {
+        if let Some((i, _)) = samples
+            .iter()
+            .enumerate()
+            .find(|(_, s)| va >= s.va && va < s.end_va)
+        {
             let x = rect.min.x + (i as f32 + 0.5) * per;
             painter.line_segment(
                 [egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)],
@@ -160,14 +161,15 @@ pub fn render_overview_strip(
     let per = (avail / samples.len() as f32).max(1.0);
     for (i, s) in samples.iter().enumerate() {
         let x = rect.min.x + i as f32 * per;
-        let r = Rect::from_min_size(
-            egui::pos2(x, rect.min.y),
-            Vec2::new(per, strip_h),
-        );
+        let r = Rect::from_min_size(egui::pos2(x, rect.min.y), Vec2::new(per, strip_h));
         painter.rect_filled(r, 0.0, overview_color(prog, s));
     }
     if let Some(va) = focused_va {
-        if let Some((i, _)) = samples.iter().enumerate().find(|(_, s)| va >= s.va && va < s.end_va) {
+        if let Some((i, _)) = samples
+            .iter()
+            .enumerate()
+            .find(|(_, s)| va >= s.va && va < s.end_va)
+        {
             let x = rect.min.x + (i as f32 + 0.5) * per;
             painter.line_segment(
                 [egui::pos2(x, rect.min.y), egui::pos2(x, rect.max.y)],

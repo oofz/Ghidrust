@@ -43,7 +43,7 @@ pub struct Instruction {
 }
 
 impl Instruction {
- /// Legacy five-field constructor (`id` / `detail` use defaults).
+    /// Legacy five-field constructor (`id` / `detail` use defaults).
     pub fn with_text(
         address: u64,
         bytes: Vec<u8>,
@@ -62,12 +62,12 @@ impl Instruction {
     }
 
     pub fn text(&self) -> String {
- let hex = format!("{:24}", hex_bytes(&self.bytes));
+        let hex = format!("{:24}", hex_bytes(&self.bytes));
         if self.operands.is_empty() {
- format!("{:016x}: {} {}", self.address, hex, self.mnemonic)
+            format!("{:016x}: {} {}", self.address, hex, self.mnemonic)
         } else {
             format!(
- "{:016x}: {} {} {}",
+                "{:016x}: {} {} {}",
                 self.address, hex, self.mnemonic, self.operands
             )
         }
@@ -85,7 +85,7 @@ impl Instruction {
 
 fn hex_bytes(b: &[u8]) -> String {
     b.iter()
- .map(|x| format!("{x:02x}"))
+        .map(|x| format!("{x:02x}"))
         .collect::<Vec<_>>()
- .join(" ")
+        .join(" ")
 }

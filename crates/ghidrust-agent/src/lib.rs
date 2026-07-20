@@ -28,7 +28,7 @@ pub use system_prompt::{
     SystemPromptBuilder,
 };
 pub use tool_bridge::{
-    ensure_project_skill, project_skill_path, register_mcp_with_grok_cli,
-    resolve_ghidrust_cli_bin, skill_content_hash, start_checklist, write_project_mcp_config,
-    write_project_skill, write_project_skill_embedded, StartChecklistItem, EMBEDDED_SKILL_MD,
+    ensure_project_skill, project_skill_path, register_mcp_with_grok_cli, resolve_ghidrust_cli_bin,
+    skill_content_hash, start_checklist, write_project_mcp_config, write_project_skill,
+    write_project_skill_embedded, StartChecklistItem, EMBEDDED_SKILL_MD,
 };

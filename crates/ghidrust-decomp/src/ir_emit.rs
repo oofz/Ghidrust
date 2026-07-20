@@ -23,15 +23,9 @@ use crate::BasicBlock;
 /// * `blocks` — Stage-0 basic blocks, already split by `wire_successors`.
 /// * `seq` — IR ops in linear order with source addresses; typically the output
 ///   of [`ghidrust_lift::lift_instructions`].
-pub fn emit_ir_pseudo_c(
-    name: &str,
-    entry: u64,
-    blocks: &[BasicBlock],
-    seq: &IrSequence,
-) -> String {
+pub fn emit_ir_pseudo_c(name: &str, entry: u64, blocks: &[BasicBlock], seq: &IrSequence) -> String {
     let ops_by_addr = group_ops_by_addr(seq);
-    let block_labels: BTreeMap<u64, usize> =
-        blocks.iter().map(|b| (b.start, b.id)).collect();
+    let block_labels: BTreeMap<u64, usize> = blocks.iter().map(|b| (b.start, b.id)).collect();
 
     let cov = lift_coverage(seq, seq.addressed.len());
     let mut out = String::new();
@@ -51,7 +45,10 @@ pub fn emit_ir_pseudo_c(
         out.push_str(&format!("  // block_{} @ {:#x}\n", b.id, b.start));
         out.push_str(&format!("  block_{}:\n", b.id));
         for insn in &b.instructions {
-            let ir_slice = ops_by_addr.get(&insn.address).map(|v| v.as_slice()).unwrap_or(&[]);
+            let ir_slice = ops_by_addr
+                .get(&insn.address)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let stmt = emit_insn(insn, ir_slice, &block_labels);
             for line in stmt.lines() {
                 out.push_str("    ");
@@ -66,11 +63,7 @@ pub fn emit_ir_pseudo_c(
     out
 }
 
-fn emit_insn(
-    insn: &Instruction,
-    ir: &[PcodeOp],
-    labels: &BTreeMap<u64, usize>,
-) -> String {
+fn emit_insn(insn: &Instruction, ir: &[PcodeOp], labels: &BTreeMap<u64, usize>) -> String {
     match insn.mnemonic.as_str() {
         "ret" | "retn" => "return;".to_string(),
         "nop" => "/* nop */;".to_string(),
@@ -422,8 +415,14 @@ mod tests {
         let (d, seq) = decomp_with_ir(&bytes, 0x1000, "prologue");
         let text = emit_ir_pseudo_c(&d.name, d.entry, &d.blocks, &seq);
         assert!(text.contains("void prologue"));
-        assert!(text.contains("rbp = rsp;"), "mov rbp,rsp should lower cleanly:\n{text}");
-        assert!(text.contains("eax = 0;"), "xor idiom should collapse to 0:\n{text}");
+        assert!(
+            text.contains("rbp = rsp;"),
+            "mov rbp,rsp should lower cleanly:\n{text}"
+        );
+        assert!(
+            text.contains("eax = 0;"),
+            "xor idiom should collapse to 0:\n{text}"
+        );
         assert!(text.contains("push(rbp);"));
         assert!(text.contains("rbp = pop();"));
         assert!(text.contains("return;"));
@@ -441,7 +440,10 @@ mod tests {
         let bytes = [0x39, 0xc1, 0x74, 0x02, 0x31, 0xc0, 0xc3, 0x31, 0xc9, 0xc3];
         let (d, seq) = decomp_with_ir(&bytes, 0x2000, "branchy");
         let text = emit_ir_pseudo_c(&d.name, d.entry, &d.blocks, &seq);
-        assert!(text.contains("if (zf) goto"), "expected zf-driven jcc:\n{text}");
+        assert!(
+            text.contains("if (zf) goto"),
+            "expected zf-driven jcc:\n{text}"
+        );
         // Stage-0 truncates at the first `ret`; the taken branch still emits a
         // `goto` and the fallthrough hits `return;` at least once.
         assert!(text.matches("return;").count() >= 1);

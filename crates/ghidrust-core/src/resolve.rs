@@ -5,9 +5,7 @@
 
 use crate::analyzers::run_analyzers;
 use crate::error::Result;
-use crate::pe_functions::{
-    create_function_with_kind, runtime_function_containing,
-};
+use crate::pe_functions::{create_function_with_kind, runtime_function_containing};
 use crate::program::{FunctionInfo, FunctionSeedKind, Program};
 use serde::{Deserialize, Serialize};
 
@@ -244,9 +242,9 @@ mod tests {
             writable: false,
             executable: true,
         });
-        prog.analysis.functions.push(
-            FunctionInfo::new(entry, end, "f").with_seed_kind(FunctionSeedKind::Manual),
-        );
+        prog.analysis
+            .functions
+            .push(FunctionInfo::new(entry, end, "f").with_seed_kind(FunctionSeedKind::Manual));
         prog
     }
 
@@ -286,7 +284,9 @@ mod tests {
             executable: true,
         });
         // Non-empty functions list so first path does not only rely on empty-FSS.
-        prog.analysis.functions.push(FunctionInfo::new(0x2000, 0x2100, "elsewhere"));
+        prog.analysis
+            .functions
+            .push(FunctionInfo::new(0x2000, 0x2100, "elsewhere"));
         let r = resolve_function(&mut prog, 0x1050).unwrap();
         assert!(r.ok);
         assert_eq!(r.resolve_status, ResolveStatus::Synthesized);

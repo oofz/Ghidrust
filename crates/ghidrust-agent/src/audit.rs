@@ -77,7 +77,10 @@ impl AuditLog {
     /// callers can surface it in the pane.
     pub fn append(&self, mut record: AuditRecord) -> io::Result<()> {
         record.session_id = self.session_id.clone();
-        let mut f = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         let line = serde_json::to_string(&record)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         writeln!(f, "{line}")?;

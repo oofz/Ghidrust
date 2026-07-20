@@ -84,32 +84,32 @@ impl Arch {
         }
     }
 
- pub const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
- Arch::Arm => "arm",
- Arch::Arm64 => "arm64",
- Arch::Mips => "mips",
- Arch::X86 => "x86",
- Arch::Ppc => "ppc",
- Arch::Sparc => "sparc",
- Arch::Sysz => "sysz",
- Arch::Xcore => "xcore",
- Arch::M68k => "m68k",
- Arch::Tms320c64x => "tms320c64x",
- Arch::M680x => "m680x",
- Arch::Evm => "evm",
- Arch::Mos65xx => "mos65xx",
- Arch::Wasm => "wasm",
- Arch::Bpf => "bpf",
- Arch::Riscv => "riscv",
- Arch::Tricore => "tricore",
- Arch::Alpha => "alpha",
- Arch::Hppa => "hppa",
- Arch::Loongarch => "loongarch",
- Arch::Arc => "arc",
- Arch::Sh => "sh",
- Arch::Xtensa => "xtensa",
- Arch::Max => "max",
+            Arch::Arm => "arm",
+            Arch::Arm64 => "arm64",
+            Arch::Mips => "mips",
+            Arch::X86 => "x86",
+            Arch::Ppc => "ppc",
+            Arch::Sparc => "sparc",
+            Arch::Sysz => "sysz",
+            Arch::Xcore => "xcore",
+            Arch::M68k => "m68k",
+            Arch::Tms320c64x => "tms320c64x",
+            Arch::M680x => "m680x",
+            Arch::Evm => "evm",
+            Arch::Mos65xx => "mos65xx",
+            Arch::Wasm => "wasm",
+            Arch::Bpf => "bpf",
+            Arch::Riscv => "riscv",
+            Arch::Tricore => "tricore",
+            Arch::Alpha => "alpha",
+            Arch::Hppa => "hppa",
+            Arch::Loongarch => "loongarch",
+            Arch::Arc => "arc",
+            Arch::Sh => "sh",
+            Arch::Xtensa => "xtensa",
+            Arch::Max => "max",
         }
     }
 }
@@ -195,9 +195,7 @@ impl Mode {
                     || self.contains(Self::V8)
             }
             Arch::Arm64 => {
-                self == Self::LITTLE_ENDIAN
-                    || self == Self::BIG_ENDIAN
-                    || self.contains(Self::V8)
+                self == Self::LITTLE_ENDIAN || self == Self::BIG_ENDIAN || self.contains(Self::V8)
             }
             Arch::Mips => {
                 self.contains(Self::MIPS32)
@@ -212,21 +210,14 @@ impl Mode {
                     || self == Self::BIG_ENDIAN
             }
             Arch::Sparc => {
-                self.contains(Self::V9)
-                    || self == Self::LITTLE_ENDIAN
-                    || self == Self::BIG_ENDIAN
+                self.contains(Self::V9) || self == Self::LITTLE_ENDIAN || self == Self::BIG_ENDIAN
             }
             Arch::Sysz | Arch::Hppa => {
                 self == Self::LITTLE_ENDIAN
                     || self == Self::BIG_ENDIAN
                     || self.contains(Self::MODE_64)
             }
-            Arch::Xcore
-            | Arch::M68k
-            | Arch::Tricore
-            | Arch::Arc
-            | Arch::Sh
-            | Arch::Loongarch => {
+            Arch::Xcore | Arch::M68k | Arch::Tricore | Arch::Arc | Arch::Sh | Arch::Loongarch => {
                 self == Self::LITTLE_ENDIAN
                     || self == Self::BIG_ENDIAN
                     || self.contains(Self::MODE_32)
@@ -258,8 +249,8 @@ impl SupportQuery {
         match self {
             SupportQuery::Arch(arch) => IMPLEMENTED.contains(&arch),
             SupportQuery::All => IMPLEMENTED.len() == Arch::ALL.len(),
- SupportQuery::Diet => cfg!(feature = "diet"),
- SupportQuery::X86Reduce => cfg!(feature = "x86-reduce"),
+            SupportQuery::Diet => cfg!(feature = "diet"),
+            SupportQuery::X86Reduce => cfg!(feature = "x86-reduce"),
         }
     }
 }

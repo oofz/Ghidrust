@@ -21,7 +21,7 @@ impl ArchDecode for M68kDecoder {
 
     fn open(mode: Mode) -> Result<Self> {
         if !mode.is_valid_for(Arch::M68k) {
- return Err(Error::Mode(format!("invalid m68k mode {:#x}", mode.bits())));
+            return Err(Error::Mode(format!("invalid m68k mode {:#x}", mode.bits())));
         }
         let big_endian = !mode.intersects(Mode::LITTLE_ENDIAN) || mode.contains(Mode::BIG_ENDIAN);
         Ok(Self { big_endian })
@@ -49,48 +49,48 @@ impl ArchDecode for M68kDecoder {
 
 fn groups_for_mnemonic(mnemonic: &str) -> Vec<GroupId> {
     match mnemonic {
- "jsr" | "bsr" => vec![GroupId::Call],
- "jmp" | "bra" | "bne" | "beq" => vec![GroupId::Jump],
- "rts" => vec![GroupId::Ret],
- m if m.starts_with("move") => vec![GroupId::Arch(1)],
- "add.w" | "cmp.w" => vec![GroupId::Arch(2)],
- "clr" | "bset" => vec![GroupId::Arch(3)],
+        "jsr" | "bsr" => vec![GroupId::Call],
+        "jmp" | "bra" | "bne" | "beq" => vec![GroupId::Jump],
+        "rts" => vec![GroupId::Ret],
+        m if m.starts_with("move") => vec![GroupId::Arch(1)],
+        "add.w" | "cmp.w" => vec![GroupId::Arch(2)],
+        "clr" | "bset" => vec![GroupId::Arch(3)],
         _ => Vec::new(),
     }
 }
 
 pub fn insn_name(id: InsnId) -> Option<&'static str> {
     match id.raw() {
- 1 => Some("move.w"),
- 2 => Some("moveq"),
- 3 => Some("lea"),
- 4 => Some("jsr"),
- 5 => Some("rts"),
- 6 => Some("bra"),
+        1 => Some("move.w"),
+        2 => Some("moveq"),
+        3 => Some("lea"),
+        4 => Some("jsr"),
+        5 => Some("rts"),
+        6 => Some("bra"),
         _ => None,
     }
 }
 
 pub fn group_name(group: GroupId) -> Option<&'static str> {
     match group {
- GroupId::Jump => Some("jump"),
- GroupId::Call => Some("call"),
- GroupId::Ret => Some("ret"),
- GroupId::Arch(1) => Some("move"),
- GroupId::Arch(2) => Some("alu"),
- GroupId::Arch(3) => Some("bit"),
+        GroupId::Jump => Some("jump"),
+        GroupId::Call => Some("call"),
+        GroupId::Ret => Some("ret"),
+        GroupId::Arch(1) => Some("move"),
+        GroupId::Arch(2) => Some("alu"),
+        GroupId::Arch(3) => Some("bit"),
         _ => None,
     }
 }
 
 pub fn insn_id_for_mnemonic(mnemonic: &str) -> InsnId {
     let id = match mnemonic {
- m if m.starts_with("move") => 1,
- "moveq" => 2,
- "lea" => 3,
- "jsr" | "jmp" => 4,
- "rts" => 5,
- m if m.starts_with('b') => 6,
+        m if m.starts_with("move") => 1,
+        "moveq" => 2,
+        "lea" => 3,
+        "jsr" | "jmp" => 4,
+        "rts" => 5,
+        m if m.starts_with('b') => 6,
         _ => 0,
     };
     InsnId(id)
@@ -104,22 +104,22 @@ mod tests {
     #[test]
     fn m68k_moveq_and_rts() {
         let mut eng = Engine::open(Arch::M68k, Mode::BIG_ENDIAN).unwrap();
- // moveq #1, d0 => 0x7001
+        // moveq #1, d0 => 0x7001
         let mq = eng.disasm_one(&[0x70, 0x01], 0).unwrap();
- assert_eq!(mq.mnemonic, "moveq");
- // rts => 0x4e75
+        assert_eq!(mq.mnemonic, "moveq");
+        // rts => 0x4e75
         let rts = eng.disasm_one(&[0x4e, 0x75], 0).unwrap();
- assert_eq!(rts.mnemonic, "rts");
+        assert_eq!(rts.mnemonic, "rts");
     }
 
     #[test]
     fn m68k_jsr_and_bra() {
         let mut eng = Engine::open(Arch::M68k, Mode::BIG_ENDIAN).unwrap();
- // jsr (a0) => 0x4e90
+        // jsr (a0) => 0x4e90
         let jsr = eng.disasm_one(&[0x4e, 0x90], 0).unwrap();
- assert_eq!(jsr.mnemonic, "jsr");
- // bra.s +2 => 0x6002
+        assert_eq!(jsr.mnemonic, "jsr");
+        // bra.s +2 => 0x6002
         let bra = eng.disasm_one(&[0x60, 0x02], 0).unwrap();
- assert_eq!(bra.mnemonic, "bra.s");
+        assert_eq!(bra.mnemonic, "bra.s");
     }
 }

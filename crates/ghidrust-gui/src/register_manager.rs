@@ -86,10 +86,30 @@ const RAX: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "EAX", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "AX", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "AH", bits: 8, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "AL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "EAX",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "AX",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "AH",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "AL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RBX: RegisterNode = RegisterNode {
@@ -97,10 +117,30 @@ const RBX: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "EBX", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "BX", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "BH", bits: 8, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "BL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "EBX",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "BX",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "BH",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "BL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RCX: RegisterNode = RegisterNode {
@@ -108,10 +148,30 @@ const RCX: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "ECX", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "CX", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "CH", bits: 8, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "CL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "ECX",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "CX",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "CH",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "CL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RDX: RegisterNode = RegisterNode {
@@ -119,10 +179,30 @@ const RDX: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "EDX", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "DX", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "DH", bits: 8, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "DL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "EDX",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "DX",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "DH",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "DL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RSI: RegisterNode = RegisterNode {
@@ -130,9 +210,24 @@ const RSI: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "ESI", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "SI", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "SIL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "ESI",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "SI",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "SIL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RDI: RegisterNode = RegisterNode {
@@ -140,9 +235,24 @@ const RDI: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "EDI", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "DI", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "DIL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "EDI",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "DI",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "DIL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RSP: RegisterNode = RegisterNode {
@@ -150,9 +260,24 @@ const RSP: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "ESP", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "SP", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "SPL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "ESP",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "SP",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "SPL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 const RBP: RegisterNode = RegisterNode {
@@ -160,9 +285,24 @@ const RBP: RegisterNode = RegisterNode {
     bits: 64,
     kind: RegisterKind::General,
     children: &[
-        RegisterNode { name: "EBP", bits: 32, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "BP", bits: 16, kind: RegisterKind::General, children: &[] },
-        RegisterNode { name: "BPL", bits: 8, kind: RegisterKind::General, children: &[] },
+        RegisterNode {
+            name: "EBP",
+            bits: 32,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "BP",
+            bits: 16,
+            kind: RegisterKind::General,
+            children: &[],
+        },
+        RegisterNode {
+            name: "BPL",
+            bits: 8,
+            kind: RegisterKind::General,
+            children: &[],
+        },
     ],
 };
 
@@ -172,14 +312,12 @@ macro_rules! rN {
             name: $name,
             bits: 64,
             kind: RegisterKind::General,
-            children: &[
-                RegisterNode {
-                    name: $sub,
-                    bits: 32,
-                    kind: RegisterKind::General,
-                    children: &[],
-                },
-            ],
+            children: &[RegisterNode {
+                name: $sub,
+                bits: 32,
+                kind: RegisterKind::General,
+                children: &[],
+            }],
         }
     };
 }
@@ -218,13 +356,48 @@ pub const X86_64_REGISTERS: &[RegisterNode] = &[
         bits: 64,
         kind: RegisterKind::Flag,
         children: &[
-            RegisterNode { name: "CF", bits: 1, kind: RegisterKind::Flag, children: &[] },
-            RegisterNode { name: "PF", bits: 1, kind: RegisterKind::Flag, children: &[] },
-            RegisterNode { name: "AF", bits: 1, kind: RegisterKind::Flag, children: &[] },
-            RegisterNode { name: "ZF", bits: 1, kind: RegisterKind::Flag, children: &[] },
-            RegisterNode { name: "SF", bits: 1, kind: RegisterKind::Flag, children: &[] },
-            RegisterNode { name: "OF", bits: 1, kind: RegisterKind::Flag, children: &[] },
-            RegisterNode { name: "DF", bits: 1, kind: RegisterKind::Flag, children: &[] },
+            RegisterNode {
+                name: "CF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
+            RegisterNode {
+                name: "PF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
+            RegisterNode {
+                name: "AF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
+            RegisterNode {
+                name: "ZF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
+            RegisterNode {
+                name: "SF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
+            RegisterNode {
+                name: "OF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
+            RegisterNode {
+                name: "DF",
+                bits: 1,
+                kind: RegisterKind::Flag,
+                children: &[],
+            },
         ],
     },
     RegisterNode {
@@ -408,7 +581,12 @@ pub fn render(
     ui.label(egui::RichText::new("Set Register Value").strong());
     ui.horizontal(|ui| {
         ui.label("Register:");
-        ui.monospace(state.selected.clone().unwrap_or_else(|| "(pick above)".into()));
+        ui.monospace(
+            state
+                .selected
+                .clone()
+                .unwrap_or_else(|| "(pick above)".into()),
+        );
     });
     ui.horizontal(|ui| {
         ui.label("Start VA:");
@@ -511,7 +689,11 @@ fn render_row(
         ui.add_space(indent);
         let is_sel = state.selected.as_deref() == Some(node.name);
         let text = egui::RichText::new(format!("{}  {}b", node.name, node.bits)).monospace();
-        let text = if is_sel { text.color(primary).strong() } else { text };
+        let text = if is_sel {
+            text.color(primary).strong()
+        } else {
+            text
+        };
         if ui.selectable_label(is_sel, text).clicked() {
             state.selected = Some(node.name.to_string());
         }
@@ -523,7 +705,10 @@ fn render_row(
 
 fn parse_hex(s: &str) -> Option<u64> {
     let s = s.trim();
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     u64::from_str_radix(s, 16).ok()
 }
 
@@ -534,7 +719,9 @@ mod tests {
     #[test]
     fn register_lattice_contains_expected_registers() {
         let names: Vec<&'static str> = X86_64_REGISTERS.iter().map(|r| r.name).collect();
-        for expected in ["RAX", "RBX", "RCX", "RDX", "RSP", "RBP", "RIP", "RFLAGS", "XMM0", "CR0"] {
+        for expected in [
+            "RAX", "RBX", "RCX", "RDX", "RSP", "RBP", "RIP", "RFLAGS", "XMM0", "CR0",
+        ] {
             assert!(names.contains(&expected), "missing register {expected}");
         }
     }
@@ -544,7 +731,10 @@ mod tests {
         let rax = X86_64_REGISTERS.iter().find(|r| r.name == "RAX").unwrap();
         let sub: Vec<&'static str> = rax.children.iter().map(|c| c.name).collect();
         for expected in ["EAX", "AX", "AH", "AL"] {
-            assert!(sub.contains(&expected), "RAX missing subregister {expected}");
+            assert!(
+                sub.contains(&expected),
+                "RAX missing subregister {expected}"
+            );
         }
     }
 

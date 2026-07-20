@@ -37,7 +37,10 @@ pub fn collect_callsite_hints(insns: &[Instruction]) -> Vec<CallsiteHint> {
             let ops = prev.operands.to_ascii_lowercase();
             let mnem = prev.mnemonic.to_ascii_lowercase();
             if is_rip_relative_load(&mnem, &ops) {
-                rip_loads.push(format!("{:#x}: {} {}", prev.address, prev.mnemonic, prev.operands));
+                rip_loads.push(format!(
+                    "{:#x}: {} {}",
+                    prev.address, prev.mnemonic, prev.operands
+                ));
             }
             if let Some((reg, evidence)) = win64_arg_def(prev) {
                 // Later defs override earlier for the same reg.

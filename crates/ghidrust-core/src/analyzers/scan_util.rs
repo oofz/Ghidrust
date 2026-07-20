@@ -10,7 +10,8 @@ pub fn find_cstr(prog: &Program, needle: &[u8]) -> Vec<u64> {
         let mut i = 0;
         while i + needle.len() <= b.len() {
             if &b[i..i + needle.len()] == needle {
-                let ok_end = i + needle.len() == b.len() || b[i + needle.len()] == 0
+                let ok_end = i + needle.len() == b.len()
+                    || b[i + needle.len()] == 0
                     || !b[i + needle.len()].is_ascii_alphanumeric();
                 if ok_end {
                     out.push(block.va + i as u64);

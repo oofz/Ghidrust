@@ -113,29 +113,21 @@ impl RustType {
         match (self, other) {
             (Bottom, x) | (x, Bottom) => x,
             (a, b) if a == b => a,
-            (IntN { width: a }, IntN { width: b }) => IntN {
-                width: a.max(b),
-            },
-            (IntSigned { width: a }, IntSigned { width: b }) => IntSigned {
-                width: a.max(b),
-            },
+            (IntN { width: a }, IntN { width: b }) => IntN { width: a.max(b) },
+            (IntSigned { width: a }, IntSigned { width: b }) => IntSigned { width: a.max(b) },
             // A signed observation combined with the same-width unsigned
             // one prefers the signed shape — Stage-1 emit reads the operand
             // as a signed compare / sext output which is more informative
             // than the width-only unsigned bucket.
             (IntSigned { width: a }, IntN { width: b })
-            | (IntN { width: b }, IntSigned { width: a }) => IntSigned {
-                width: a.max(b),
-            },
+            | (IntN { width: b }, IntSigned { width: a }) => IntSigned { width: a.max(b) },
             (Ptr { pointee_width: a }, Ptr { pointee_width: b }) => Ptr {
                 pointee_width: a.max(b),
             },
             // A struct pointer subsumes an untyped raw pointer with the same
             // key already known; conflicting keys collapse to `Any`.
             (StructPtr { key: a }, StructPtr { key: b }) if a == b => StructPtr { key: a },
-            (StructPtr { key }, Ptr { .. }) | (Ptr { .. }, StructPtr { key }) => {
-                StructPtr { key }
-            }
+            (StructPtr { key }, Ptr { .. }) | (Ptr { .. }, StructPtr { key }) => StructPtr { key },
             // Struct/Array pointer observations subsume the same-width raw
             // integer seed on the base register (from the ambient Copy /
             // IntAdd chain that computed the address). This lets Stage-1
@@ -144,11 +136,19 @@ impl RustType {
             (StructPtr { key }, IntN { width: 8 }) | (IntN { width: 8 }, StructPtr { key }) => {
                 StructPtr { key }
             }
-            (ArrayPtr { elem_width: aw, count: ac }, ArrayPtr { elem_width: bw, count: bc })
-                if aw == bw =>
-            {
-                ArrayPtr { elem_width: aw, count: ac.max(bc) }
-            }
+            (
+                ArrayPtr {
+                    elem_width: aw,
+                    count: ac,
+                },
+                ArrayPtr {
+                    elem_width: bw,
+                    count: bc,
+                },
+            ) if aw == bw => ArrayPtr {
+                elem_width: aw,
+                count: ac.max(bc),
+            },
             (ArrayPtr { elem_width, count }, Ptr { pointee_width })
             | (Ptr { pointee_width }, ArrayPtr { elem_width, count })
                 if pointee_width == 0 || pointee_width == elem_width =>
@@ -156,12 +156,8 @@ impl RustType {
                 ArrayPtr { elem_width, count }
             }
             (ArrayPtr { elem_width, count }, IntN { width: 8 })
-            | (IntN { width: 8 }, ArrayPtr { elem_width, count }) => {
-                ArrayPtr { elem_width, count }
-            }
-            (Float { width: a }, Float { width: b }) => Float {
-                width: a.max(b),
-            },
+            | (IntN { width: 8 }, ArrayPtr { elem_width, count }) => ArrayPtr { elem_width, count },
+            (Float { width: a }, Float { width: b }) => Float { width: a.max(b) },
             // Same-width int + float observation prefers float (SSE move of
             // a 4/8-byte slot that also saw integer Copy still prints as float).
             (Float { width: fw }, IntN { width: iw })
@@ -473,12 +469,7 @@ impl TypeRecovery {
 pub fn infer_types(func: &SsaFunction) -> TypeMap {
     const MAX_ITER: usize = 8;
     let mut map = TypeMap::default();
-    let flag_offsets: BTreeSet<u64> = [
-        ghidrust_lift_flag_off(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let flag_offsets: BTreeSet<u64> = [ghidrust_lift_flag_off()].into_iter().flatten().collect();
 
     for _ in 0..MAX_ITER {
         let before = map.0.clone();
@@ -506,10 +497,7 @@ fn seed_op(op: &SsaOp, map: &mut TypeMap, flags: &BTreeSet<u64>) {
                 map.set(out.space, out.offset, RustType::Bool);
             }
         }
-        OpCode::IntEqual
-        | OpCode::IntNotEqual
-        | OpCode::IntLess
-        | OpCode::IntLessEqual => {
+        OpCode::IntEqual | OpCode::IntNotEqual | OpCode::IntLess | OpCode::IntLessEqual => {
             if let Some(out) = op.output {
                 map.set(out.space, out.offset, RustType::Bool);
             }
@@ -747,10 +735,7 @@ pub fn recover_structs(func: &SsaFunction, types: &mut TypeMap) -> BTreeMap<u32,
 /// by walking one hop through preceding `IntAdd`/`Ptradd` chains recorded
 /// as the operand's def. Falls back to `(operand_as_value, 0)` for the
 /// direct-load case (`*base`).
-fn decompose_addr(
-    addr: &SsaOperand,
-    func: &SsaFunction,
-) -> (Option<ghidrust_ssa::SsaValue>, u64) {
+fn decompose_addr(addr: &SsaOperand, func: &SsaFunction) -> (Option<ghidrust_ssa::SsaValue>, u64) {
     let SsaOperand::Value(v) = addr else {
         return (None, 0);
     };
@@ -830,7 +815,8 @@ pub fn recover_params(func: &SsaFunction, types: &TypeMap, conv: CallConv) -> Pa
     for op in &entry_block.ops {
         for inp in &op.inputs {
             if let Some(v) = inp.as_value() {
-                if v.space == AddrSpace::Register && v.version == 0 && !defined.contains(&v.offset) {
+                if v.space == AddrSpace::Register && v.version == 0 && !defined.contains(&v.offset)
+                {
                     live_in.insert((v.offset, v.size));
                 }
             }
@@ -863,12 +849,7 @@ pub fn recover_params(func: &SsaFunction, types: &TypeMap, conv: CallConv) -> Pa
             (8, "r8"),
             (9, "r9"),
         ],
-        CallConv::Windows => &[
-            (1, "rcx"),
-            (2, "rdx"),
-            (8, "r8"),
-            (9, "r9"),
-        ],
+        CallConv::Windows => &[(1, "rcx"), (2, "rdx"), (8, "r8"), (9, "r9")],
     };
     let mut params = Vec::new();
     for (index, &(reg_off, reg_name)) in order.iter().enumerate() {
@@ -1002,10 +983,7 @@ mod tests {
             RustType::Bool,
             "zf should be bool"
         );
-        assert_eq!(
-            rec.types.get(AddrSpace::Register, SF),
-            RustType::Bool
-        );
+        assert_eq!(rec.types.get(AddrSpace::Register, SF), RustType::Bool);
     }
 
     #[test]
@@ -1027,8 +1005,14 @@ mod tests {
         let bytes = [0x48, 0x89, 0xf8, 0x48, 0x01, 0xf0, 0xc3];
         let rec = recover_bytes(&bytes, 0x3000, CallConv::SystemV);
         let names: Vec<String> = rec.params.iter().map(|p| p.register.clone()).collect();
-        assert!(names.contains(&"rdi".to_string()), "rdi expected: {names:?}");
-        assert!(names.contains(&"rsi".to_string()), "rsi expected: {names:?}");
+        assert!(
+            names.contains(&"rdi".to_string()),
+            "rdi expected: {names:?}"
+        );
+        assert!(
+            names.contains(&"rsi".to_string()),
+            "rsi expected: {names:?}"
+        );
         assert_eq!(rec.params.0[0].name, "param_1");
     }
 
@@ -1100,21 +1084,18 @@ mod tests {
         assert_eq!(RustType::ptr(4).c_style(), "uint32_t*");
         assert_eq!(RustType::signed(4).c_style(), "int32_t");
         assert_eq!(RustType::Void.c_style(), "void");
-        assert_eq!(
-            RustType::struct_ptr(3).c_style(),
-            "struct s_3*"
-        );
-        assert_eq!(
-            RustType::array_ptr(4, 5).c_style(),
-            "uint32_t*/*[5]*/"
-        );
+        assert_eq!(RustType::struct_ptr(3).c_style(), "struct s_3*");
+        assert_eq!(RustType::array_ptr(4, 5).c_style(), "uint32_t*/*[5]*/");
     }
 
     #[test]
     fn signed_join_wins_against_same_width_unsigned() {
         let s = RustType::signed(4);
         let u = RustType::int(4);
-        assert!(matches!(s.clone().join(u), RustType::IntSigned { width: 4 }));
+        assert!(matches!(
+            s.clone().join(u),
+            RustType::IntSigned { width: 4 }
+        ));
     }
 
     #[test]
@@ -1141,7 +1122,10 @@ mod tests {
         let bytes = [0x48, 0x89, 0xf8, 0xc3];
         let rec = recover_bytes(&bytes, 0xa000, CallConv::SystemV);
         assert!(
-            matches!(rec.signature.return_type, RustType::IntN { .. } | RustType::Ptr { .. }),
+            matches!(
+                rec.signature.return_type,
+                RustType::IntN { .. } | RustType::Ptr { .. }
+            ),
             "expected typed return, got {:?}",
             rec.signature.return_type
         );
@@ -1192,11 +1176,7 @@ mod tests {
                 vec![t_base.clone(), Varnode::constant(0, 8)],
             ),
         );
-        seq.push_addressed(
-            0x2,
-            1,
-            PcodeOp::new(OpCode::Load, Some(t2), vec![t1]),
-        );
+        seq.push_addressed(0x2, 1, PcodeOp::new(OpCode::Load, Some(t2), vec![t1]));
         seq.push_addressed(
             0x3,
             1,
@@ -1206,11 +1186,7 @@ mod tests {
                 vec![t_base.clone(), Varnode::constant(8, 8)],
             ),
         );
-        seq.push_addressed(
-            0x4,
-            1,
-            PcodeOp::new(OpCode::Load, Some(t4), vec![t3]),
-        );
+        seq.push_addressed(0x4, 1, PcodeOp::new(OpCode::Load, Some(t4), vec![t3]));
         seq.push_addressed(0x5, 1, PcodeOp::new(OpCode::Return, None, vec![]));
         let cfg = build_cfg(&seq, 0x0, 0x6);
         let ssa = build_ssa(&cfg);
@@ -1221,8 +1197,16 @@ mod tests {
             rec.structs.len()
         );
         let s = rec.structs.values().next().unwrap();
-        assert!(s.fields.contains_key(&0), "field @ 0 missing: {:?}", s.fields);
-        assert!(s.fields.contains_key(&8), "field @ 8 missing: {:?}", s.fields);
+        assert!(
+            s.fields.contains_key(&0),
+            "field @ 0 missing: {:?}",
+            s.fields
+        );
+        assert!(
+            s.fields.contains_key(&8),
+            "field @ 8 missing: {:?}",
+            s.fields
+        );
     }
 
     #[test]
@@ -1265,9 +1249,11 @@ mod tests {
         let rec = recover(&ssa, CallConv::SystemV);
         // No struct seeded — should be array. Look for ArrayPtr in the
         // type map on the base register.
-        let arr_present = rec.types.0.values().any(|t| {
-            matches!(t, RustType::ArrayPtr { elem_width: 4, count } if *count >= 3)
-        });
+        let arr_present = rec
+            .types
+            .0
+            .values()
+            .any(|t| matches!(t, RustType::ArrayPtr { elem_width: 4, count } if *count >= 3));
         assert!(
             arr_present,
             "expected ArrayPtr in type map: {:?}",

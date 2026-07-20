@@ -162,7 +162,12 @@ impl Il2CppMetadata {
         }
         let dialect = MetadataDialect::from_version(version)?;
         let header = parse_header(data, version, dialect)?;
-        validate_table(data, header.string_offset, header.string_size, "string heap")?;
+        validate_table(
+            data,
+            header.string_offset,
+            header.string_size,
+            "string heap",
+        )?;
         validate_table(
             data,
             header.type_definitions_offset,
@@ -654,7 +659,10 @@ mod tests {
         let meta = Il2CppMetadata::parse(&bytes).expect("parse");
         assert_eq!(meta.header.version, 31);
         assert_eq!(meta.header.dialect, MetadataDialect::V31);
-        assert!(meta.types.iter().any(|t| t.full_name() == "UnityEngine.Camera"));
+        assert!(meta
+            .types
+            .iter()
+            .any(|t| t.full_name() == "UnityEngine.Camera"));
         assert!(meta
             .methods
             .iter()
@@ -678,6 +686,9 @@ mod tests {
         bytes[4..8].copy_from_slice(&106i32.to_le_bytes());
         // magic still valid but version unsupported
         let err = Il2CppMetadata::parse(&bytes).unwrap_err();
-        assert!(matches!(err, Error::UnsupportedVersion { version: 106, .. }));
+        assert!(matches!(
+            err,
+            Error::UnsupportedVersion { version: 106, .. }
+        ));
     }
 }

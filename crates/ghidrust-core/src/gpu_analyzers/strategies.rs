@@ -3,8 +3,8 @@
 use super::engine::{cpu_emulate_kernel, run_kernel, GpuPhaseTiming, KernelKind, MAX_HITS};
 use super::{flatten_exec, flatten_image, pad_large};
 use crate::program::{
-    CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo, MediaHit, Program,
-    ResourceInfo, SymbolInfo,
+    CallFixupInfo, DiscoveredRange, FidMatch, FunctionInfo, MediaHit, Program, ResourceInfo,
+    SymbolInfo,
 };
 use crate::rtti::RttiClass;
 use std::time::Instant;
@@ -385,13 +385,13 @@ pub fn merge_seeds_into_program(
             match name {
                 "Call-Fixup Installer" => prog.analysis.call_fixups.len(),
                 "PDB MSDIA" | "PDB Universal" => prog.analysis.pdb_symbols.len(),
-                "Non-Returning Functions - Discovered"
-                | "Variadic Function Signature Override" => prog
-                    .analysis
-                    .functions
-                    .iter()
-                    .filter(|f| f.noreturn || f.varargs)
-                    .count(),
+                "Non-Returning Functions - Discovered" | "Variadic Function Signature Override" => {
+                    prog.analysis
+                        .functions
+                        .iter()
+                        .filter(|f| f.noreturn || f.varargs)
+                        .count()
+                }
                 _ => prog.analysis.symbols.len(),
             }
         }
@@ -493,15 +493,8 @@ pub fn run_gpu_for_analyzer(
         all_hits.dedup();
         let primary = all_hits.len();
         let mut prog_m = prog.clone();
-        let merged = merge_seeds_into_program(
-            &mut prog_m,
-            name,
-            strategy,
-            &all_hits,
-            &[],
-            &map,
-            &hay,
-        );
+        let merged =
+            merge_seeds_into_program(&mut prog_m, name, strategy, &all_hits, &[], &map, &hay);
         return GpuAnalyzerRun {
             primary,
             merged_primary: merged,
@@ -517,15 +510,8 @@ pub fn run_gpu_for_analyzer(
     let kind = kernel_for(strategy);
     let r = run_kernel(&hay, kind, None, image_base, image_end);
     let mut prog_m = prog.clone();
-    let merged = merge_seeds_into_program(
-        &mut prog_m,
-        name,
-        strategy,
-        &r.hits,
-        &r.hit_aux,
-        &map,
-        &hay,
-    );
+    let merged =
+        merge_seeds_into_program(&mut prog_m, name, strategy, &r.hits, &r.hit_aux, &map, &hay);
     GpuAnalyzerRun {
         primary: r.total_hits,
         merged_primary: merged,

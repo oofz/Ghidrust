@@ -77,12 +77,8 @@ pub fn functions_from_runtime(rts: &[RuntimeFunction]) -> Vec<FunctionInfo> {
         // Chained fragments still have a real BeginAddress in .pdata; keep them
         // as seeds with authoritative ends (industry FSS / EH analyzer behavior).
         out.push(
-            FunctionInfo::new(
-                rf.begin_va,
-                rf.end_va,
-                format!("FUN_{:08x}", rf.begin_va),
-            )
-            .with_seed_kind(FunctionSeedKind::Pdata),
+            FunctionInfo::new(rf.begin_va, rf.end_va, format!("FUN_{:08x}", rf.begin_va))
+                .with_seed_kind(FunctionSeedKind::Pdata),
         );
     }
     out
@@ -430,7 +426,7 @@ mod tests {
         data[coff + 16..coff + 18].copy_from_slice(&0xF0u16.to_le_bytes()); // opt size
         let opt = coff + 20; // 0x98
         data[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes()); // PE32+
-        // AddressOfEntryPoint RVA
+                                                                     // AddressOfEntryPoint RVA
         data[opt + 16..opt + 20].copy_from_slice(&0x1000u32.to_le_bytes());
         // ImageBase
         data[opt + 24..opt + 32].copy_from_slice(&0x140000000u64.to_le_bytes());
@@ -443,8 +439,17 @@ mod tests {
         data[exc + 4..exc + 8].copy_from_slice(&12u32.to_le_bytes());
 
         let sec = opt + 0xF0; // section table
-        // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
-        write_sec(&mut data, sec, b".text\0\0\0", 0x1000, 0x1000, 0x200, 0x400, 0x6000_0020);
+                              // .text: VA 0x1000, vsize 0x1000, raw 0x200 @ 0x400
+        write_sec(
+            &mut data,
+            sec,
+            b".text\0\0\0",
+            0x1000,
+            0x1000,
+            0x200,
+            0x400,
+            0x6000_0020,
+        );
         // .pdata: VA 0x2000, vsize 0x1000, raw 0x200 @ 0x600
         write_sec(
             &mut data,
@@ -515,7 +520,7 @@ mod tests {
         // flags: version=1 (low 3) + CHAININFO (bit of flags << 3) → 0x01 | (0x4 << 3) = 0x21
         bytes[0x60C] = 0x21;
         bytes[0x60E] = 0x00; // no codes
-        // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
+                             // embedded RUNTIME_FUNCTION at 0x610: begin=0 → must not become a seed
         bytes[0x610..0x614].copy_from_slice(&0u32.to_le_bytes());
         bytes[0x614..0x618].copy_from_slice(&0x1008u32.to_le_bytes());
         bytes[0x618..0x61C].copy_from_slice(&0x200Cu32.to_le_bytes());
@@ -583,11 +588,14 @@ mod tests {
         });
         // Truncated end (prologue-only style).
         prog.analysis.functions.push(
-            FunctionInfo::new(0x1000, 0x1011, "FUN_1000")
-                .with_seed_kind(FunctionSeedKind::Manual),
+            FunctionInfo::new(0x1000, 0x1011, "FUN_1000").with_seed_kind(FunctionSeedKind::Manual),
         );
         let f = create_function(&mut prog, 0x1000, None);
-        assert!(f.end > 0x1011, "expected re-grow past truncated end, got {:#x}", f.end);
+        assert!(
+            f.end > 0x1011,
+            "expected re-grow past truncated end, got {:#x}",
+            f.end
+        );
         assert_eq!(prog.function_at(0x1000).unwrap().end, f.end);
     }
 }

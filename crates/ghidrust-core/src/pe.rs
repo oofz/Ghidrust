@@ -120,5 +120,3 @@ pub fn load_pe(data: &[u8], name: impl Into<String>) -> Result<Program> {
 
     Ok(prog)
 }
-
-

@@ -190,7 +190,15 @@ fn read_icall_name(prog: &Program, va: u64) -> Option<String> {
     }
     let s = std::str::from_utf8(&bytes[..end]).ok()?;
     if !s.chars().all(|c| {
-        c.is_ascii_graphic() || c == ' ' || c == ':' || c == '_' || c == '.' || c == '&' || c == '(' || c == ')' || c == ','
+        c.is_ascii_graphic()
+            || c == ' '
+            || c == ':'
+            || c == '_'
+            || c == '.'
+            || c == '&'
+            || c == '('
+            || c == ')'
+            || c == ','
     }) {
         return None;
     }

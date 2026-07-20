@@ -330,11 +330,13 @@ pub fn ui_il2cpp_methods(
         .show_rows(ui, row_h, rows.len(), |ui, range| {
             for i in range {
                 let e = rows[i];
-                let va = e
-                    .va
-                    .map(|v| format!("{v:#x}"))
-                    .unwrap_or_else(|| "unresolved".into());
-                ui.monospace(format!("idx={} tok={:#x} va={va}  {}", e.method_index, e.token, e.full_name));
+                let va =
+                    e.va.map(|v| format!("{v:#x}"))
+                        .unwrap_or_else(|| "unresolved".into());
+                ui.monospace(format!(
+                    "idx={} tok={:#x} va={va}  {}",
+                    e.method_index, e.token, e.full_name
+                ));
             }
         });
 }
@@ -451,21 +453,20 @@ pub fn ui_il2cpp_icalls(
         .show_rows(ui, row_h, hits.len(), |ui, range| {
             for i in range {
                 let (ti, e) = &hits[i];
-                ui.monospace(format!(
-                    "[table {ti}] fn={:#x}  {}",
-                    e.fn_va, e.name
-                ));
+                ui.monospace(format!("[table {ti}] fn={:#x}  {}", e.fn_va, e.name));
             }
         });
     if !report.tables.is_empty() {
-        egui::CollapsingHeader::new("Tables").default_open(false).show(ui, |ui| {
-            for (i, t) in report.tables.iter().enumerate() {
-                ui.monospace(format!(
-                    "[{i}] name_va={:#x} fn_va={:#x} count={} layout={:?} confidence={:.2}",
-                    t.name_va, t.fn_va, t.count, t.layout, t.confidence
-                ));
-            }
-        });
+        egui::CollapsingHeader::new("Tables")
+            .default_open(false)
+            .show(ui, |ui| {
+                for (i, t) in report.tables.iter().enumerate() {
+                    ui.monospace(format!(
+                        "[{i}] name_va={:#x} fn_va={:#x} count={} layout={:?} confidence={:.2}",
+                        t.name_va, t.fn_va, t.count, t.layout, t.confidence
+                    ));
+                }
+            });
     }
 }
 
@@ -653,7 +654,10 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
                 .hint_text("folder to browse…"),
         );
         if ui.button("Browse…").clicked() {
-            if let Some(p) = rfd::FileDialog::new().set_title("Select folder").pick_folder() {
+            if let Some(p) = rfd::FileDialog::new()
+                .set_title("Select folder")
+                .pick_folder()
+            {
                 s.root_input = p.display().to_string();
             }
         }
@@ -685,7 +689,11 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
                     .map(|e| e.trim().to_string())
                     .filter(|e| !e.is_empty())
                     .collect();
-                if list.is_empty() { None } else { Some(list) }
+                if list.is_empty() {
+                    None
+                } else {
+                    Some(list)
+                }
             };
             let name_glob = if s.name_glob_input.trim().is_empty() {
                 None
@@ -746,10 +754,7 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
             for i in range {
                 let e = rows[i];
                 let kind = if e.is_dir { "DIR " } else { "FILE" };
-                let size = e
-                    .size
-                    .map(|n| format!("{n}"))
-                    .unwrap_or_else(|| "-".into());
+                let size = e.size.map(|n| format!("{n}")).unwrap_or_else(|| "-".into());
                 let err = e
                     .error
                     .as_deref()
@@ -789,10 +794,8 @@ impl Default for AnalysisArtifactsState {
 pub fn ui_analysis_artifacts(ui: &mut Ui, s: &mut AnalysisArtifactsState, muted: Color32) {
     ui.heading("Analysis Artifacts");
     ui.small(
-        RichText::new(
-            "ghidrust-core::artifacts · spilled MCP/CLI result catalog + paged preview",
-        )
-        .color(muted),
+        RichText::new("ghidrust-core::artifacts · spilled MCP/CLI result catalog + paged preview")
+            .color(muted),
     );
     ui.separator();
     if !s.loaded_once {
@@ -852,15 +855,21 @@ pub fn ui_analysis_artifacts(ui: &mut Ui, s: &mut AnalysisArtifactsState, muted:
         ));
         let can_prev = s.offset >= s.limit;
         let next_offset = env.next_offset;
-        let mut pretty = serde_json::to_string_pretty(&env.preview)
-            .unwrap_or_else(|_| "<unprintable>".into());
+        let mut pretty =
+            serde_json::to_string_pretty(&env.preview).unwrap_or_else(|_| "<unprintable>".into());
         let mut go_prev = false;
         let mut go_next = false;
         cols[1].horizontal(|ui| {
-            if ui.add_enabled(can_prev, egui::Button::new("← Prev page")).clicked() {
+            if ui
+                .add_enabled(can_prev, egui::Button::new("← Prev page"))
+                .clicked()
+            {
                 go_prev = true;
             }
-            if ui.add_enabled(next_offset.is_some(), egui::Button::new("Next page →")).clicked() {
+            if ui
+                .add_enabled(next_offset.is_some(), egui::Button::new("Next page →"))
+                .clicked()
+            {
                 go_next = true;
             }
         });
@@ -944,7 +953,11 @@ pub struct GpuDecompileSummary {
 /// Render the GPU Decompile dialog body (window chrome + the resolve/decompile
 /// call itself are owned by the caller in `main.rs`, since both need a mutable
 /// borrow of the live `Program` that this module does not hold).
-pub fn ui_gpu_decompile_dialog_header(ui: &mut Ui, s: &mut GpuDecompileDialogState, muted: Color32) {
+pub fn ui_gpu_decompile_dialog_header(
+    ui: &mut Ui,
+    s: &mut GpuDecompileDialogState,
+    muted: Color32,
+) {
     ui.small(
         RichText::new(
             "ghidrust_decomp::gpu_decompile_to_file · GPU pipeline with automatic CPU multipass fallback",

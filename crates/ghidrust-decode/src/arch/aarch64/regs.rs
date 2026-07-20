@@ -3,42 +3,42 @@ use crate::support::Arch;
 
 pub fn x(n: u32) -> String {
     if n == 31 {
- "xzr".into()
+        "xzr".into()
     } else {
- format!("x{n}")
+        format!("x{n}")
     }
 }
 
 pub fn w(n: u32) -> String {
     if n == 31 {
- "wzr".into()
+        "wzr".into()
     } else {
- format!("w{n}")
+        format!("w{n}")
     }
 }
 
 pub fn sp() -> &'static str {
- "sp"
+    "sp"
 }
 
 pub fn b(n: u32) -> String {
- format!("b{n}")
+    format!("b{n}")
 }
 
 pub fn h(n: u32) -> String {
- format!("h{n}")
+    format!("h{n}")
 }
 
 pub fn s(n: u32) -> String {
- format!("s{n}")
+    format!("s{n}")
 }
 
 pub fn d(n: u32) -> String {
- format!("d{n}")
+    format!("d{n}")
 }
 
 pub fn v(n: u32) -> String {
- format!("v{n}")
+    format!("v{n}")
 }
 
 pub fn reg_id(n: u32) -> RegId {

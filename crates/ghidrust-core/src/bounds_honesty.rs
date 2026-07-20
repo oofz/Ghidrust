@@ -42,7 +42,10 @@ impl BoundsHonesty {
             serde_json::Value::Bool(self.bounds_suspect),
         );
         if let Some(w) = &self.bounds_warning {
-            m.insert("bounds_warning".into(), serde_json::Value::String(w.clone()));
+            m.insert(
+                "bounds_warning".into(),
+                serde_json::Value::String(w.clone()),
+            );
         }
         if let Some(e) = self.suggested_end {
             m.insert(
@@ -84,9 +87,8 @@ pub fn assess_bounds_honesty(
     let short_insn_stop = insn_count < SHORT_INSN_COUNT
         && stop_reason == DisasmStopReason::FunctionEnd
         && grow_extends;
-    let no_clean_terminator = grow_extends
-        && span < SHORT_SPAN_BYTES
-        && !ends_at_ret_or_int3_pad(prog, stored_end);
+    let no_clean_terminator =
+        grow_extends && span < SHORT_SPAN_BYTES && !ends_at_ret_or_int3_pad(prog, stored_end);
 
     if !(short_span_stop || short_insn_stop || no_clean_terminator) {
         return BoundsHonesty::ok();

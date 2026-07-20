@@ -335,11 +335,7 @@ pub fn encode_key(key: egui::Key, modifiers: egui::Modifiers) -> Option<Vec<u8>>
     // Alt+letter → ESC + char (Grok Windows image paste: Alt+V)
     if alt && !ctrl {
         if let Some(c) = key_to_char(key) {
-            let ch = if shift {
-                c.to_ascii_uppercase()
-            } else {
-                c
-            };
+            let ch = if shift { c.to_ascii_uppercase() } else { c };
             return Some(vec![0x1b, ch as u8]);
         }
     }

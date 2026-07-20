@@ -178,7 +178,10 @@ fn parse_imm(s: &str) -> Option<u64> {
 }
 
 fn split_operands(ops: &str) -> Vec<&str> {
-    ops.split(',').map(str::trim).filter(|s| !s.is_empty()).collect()
+    ops.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Parsed memory operand. `[seg:]base+index*scale±disp` — supports SIB.
@@ -425,7 +428,11 @@ fn jcc_condition(mnem: &str, unique_id: &mut u64) -> (Vec<PcodeOp>, Varnode) {
         "ja" => {
             let mid = Varnode::unique(*unique_id, 1);
             *unique_id += 1;
-            ops.push(PcodeOp::new(OpCode::BoolOr, Some(mid.clone()), vec![cf(), zf()]));
+            ops.push(PcodeOp::new(
+                OpCode::BoolOr,
+                Some(mid.clone()),
+                vec![cf(), zf()],
+            ));
             ops.push(
                 PcodeOp::new(OpCode::BoolNegate, Some(out.clone()), vec![mid]).with_note(mnem),
             );
@@ -460,7 +467,11 @@ fn jcc_condition(mnem: &str, unique_id: &mut u64) -> (Vec<PcodeOp>, Varnode) {
             // we introduce more flag algebra.
             let sfof = Varnode::unique(*unique_id, 1);
             *unique_id += 1;
-            ops.push(PcodeOp::new(OpCode::IntNotEqual, Some(sfof.clone()), vec![sf(), of()]));
+            ops.push(PcodeOp::new(
+                OpCode::IntNotEqual,
+                Some(sfof.clone()),
+                vec![sf(), of()],
+            ));
             match mnem {
                 "jl" => {
                     ops.push(
@@ -482,7 +493,11 @@ fn jcc_condition(mnem: &str, unique_id: &mut u64) -> (Vec<PcodeOp>, Varnode) {
                 "jg" => {
                     let m = Varnode::unique(*unique_id, 1);
                     *unique_id += 1;
-                    ops.push(PcodeOp::new(OpCode::BoolOr, Some(m.clone()), vec![sfof, zf()]));
+                    ops.push(PcodeOp::new(
+                        OpCode::BoolOr,
+                        Some(m.clone()),
+                        vec![sfof, zf()],
+                    ));
                     ops.push(
                         PcodeOp::new(OpCode::BoolNegate, Some(out.clone()), vec![m])
                             .with_note(mnem),
@@ -515,7 +530,12 @@ impl LiftCtx {
     }
 }
 
-fn mem_address_ops(ctx: &mut LiftCtx, mem: &MemOperand, insn_addr: u64, insn_len: u8) -> (Vec<PcodeOp>, Varnode) {
+fn mem_address_ops(
+    ctx: &mut LiftCtx,
+    mem: &MemOperand,
+    insn_addr: u64,
+    insn_len: u8,
+) -> (Vec<PcodeOp>, Varnode) {
     let mut ops = Vec::new();
     let addr_size = 8u32;
     if mem.rip_relative {
@@ -568,12 +588,21 @@ fn mem_address_ops(ctx: &mut LiftCtx, mem: &MemOperand, insn_addr: u64, insn_len
     ops.push(PcodeOp::new(
         OpCode::IntAdd,
         Some(out.clone()),
-        vec![running, Varnode::constant(mem.displacement as u64, addr_size)],
+        vec![
+            running,
+            Varnode::constant(mem.displacement as u64, addr_size),
+        ],
     ));
     (ops, out)
 }
 
-fn load_from(ctx: &mut LiftCtx, mem: &MemOperand, size: u32, insn_addr: u64, insn_len: u8) -> (Vec<PcodeOp>, Varnode) {
+fn load_from(
+    ctx: &mut LiftCtx,
+    mem: &MemOperand,
+    size: u32,
+    insn_addr: u64,
+    insn_len: u8,
+) -> (Vec<PcodeOp>, Varnode) {
     let (mut ops, addr) = mem_address_ops(ctx, mem, insn_addr, insn_len);
     let out = ctx.take_unique(size);
     ops.push(PcodeOp::new(OpCode::Load, Some(out.clone()), vec![addr]));
@@ -598,13 +627,15 @@ fn lift_arith_flags(dst: Varnode, opcode: OpCode) -> Vec<PcodeOp> {
     let width = dst.size;
     let zero = Varnode::constant(0, width);
     let mut out = Vec::new();
-    out.push(PcodeOp::new(OpCode::IntEqual, Some(zf()), vec![dst.clone(), zero]).with_note(
-        match opcode {
-            OpCode::IntSub => "cmp/sub sets zf",
-            OpCode::IntAnd => "test/and sets zf",
-            _ => "arith sets zf",
-        },
-    ));
+    out.push(
+        PcodeOp::new(OpCode::IntEqual, Some(zf()), vec![dst.clone(), zero]).with_note(
+            match opcode {
+                OpCode::IntSub => "cmp/sub sets zf",
+                OpCode::IntAnd => "test/and sets zf",
+                _ => "arith sets zf",
+            },
+        ),
+    );
     // sf = signed-less-than(dst, 0)
     out.push(PcodeOp::new(
         OpCode::IntSLess,
@@ -647,8 +678,7 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
             let width = if mnem == "cqo" { 8 } else { 4 };
             let rax = X86Reg::Rax.as_varnode(width);
             let rdx = X86Reg::Rdx.as_varnode(width);
-            return vec![PcodeOp::new(OpCode::IntSExt, Some(rdx), vec![rax])
-                .with_note(mnem)];
+            return vec![PcodeOp::new(OpCode::IntSExt, Some(rdx), vec![rax]).with_note(mnem)];
         }
         "cwde" | "cdqe" | "cbw" => {
             let (src_w, dst_w) = match mnem {
@@ -659,8 +689,7 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
             };
             let src = X86Reg::Rax.as_varnode(src_w);
             let dst = X86Reg::Rax.as_varnode(dst_w);
-            return vec![PcodeOp::new(OpCode::IntSExt, Some(dst), vec![src])
-                .with_note(mnem)];
+            return vec![PcodeOp::new(OpCode::IntSExt, Some(dst), vec![src]).with_note(mnem)];
         }
         "bswap" => {
             if let Some(first) = parts.first() {
@@ -669,29 +698,22 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                     // Model as opaque "byte-swap"; kept as an IntXor-with-self
                     // marker so we don't fabricate arithmetic. Downstream
                     // Stage-1 emit will print a `bswap(x)` builtin call.
-                    return vec![PcodeOp::new(
-                        OpCode::Cast,
-                        Some(vn.clone()),
-                        vec![vn],
-                    )
-                    .with_note(format!("bswap {first}"))];
+                    return vec![PcodeOp::new(OpCode::Cast, Some(vn.clone()), vec![vn])
+                        .with_note(format!("bswap {first}"))];
                 }
             }
         }
         "pushfq" => {
             // Push RFLAGS (8 bytes). We don't model individual flag bit
             // packing — the SSA reads of ZF/CF/… stay untouched.
-            return vec![PcodeOp::new(OpCode::Push, None, vec![])
-                .with_note("pushfq")];
+            return vec![PcodeOp::new(OpCode::Push, None, vec![]).with_note("pushfq")];
         }
         "popfq" => {
-            return vec![PcodeOp::new(OpCode::Pop, None, vec![])
-                .with_note("popfq")];
+            return vec![PcodeOp::new(OpCode::Pop, None, vec![]).with_note("popfq")];
         }
         "syscall" => {
             // Modeled as an indirect call for now (result in rax after).
-            return vec![PcodeOp::new(OpCode::CallInd, None, vec![])
-                .with_note("syscall")];
+            return vec![PcodeOp::new(OpCode::CallInd, None, vec![]).with_note("syscall")];
         }
         "cpuid" => {
             // Reads eax/ecx, writes eax/ebx/ecx/edx. Represent as a Trap-
@@ -710,20 +732,14 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
         "push" => {
             if let Some(first) = parts.first() {
                 if let Some((reg, size)) = parse_reg(first) {
-                    return vec![PcodeOp::new(
-                        OpCode::Push,
-                        None,
-                        vec![reg.as_varnode(size)],
-                    )
-                    .with_note(format!("push {}", insn.operands))];
+                    return vec![PcodeOp::new(OpCode::Push, None, vec![reg.as_varnode(size)])
+                        .with_note(format!("push {}", insn.operands))];
                 }
                 if let Some(imm) = parse_imm(first) {
-                    return vec![PcodeOp::new(
-                        OpCode::Push,
-                        None,
-                        vec![Varnode::constant(imm, 8)],
-                    )
-                    .with_note(format!("push {}", insn.operands))];
+                    return vec![
+                        PcodeOp::new(OpCode::Push, None, vec![Varnode::constant(imm, 8)])
+                            .with_note(format!("push {}", insn.operands)),
+                    ];
                 }
                 if let Some(mem) = parse_mem(first) {
                     let (mut ops, val) = load_from(ctx, &mem, mem.size, addr, len);
@@ -738,12 +754,10 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
         "pop" => {
             if let Some(first) = parts.first() {
                 if let Some((reg, size)) = parse_reg(first) {
-                    return vec![PcodeOp::new(
-                        OpCode::Pop,
-                        Some(reg.as_varnode(size)),
-                        vec![],
-                    )
-                    .with_note(format!("pop {}", insn.operands))];
+                    return vec![
+                        PcodeOp::new(OpCode::Pop, Some(reg.as_varnode(size)), vec![])
+                            .with_note(format!("pop {}", insn.operands)),
+                    ];
                 }
                 if let Some(mem) = parse_mem(first) {
                     let tmp = ctx.take_unique(mem.size);
@@ -794,13 +808,28 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                 "xor" => OpCode::IntXor,
                 _ => unreachable!(),
             };
-            if let Some(ops) = lift_binop(ctx, opcode, parts[0], parts[1], addr, len, &insn.operands) {
+            if let Some(ops) =
+                lift_binop(ctx, opcode, parts[0], parts[1], addr, len, &insn.operands)
+            {
                 return ops;
             }
         }
         "cmp" | "test" if parts.len() == 2 => {
-            let opcode = if mnem == "cmp" { OpCode::IntSub } else { OpCode::IntAnd };
-            if let Some(ops) = lift_cmp_like(ctx, opcode, parts[0], parts[1], addr, len, mnem, &insn.operands) {
+            let opcode = if mnem == "cmp" {
+                OpCode::IntSub
+            } else {
+                OpCode::IntAnd
+            };
+            if let Some(ops) = lift_cmp_like(
+                ctx,
+                opcode,
+                parts[0],
+                parts[1],
+                addr,
+                len,
+                mnem,
+                &insn.operands,
+            ) {
                 return ops;
             }
         }
@@ -808,13 +837,15 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
             if let Some((reg, size)) = parse_reg(parts[0]) {
                 let dst = reg.as_varnode(size);
                 let one = Varnode::constant(1, size);
-                let opcode = if mnem == "inc" { OpCode::IntAdd } else { OpCode::IntSub };
-                let mut ops = vec![PcodeOp::new(
-                    opcode,
-                    Some(dst.clone()),
-                    vec![dst.clone(), one],
-                )
-                .with_note(format!("{} {}", mnem, insn.operands))];
+                let opcode = if mnem == "inc" {
+                    OpCode::IntAdd
+                } else {
+                    OpCode::IntSub
+                };
+                let mut ops = vec![
+                    PcodeOp::new(opcode, Some(dst.clone()), vec![dst.clone(), one])
+                        .with_note(format!("{} {}", mnem, insn.operands)),
+                ];
                 ops.extend(lift_arith_flags(dst, opcode));
                 return ops;
             }
@@ -834,10 +865,8 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
         "not" if parts.len() == 1 => {
             if let Some((reg, size)) = parse_reg(parts[0]) {
                 let dst = reg.as_varnode(size);
-                return vec![
-                    PcodeOp::new(OpCode::IntNot, Some(dst.clone()), vec![dst])
-                        .with_note(format!("not {}", insn.operands)),
-                ];
+                return vec![PcodeOp::new(OpCode::IntNot, Some(dst.clone()), vec![dst])
+                    .with_note(format!("not {}", insn.operands))];
             }
         }
         "shl" | "shr" | "sar" if parts.len() == 2 => {
@@ -857,11 +886,12 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                 let sz = dsz.min(ssz);
                 let dst_vn = dst.as_varnode(sz);
                 let src_vn = src.as_varnode(sz);
-                let mut ops =
-                    vec![
-                        PcodeOp::new(OpCode::IntMult, Some(dst_vn.clone()), vec![dst_vn.clone(), src_vn])
-                            .with_note(format!("{} {}", mnem, insn.operands)),
-                    ];
+                let mut ops = vec![PcodeOp::new(
+                    OpCode::IntMult,
+                    Some(dst_vn.clone()),
+                    vec![dst_vn.clone(), src_vn],
+                )
+                .with_note(format!("{} {}", mnem, insn.operands))];
                 ops.extend(lift_arith_flags(dst_vn, OpCode::IntMult));
                 return ops;
             }
@@ -935,7 +965,10 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
             } else if let Some(mem) = parse_mem(parts[0]) {
                 load_from(ctx, &mem, mem.size, addr, len)
             } else {
-                return vec![PcodeOp::unimplemented(format!("{} {}", mnem, insn.operands))];
+                return vec![PcodeOp::unimplemented(format!(
+                    "{} {}",
+                    mnem, insn.operands
+                ))];
             };
             let mut ops = rhs_ops;
             ops.push(
@@ -1058,8 +1091,7 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                         .with_note("xchg tmp"),
                     PcodeOp::new(OpCode::Copy, Some(a_vn), vec![b_vn.clone()])
                         .with_note(format!("xchg {}", insn.operands)),
-                    PcodeOp::new(OpCode::Copy, Some(b_vn), vec![tmp])
-                        .with_note("xchg tmp"),
+                    PcodeOp::new(OpCode::Copy, Some(b_vn), vec![tmp]).with_note("xchg tmp"),
                 ];
             }
         }
@@ -1074,12 +1106,10 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                     .with_note(format!("call {target:#x}"))];
                 }
                 if let Some((reg, size)) = parse_reg(first) {
-                    return vec![PcodeOp::new(
-                        OpCode::CallInd,
-                        None,
-                        vec![reg.as_varnode(size)],
-                    )
-                    .with_note(format!("call {}", insn.operands))];
+                    return vec![
+                        PcodeOp::new(OpCode::CallInd, None, vec![reg.as_varnode(size)])
+                            .with_note(format!("call {}", insn.operands)),
+                    ];
                 }
                 if let Some(mem) = parse_mem(first) {
                     let (mut ops, tgt) = load_from(ctx, &mem, mem.size, addr, len);
@@ -1102,12 +1132,10 @@ fn lift_with_ctx(ctx: &mut LiftCtx, insn: &Instruction) -> Vec<PcodeOp> {
                     .with_note(format!("jmp {target:#x}"))];
                 }
                 if let Some((reg, size)) = parse_reg(first) {
-                    return vec![PcodeOp::new(
-                        OpCode::BranchInd,
-                        None,
-                        vec![reg.as_varnode(size)],
-                    )
-                    .with_note(format!("jmp {}", insn.operands))];
+                    return vec![
+                        PcodeOp::new(OpCode::BranchInd, None, vec![reg.as_varnode(size)])
+                            .with_note(format!("jmp {}", insn.operands)),
+                    ];
                 }
                 if let Some(mem) = parse_mem(first) {
                     let (mut ops, tgt) = load_from(ctx, &mem, mem.size, addr, len);
@@ -1190,13 +1218,17 @@ fn lift_xmm_move(
     if is_xmm_name(dst) && is_xmm_name(src) {
         let d = xmm_slot(ctx, dst);
         let s = xmm_slot(ctx, src);
-        return vec![PcodeOp::new(OpCode::Copy, Some(d), vec![s]).with_note(format!("{mnem} {raw}"))];
+        return vec![
+            PcodeOp::new(OpCode::Copy, Some(d), vec![s]).with_note(format!("{mnem} {raw}"))
+        ];
     }
     if is_xmm_name(dst) {
         if let Some(mem) = parse_mem(src) {
             let (mut ops, val) = load_from(ctx, &mem, 16, addr, len);
             let d = xmm_slot(ctx, dst);
-            ops.push(PcodeOp::new(OpCode::Copy, Some(d), vec![val]).with_note(format!("{mnem} {raw}")));
+            ops.push(
+                PcodeOp::new(OpCode::Copy, Some(d), vec![val]).with_note(format!("{mnem} {raw}")),
+            );
             return ops;
         }
     }
@@ -1212,22 +1244,14 @@ fn lift_xmm_move(
     vec![PcodeOp::unimplemented(format!("{mnem} {raw}"))]
 }
 
-fn lift_xmm_xor(
-    ctx: &mut LiftCtx,
-    dst: &str,
-    src: &str,
-    mnem: &str,
-    raw: &str,
-) -> Vec<PcodeOp> {
+fn lift_xmm_xor(ctx: &mut LiftCtx, dst: &str, src: &str, mnem: &str, raw: &str) -> Vec<PcodeOp> {
     if is_xmm_name(dst) && dst.trim() == src.trim() {
         // xorps/pxor same reg → zero
         let d = xmm_slot(ctx, dst);
-        return vec![PcodeOp::new(
-            OpCode::Copy,
-            Some(d),
-            vec![Varnode::constant(0, 16)],
-        )
-        .with_note(format!("{mnem} {raw} ; zero"))];
+        return vec![
+            PcodeOp::new(OpCode::Copy, Some(d), vec![Varnode::constant(0, 16)])
+                .with_note(format!("{mnem} {raw} ; zero")),
+        ];
     }
     if is_xmm_name(dst) && is_xmm_name(src) {
         let d = xmm_slot(ctx, dst);
@@ -1298,23 +1322,23 @@ fn lift_binop(
     if let (Some((d, dsz)), Some((s, ssz))) = (parse_reg(dst), parse_reg(src)) {
         let sz = dsz.min(ssz);
         let dvn = d.as_varnode(sz);
-        let mut ops = vec![
-            PcodeOp::new(opcode, Some(dvn.clone()), vec![dvn.clone(), s.as_varnode(sz)])
-                .with_note(format!("{raw}")),
-        ];
+        let mut ops = vec![PcodeOp::new(
+            opcode,
+            Some(dvn.clone()),
+            vec![dvn.clone(), s.as_varnode(sz)],
+        )
+        .with_note(format!("{raw}"))];
         ops.extend(lift_arith_flags(dvn, opcode));
         return Some(ops);
     }
     if let (Some((d, dsz)), Some(imm)) = (parse_reg(dst), parse_imm(src)) {
         let dvn = d.as_varnode(dsz);
-        let mut ops = vec![
-            PcodeOp::new(
-                opcode,
-                Some(dvn.clone()),
-                vec![dvn.clone(), Varnode::constant(imm, dsz)],
-            )
-            .with_note(format!("{raw}")),
-        ];
+        let mut ops = vec![PcodeOp::new(
+            opcode,
+            Some(dvn.clone()),
+            vec![dvn.clone(), Varnode::constant(imm, dsz)],
+        )
+        .with_note(format!("{raw}"))];
         ops.extend(lift_arith_flags(dvn, opcode));
         return Some(ops);
     }
@@ -1409,12 +1433,10 @@ fn lift_shift(
         // Shift count is CL (byte).
         let count = s.as_varnode(1);
         let dvn = d.as_varnode(dsz);
-        let mut ops = vec![PcodeOp::new(
-            opcode,
-            Some(dvn.clone()),
-            vec![dvn.clone(), count],
-        )
-        .with_note(format!("{mnem} {raw}"))];
+        let mut ops = vec![
+            PcodeOp::new(opcode, Some(dvn.clone()), vec![dvn.clone(), count])
+                .with_note(format!("{mnem} {raw}")),
+        ];
         ops.extend(lift_arith_flags(dvn, opcode));
         // ctx used to keep signature parity when we later thread mem operands here.
         let _ = ctx;
@@ -1484,7 +1506,10 @@ mod tests {
         assert_eq!(seq.ops[0].opcode, OpCode::Push);
         assert_eq!(seq.ops[0].inputs[0].offset, X86Reg::Rbp as u64);
         assert_eq!(seq.ops[1].opcode, OpCode::Copy);
-        assert_eq!(seq.ops[1].output.as_ref().unwrap().offset, X86Reg::Rbp as u64);
+        assert_eq!(
+            seq.ops[1].output.as_ref().unwrap().offset,
+            X86Reg::Rbp as u64
+        );
         assert_eq!(seq.ops[1].inputs[0].offset, X86Reg::Rsp as u64);
         assert_eq!(seq.ops[2].opcode, OpCode::Return);
         assert_eq!(seq.addressed[0].address, 0x1000);
@@ -1716,10 +1741,20 @@ mod tests {
         let copy = seq
             .ops
             .iter()
-            .find(|o| o.opcode == OpCode::Copy && o.output.as_ref().map(|v| v.offset) == Some(X86Reg::Rax as u64))
+            .find(|o| {
+                o.opcode == OpCode::Copy
+                    && o.output.as_ref().map(|v| v.offset) == Some(X86Reg::Rax as u64)
+            })
             .expect("lea dst copy");
-        assert!(matches!(copy.inputs[0].space, AddrSpace::Unique | AddrSpace::Register));
-        let add = seq.ops.iter().find(|o| o.opcode == OpCode::IntAdd).expect("lea builds add");
+        assert!(matches!(
+            copy.inputs[0].space,
+            AddrSpace::Unique | AddrSpace::Register
+        ));
+        let add = seq
+            .ops
+            .iter()
+            .find(|o| o.opcode == OpCode::IntAdd)
+            .expect("lea builds add");
         assert_eq!(add.inputs[0].offset, X86Reg::Rbp as u64);
     }
 
@@ -1795,6 +1830,10 @@ mod tests {
         let src_len = insns.len();
         let seq = lift_instructions(&insns);
         let cov = coverage(&seq, src_len);
-        assert!(cov.ratio() > 0.99, "expected full lift, got {}", cov.ratio());
+        assert!(
+            cov.ratio() > 0.99,
+            "expected full lift, got {}",
+            cov.ratio()
+        );
     }
 }

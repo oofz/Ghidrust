@@ -133,7 +133,9 @@ impl<'a> SystemPromptBuilder<'a> {
         let mut out = String::with_capacity(self.skill_md.len() + 1024);
         out.push_str("You are Ghidrust's in-GUI reverse-engineering copilot.\n");
         out.push_str("The user is running Ghidrust (Rust RE toolkit) with a project open.\n");
-        out.push_str("You have MCP access to every shipped Ghidrust tool via the `ghidrust` server.\n\n");
+        out.push_str(
+            "You have MCP access to every shipped Ghidrust tool via the `ghidrust` server.\n\n",
+        );
 
         out.push_str("## Non-negotiable rules\n\n");
         out.push_str("- Never invent analysis. If a binary hasn't been loaded, say so — do not fabricate addresses, symbols, or decompile output.\n");
@@ -153,8 +155,7 @@ impl<'a> SystemPromptBuilder<'a> {
         if let Some(f) = self.facts {
             out.push_str("## Live program facts (from Ghidrust GUI state)\n\n");
             out.push_str("```json\n");
-            let json =
-                serde_json::to_string_pretty(f).unwrap_or_else(|_| "{}".to_string());
+            let json = serde_json::to_string_pretty(f).unwrap_or_else(|_| "{}".to_string());
             out.push_str(&json);
             out.push_str("\n```\n\n");
         }

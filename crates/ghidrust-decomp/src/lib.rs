@@ -22,8 +22,8 @@ pub mod emit_hints;
 pub mod emit_tokens;
 pub mod expr_fold;
 pub mod ghidra_oracle;
-pub mod gpu_decompile;
 pub mod goto_histogram;
+pub mod gpu_decompile;
 pub mod ir_emit;
 pub mod stage1;
 
@@ -77,9 +77,7 @@ pub fn structure_hints_from(prog: &Program) -> StructureHints {
 /// Meant to be called from the GUI's `Decompiler → Commit Params/Return`
 /// action so the recovered types round-trip into user edits without the
 /// GUI having to know the Ghidrust type lattice.
-pub fn stage1_commit_strings(
-    stage1: &Stage1Result,
-) -> (String, Vec<String>, Vec<String>) {
+pub fn stage1_commit_strings(stage1: &Stage1Result) -> (String, Vec<String>, Vec<String>) {
     let ret = stage1.types.signature.return_type.c_style();
     let params: Vec<String> = stage1
         .types
@@ -189,7 +187,11 @@ pub fn decompile_instructions(
 }
 
 /// Load-independent entry: decode `max_insns` from `va` then decompile.
-pub fn decompile_at(prog: &Program, va: u64, max_insns: usize) -> ghidrust_core::Result<DecompileResult> {
+pub fn decompile_at(
+    prog: &Program,
+    va: u64,
+    max_insns: usize,
+) -> ghidrust_core::Result<DecompileResult> {
     let insns = disassemble_range(prog, va, max_insns)?;
     let name = prog
         .analysis
@@ -332,7 +334,11 @@ pub fn decompile_stage1_at(
     // R6: if this function's name looks like Class::Method, enable `this`.
     if let Some((cls, _)) = name.split_once("::") {
         emit_hints = emit_hints.with_method_this(cls);
-    } else if emit_hints.vtable_classes.values().any(|c| name.contains(c.as_str())) {
+    } else if emit_hints
+        .vtable_classes
+        .values()
+        .any(|c| name.contains(c.as_str()))
+    {
         if let Some(cls) = emit_hints
             .vtable_classes
             .values()
@@ -533,7 +539,9 @@ fn wire_successors(
 
 fn emit_pseudo_c(name: &str, entry: u64, blocks: &[BasicBlock], edges: &[CfgEdge]) -> String {
     let mut out = String::new();
-    out.push_str(&format!("// Ghidrust hand-rolled decompile — function {name} at {entry:#x}\n"));
+    out.push_str(&format!(
+        "// Ghidrust hand-rolled decompile — function {name} at {entry:#x}\n"
+    ));
     out.push_str(&format!(
         "// blocks={} edges={} insns={}\n",
         blocks.len(),
@@ -564,11 +572,7 @@ fn emit_pseudo_c(name: &str, entry: u64, blocks: &[BasicBlock], edges: &[CfgEdge
             if is_cond_jmp(m) {
                 let taken = parse_branch_target(&insn.operands)
                     .and_then(|t| blocks.iter().find(|x| x.start == t).map(|x| x.id));
-                let fall = b
-                    .successors
-                    .iter()
-                    .copied()
-                    .find(|&s| Some(s) != taken);
+                let fall = b.successors.iter().copied().find(|&s| Some(s) != taken);
                 out.push_str(&format!(
                     "    if (/* {} {} */) {{\n",
                     insn.mnemonic, insn.operands
@@ -591,10 +595,7 @@ fn emit_pseudo_c(name: &str, entry: u64, blocks: &[BasicBlock], edges: &[CfgEdge
             if insn.operands.is_empty() {
                 out.push_str(&format!("    /* {} */;\n", insn.mnemonic));
             } else {
-                out.push_str(&format!(
-                    "    /* {} {} */;\n",
-                    insn.mnemonic, insn.operands
-                ));
+                out.push_str(&format!("    /* {} {} */;\n", insn.mnemonic, insn.operands));
             }
         }
         if !b.is_return && !b.is_branch && b.successors.len() == 1 {
@@ -652,7 +653,11 @@ mod tests {
             insn(0x2012, "ret", "", 1),
         ];
         let d = decompile_instructions("branchy", 0x2000, &insns);
-        assert!(d.blocks.len() >= 2, "expected multiple blocks, got {}", d.blocks.len());
+        assert!(
+            d.blocks.len() >= 2,
+            "expected multiple blocks, got {}",
+            d.blocks.len()
+        );
         assert!(!d.edges.is_empty(), "expected CFG edges");
         assert!(d.pseudo_c.contains("if (") || d.pseudo_c.contains("goto block_"));
         assert!(d.pseudo_c.contains("branchy"));
@@ -669,7 +674,11 @@ mod tests {
         ];
         let (d, cov) = decompile_instructions_ir("test_ir", 0x1000, &insns);
         assert!(cov.total_ops > 0);
-        assert!(cov.ratio() > 0.5, "expected majority lift, got {}", cov.ratio());
+        assert!(
+            cov.ratio() > 0.5,
+            "expected majority lift, got {}",
+            cov.ratio()
+        );
         assert!(d.pseudo_c.contains("Stage-0.5"));
         assert!(d.pseudo_c.contains("eax = 0;"));
         assert!(d.pseudo_c.contains("return;"));
@@ -683,24 +692,14 @@ mod tests {
     fn fixture_corpus_lift_ratio_meets_lab_target() {
         use ghidrust_core::run_analyzers;
         use ghidrust_lift::{coverage as lift_coverage, lift_instructions};
-        let fixtures = [
-            "analysis_lab.pe",
-            "tiny_x64.pe",
-            "tiny_x64.elf",
-        ];
+        let fixtures = ["analysis_lab.pe", "tiny_x64.pe", "tiny_x64.elf"];
         let mut total_ratio = 0f32;
         let mut samples = 0usize;
         let mut per_fixture: Vec<(String, f32, usize)> = Vec::new();
         for fx in fixtures {
-            let mut prog = load_path(fixture_path(fx))
-                .unwrap_or_else(|e| panic!("load {fx}: {e}"));
+            let mut prog = load_path(fixture_path(fx)).unwrap_or_else(|e| panic!("load {fx}: {e}"));
             let _ = run_analyzers(&mut prog, &["Function Start Search"]);
-            let mut entries: Vec<u64> = prog
-                .analysis
-                .functions
-                .iter()
-                .map(|f| f.entry)
-                .collect();
+            let mut entries: Vec<u64> = prog.analysis.functions.iter().map(|f| f.entry).collect();
             if entries.is_empty() {
                 if let Some(e) = prog.entry {
                     entries.push(e);
@@ -723,7 +722,11 @@ mod tests {
                 total_ratio += cov.ratio();
                 samples += 1;
             }
-            let avg = if fx_n > 0 { fx_total / fx_n as f32 } else { 0.0 };
+            let avg = if fx_n > 0 {
+                fx_total / fx_n as f32
+            } else {
+                0.0
+            };
             per_fixture.push((fx.to_string(), avg, fx_n));
         }
         assert!(samples > 0, "fixture corpus produced no lift samples");
@@ -732,7 +735,10 @@ mod tests {
         for (fx, r, n) in &per_fixture {
             eprintln!("  {fx:<20}  avg={:.3}  functions={}", r, n);
         }
-        eprintln!("  overall               avg={:.3}  samples={}", avg, samples);
+        eprintln!(
+            "  overall               avg={:.3}  samples={}",
+            avg, samples
+        );
         assert!(
             avg >= 0.98,
             "fixture-corpus average lift ratio {avg:.3} < 0.98"

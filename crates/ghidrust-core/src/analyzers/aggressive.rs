@@ -43,8 +43,8 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
                 continue;
             }
             let slice = &bytes[i..i + 4];
-            let hash_ok = start_hashes.is_empty()
-                || start_hashes.iter().any(|h| h.as_slice() == slice);
+            let hash_ok =
+                start_hashes.is_empty() || start_hashes.iter().any(|h| h.as_slice() == slice);
             // Also accept classic prologues even if hash set empty
             let prolog = slice == [0x55, 0x48, 0x89, 0xE5] || bytes[i] == 0x55;
             if !(hash_ok || prolog) {

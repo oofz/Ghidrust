@@ -86,7 +86,8 @@ impl FoldPlan {
     }
 
     pub fn should_suppress(&self, out: Option<SsaValue>) -> bool {
-        out.map(|v| self.suppress_emit.contains(&v)).unwrap_or(false)
+        out.map(|v| self.suppress_emit.contains(&v))
+            .unwrap_or(false)
     }
 }
 
@@ -199,7 +200,10 @@ fn expr_from_op(
         OpCode::IntNegate => format!("(-{})", fmt_op(op.inputs.first().unwrap_or(&dummy_const()))),
         OpCode::IntNot => format!("(~{})", fmt_op(op.inputs.first().unwrap_or(&dummy_const()))),
         OpCode::BoolNegate => format!("(!{})", fmt_op(op.inputs.first().unwrap_or(&dummy_const()))),
-        OpCode::Load => format!("(*({}))", fmt_op(op.inputs.first().unwrap_or(&dummy_const()))),
+        OpCode::Load => format!(
+            "(*({}))",
+            fmt_op(op.inputs.first().unwrap_or(&dummy_const()))
+        ),
         OpCode::Cast | OpCode::IntZExt | OpCode::IntSExt => {
             let a = fmt_op(op.inputs.first().unwrap_or(&dummy_const()));
             let w = op.output.map(|o| o.size * 8).unwrap_or(64);

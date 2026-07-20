@@ -21,7 +21,7 @@ impl ArchDecode for HppaDecoder {
 
     fn open(mode: Mode) -> Result<Self> {
         if !mode.is_valid_for(Arch::Hppa) {
- return Err(Error::Mode(format!("invalid hppa mode {:#x}", mode.bits())));
+            return Err(Error::Mode(format!("invalid hppa mode {:#x}", mode.bits())));
         }
         let big_endian = !mode.intersects(Mode::LITTLE_ENDIAN) || mode.contains(Mode::BIG_ENDIAN);
         Ok(Self { big_endian })
@@ -49,45 +49,45 @@ impl ArchDecode for HppaDecoder {
 
 fn groups_for_mnemonic(mnemonic: &str) -> Vec<GroupId> {
     match mnemonic {
- "bl" => vec![GroupId::Call],
- "be" | "bv" | "comb" => vec![GroupId::Jump],
- "ldw" | "ldo" => vec![GroupId::Arch(1)],
- "stw" => vec![GroupId::Arch(2)],
- "add" | "sub" => vec![GroupId::Arch(3)],
+        "bl" => vec![GroupId::Call],
+        "be" | "bv" | "comb" => vec![GroupId::Jump],
+        "ldw" | "ldo" => vec![GroupId::Arch(1)],
+        "stw" => vec![GroupId::Arch(2)],
+        "add" | "sub" => vec![GroupId::Arch(3)],
         _ => Vec::new(),
     }
 }
 
 pub fn insn_name(id: InsnId) -> Option<&'static str> {
     match id.raw() {
- 1 => Some("ldo"),
- 2 => Some("ldw"),
- 3 => Some("add"),
- 4 => Some("bl"),
- 5 => Some("comb"),
+        1 => Some("ldo"),
+        2 => Some("ldw"),
+        3 => Some("add"),
+        4 => Some("bl"),
+        5 => Some("comb"),
         _ => None,
     }
 }
 
 pub fn group_name(group: GroupId) -> Option<&'static str> {
     match group {
- GroupId::Jump => Some("jump"),
- GroupId::Call => Some("call"),
- GroupId::Arch(1) => Some("load"),
- GroupId::Arch(2) => Some("store"),
- GroupId::Arch(3) => Some("alu"),
+        GroupId::Jump => Some("jump"),
+        GroupId::Call => Some("call"),
+        GroupId::Arch(1) => Some("load"),
+        GroupId::Arch(2) => Some("store"),
+        GroupId::Arch(3) => Some("alu"),
         _ => None,
     }
 }
 
 pub fn insn_id_for_mnemonic(mnemonic: &str) -> InsnId {
     let id = match mnemonic {
- "ldo" => 1,
- "ldw" => 2,
- "add" | "sub" => 3,
- "bl" => 4,
- "comb" | "be" | "bv" => 5,
- "stw" => 2,
+        "ldo" => 1,
+        "ldw" => 2,
+        "add" | "sub" => 3,
+        "bl" => 4,
+        "comb" | "be" | "bv" => 5,
+        "stw" => 2,
         _ => 0,
     };
     InsnId(id)
@@ -103,10 +103,10 @@ mod tests {
         let mut eng = Engine::open(Arch::Hppa, Mode::BIG_ENDIAN).unwrap();
         let ldo = (0x0du32 << 26) | (2 << 21) | (1 << 16) | 8;
         let insn = eng.disasm_one(&ldo.to_be_bytes(), 0).unwrap();
- assert_eq!(insn.mnemonic, "ldo");
+        assert_eq!(insn.mnemonic, "ldo");
         let add = (0x02u32 << 26) | (3 << 21) | (1 << 16) | 2;
         let addi = eng.disasm_one(&add.to_be_bytes(), 0).unwrap();
- assert_eq!(addi.mnemonic, "add");
+        assert_eq!(addi.mnemonic, "add");
     }
 
     #[test]
@@ -114,9 +114,9 @@ mod tests {
         let mut eng = Engine::open(Arch::Hppa, Mode::BIG_ENDIAN).unwrap();
         let bl = (0x3au32 << 26) | 4;
         let insn = eng.disasm_one(&bl.to_be_bytes(), 0).unwrap();
- assert_eq!(insn.mnemonic, "bl");
+        assert_eq!(insn.mnemonic, "bl");
         let ldw = (0x08u32 << 26) | (4 << 21) | (1 << 16) | 0;
         let ld = eng.disasm_one(&ldw.to_be_bytes(), 0).unwrap();
- assert_eq!(ld.mnemonic, "ldw");
+        assert_eq!(ld.mnemonic, "ldw");
     }
 }

@@ -6,7 +6,10 @@ use crate::program::Program;
 fn prototypes() -> &'static [(&'static str, &'static str)] {
     &[
         ("ExitProcess", "UINT uExitCode"),
-        ("CreateFileW", "LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE"),
+        (
+            "CreateFileW",
+            "LPCWSTR,DWORD,DWORD,LPSECURITY_ATTRIBUTES,DWORD,DWORD,HANDLE",
+        ),
         ("printf", "const char *format, ..."),
         ("MyFunc", "void"),
         ("?MyFunc@@YAXXZ", "void"),

@@ -65,10 +65,7 @@ fn now_ms() -> u64 {
 
 fn new_id(kind: &str) -> String {
     let ms = now_ms();
-    let n = LAST_IDS
-        .lock()
-        .map(|g| g.len())
-        .unwrap_or(0);
+    let n = LAST_IDS.lock().map(|g| g.len()).unwrap_or(0);
     format!("{kind}-{ms}-{n}")
 }
 
@@ -153,7 +150,8 @@ pub fn envelope_or_spill(
     if entry_count > threshold {
         return spill_artifact(kind, entries, preview_limit, source);
     }
-    let (preview, preview_count, next_offset) = preview_slice(&entries, 0, preview_limit.max(entry_count));
+    let (preview, preview_count, next_offset) =
+        preview_slice(&entries, 0, preview_limit.max(entry_count));
     Ok(ArtifactEnvelope {
         ok: true,
         kind: kind.into(),
@@ -213,13 +211,13 @@ pub fn artifact_get(id_or_path: &str) -> Result<Value> {
 }
 
 /// Page through artifact entries with `offset` / `limit`. Returns envelope with `next_offset`.
-pub fn artifact_query(
-    id_or_path: &str,
-    offset: usize,
-    limit: usize,
-) -> Result<ArtifactEnvelope> {
+pub fn artifact_query(id_or_path: &str, offset: usize, limit: usize) -> Result<ArtifactEnvelope> {
     let file = load_file(id_or_path)?;
-    let limit = if limit == 0 { DEFAULT_PREVIEW_LIMIT } else { limit };
+    let limit = if limit == 0 {
+        DEFAULT_PREVIEW_LIMIT
+    } else {
+        limit
+    };
     let (preview, preview_count, next_offset) = preview_slice(&file.entries, offset, limit);
     Ok(ArtifactEnvelope {
         ok: true,

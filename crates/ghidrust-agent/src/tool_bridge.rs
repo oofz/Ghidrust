@@ -120,14 +120,7 @@ pub fn register_mcp_with_grok_cli(
 ) -> Result<(), String> {
     let bin = mcp_bin_string(ghidrust_bin);
     let status = Command::new(grok_bin)
-        .args([
-            "mcp",
-            "add",
-            "--scope",
-            "project",
-            "ghidrust",
-            "--",
-        ])
+        .args(["mcp", "add", "--scope", "project", "ghidrust", "--"])
         .arg(&bin)
         .arg("mcp")
         .current_dir(project_root)
@@ -339,9 +332,7 @@ pub fn start_checklist(project_root: &Path) -> Vec<StartChecklistItem> {
             format!(
                 "{} · {}",
                 hash_path.display(),
-                fs::read_to_string(&hash_path)
-                    .unwrap_or_default()
-                    .trim()
+                fs::read_to_string(&hash_path).unwrap_or_default().trim()
             )
         } else if skill_ok {
             format!(
@@ -405,7 +396,10 @@ mod tests {
         let root = fs::read_to_string(proj.join(".mcp.json")).unwrap();
         assert!(root.contains("mcpServers"));
         assert!(root.contains("ghidrust"));
-        assert!(!root.contains("//?/"), "must not emit Windows long-path prefix");
+        assert!(
+            !root.contains("//?/"),
+            "must not emit Windows long-path prefix"
+        );
         let grok = fs::read_to_string(proj.join(".grok").join("mcp.json")).unwrap();
         assert!(grok.contains("mcp"));
         let toml = fs::read_to_string(proj.join(".grok").join("config.toml")).unwrap();
@@ -416,7 +410,9 @@ mod tests {
     #[test]
     fn strips_windows_long_path_prefix() {
         assert_eq!(
-            mcp_bin_string(Path::new(r"\\?\C:\path\to\Ghidrust\target\release\ghidrust.exe")),
+            mcp_bin_string(Path::new(
+                r"\\?\C:\path\to\Ghidrust\target\release\ghidrust.exe"
+            )),
             "C:/path/to/Ghidrust/target/release/ghidrust.exe"
         );
     }

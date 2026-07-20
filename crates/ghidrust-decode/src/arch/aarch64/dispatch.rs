@@ -10,7 +10,7 @@ use crate::insn::Instruction;
 
 pub fn decode(bytes: &[u8], address: u64, big_endian: bool) -> Result<Instruction> {
     if bytes.len() < 4 {
- return Err(Error::Decode("truncated AArch64 instruction".into()));
+        return Err(Error::Decode("truncated AArch64 instruction".into()));
     }
     let wd = util::read_u32_le(bytes, big_endian)?;
     let raw = &bytes[..4];
@@ -35,5 +35,7 @@ pub fn decode(bytes: &[u8], address: u64, big_endian: bool) -> Result<Instructio
     if let Some(r) = fp_asimd::try_decode(wd, address, raw) {
         return r;
     }
- Err(Error::Decode(format!("unhandled AArch64 encoding {wd:#010x}")))
+    Err(Error::Decode(format!(
+        "unhandled AArch64 encoding {wd:#010x}"
+    )))
 }

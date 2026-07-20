@@ -21,8 +21,8 @@ pub use body::{
 };
 pub use error::{Error, Result, ENCRYPTED_METADATA_NEXT_STEPS};
 pub use icall::{
-    filter_entries, resolve_icalls, resolve_icalls_path, ICallEntry, ICallResolveReport, ICallTable,
-    ICallTableLayout,
+    filter_entries, resolve_icalls, resolve_icalls_path, ICallEntry, ICallResolveReport,
+    ICallTable, ICallTableLayout,
 };
 pub use metadata::{
     build_synthetic, build_synthetic_v31, load_from_meta_sections_dir, load_metadata_flexible,

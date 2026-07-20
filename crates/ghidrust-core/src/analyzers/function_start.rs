@@ -13,12 +13,7 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     // 1) PE Exception Directory — authoritative begins/ends (mandatory PE64 pass).
     let runtime: Vec<RuntimeFunction> = parse_runtime_functions(prog);
     for rf in &runtime {
-        seeds.push((
-            rf.begin_va,
-            FunctionSeedKind::Pdata,
-            Some(rf.end_va),
-            None,
-        ));
+        seeds.push((rf.begin_va, FunctionSeedKind::Pdata, Some(rf.end_va), None));
     }
 
     // 2) PE exports that land in executable memory.
@@ -43,14 +38,8 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
         {
             continue;
         }
-        if s.name.starts_with("FUN_") || s.name.starts_with("Lab") || s.name.starts_with("synth_")
-        {
-            seeds.push((
-                s.va,
-                FunctionSeedKind::Prologue,
-                None,
-                Some(s.name.clone()),
-            ));
+        if s.name.starts_with("FUN_") || s.name.starts_with("Lab") || s.name.starts_with("synth_") {
+            seeds.push((s.va, FunctionSeedKind::Prologue, None, Some(s.name.clone())));
         }
     }
 
@@ -82,7 +71,8 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
 
     // Prefer pdata / export over weaker seeds at the same VA.
     seeds.sort_by(|(a, ka, _, _), (b, kb, _, _)| {
-        a.cmp(b).then_with(|| seed_priority(ka).cmp(&seed_priority(kb)))
+        a.cmp(b)
+            .then_with(|| seed_priority(ka).cmp(&seed_priority(kb)))
     });
     let mut merged: Vec<(u64, FunctionSeedKind, Option<u64>, Option<String>)> = Vec::new();
     for (va, kind, pdata_end, name) in seeds {
@@ -157,7 +147,9 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     Ok(AnalyzerOutput {
         name: "Function Start Search".into(),
         status: "ok".into(),
-        message: format!("identified {n} function start(s) ({pdata_n} from PE Exception Directory)"),
+        message: format!(
+            "identified {n} function start(s) ({pdata_n} from PE Exception Directory)"
+        ),
         functions: Some(functions),
         ..Default::default()
     })

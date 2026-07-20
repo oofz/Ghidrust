@@ -94,14 +94,7 @@ pub fn list_tree(root: impl AsRef<Path>, opts: TreeListOpts) -> TreeListResult {
     let root = root.as_ref();
     let mut entries = Vec::new();
     let mut truncated = false;
-    walk(
-        root,
-        root,
-        0,
-        &opts,
-        &mut entries,
-        &mut truncated,
-    );
+    walk(root, root, 0, &opts, &mut entries, &mut truncated);
     TreeListResult {
         root: root.display().to_string(),
         entries,
@@ -168,10 +161,7 @@ fn walk(
         };
         if meta.file_type().is_symlink() && !opts.follow_symlinks {
             // Record symlink as a leaf row; do not descend.
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if let Some(g) = &opts.name_glob {
                 if !name_matches(name, g) {
                     continue;
@@ -187,10 +177,7 @@ fn walk(
             continue;
         }
         let is_dir = meta.is_dir();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if let Some(g) = &opts.name_glob {
             if !is_dir && !name_matches(name, g) {
                 continue;
@@ -225,11 +212,8 @@ mod tests {
 
     #[test]
     fn lists_files_with_ext_filter() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust-tree-{}-{}",
-            std::process::id(),
-            "t"
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("ghidrust-tree-{}-{}", std::process::id(), "t"));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("a.exe"), b"x").unwrap();

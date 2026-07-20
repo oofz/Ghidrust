@@ -61,24 +61,19 @@ pub struct DecompLine {
 
 /// C-ish keywords used by the Stage-0 / Stage-0.5 emitter.
 const C_KEYWORDS: &[&str] = &[
-    "if", "else", "goto", "return", "while", "for", "do", "switch", "case",
-    "break", "continue", "default", "void", "int", "char", "short", "long",
-    "unsigned", "signed", "float", "double", "bool", "true", "false", "null",
-    "sizeof", "struct", "union", "enum",
+    "if", "else", "goto", "return", "while", "for", "do", "switch", "case", "break", "continue",
+    "default", "void", "int", "char", "short", "long", "unsigned", "signed", "float", "double",
+    "bool", "true", "false", "null", "sizeof", "struct", "union", "enum",
 ];
 
 /// Register names we always classify as `Variable` (x86-64 GPRs + segment/xmm subset).
 const REGISTER_NAMES: &[&str] = &[
-    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp",
-    "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15",
-    "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp",
-    "ax", "bx", "cx", "dx", "si", "di", "bp", "sp",
-    "al", "bl", "cl", "dl", "ah", "bh", "ch", "dh",
-    "sil", "dil", "bpl", "spl",
-    "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
-    "r8w", "r9w", "r10w", "r11w", "r12w", "r13w", "r14w", "r15w",
-    "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b",
-    "rip", "eip", "ip", "cs", "ds", "es", "fs", "gs", "ss",
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13",
+    "r14", "r15", "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "esp", "ax", "bx", "cx", "dx",
+    "si", "di", "bp", "sp", "al", "bl", "cl", "dl", "ah", "bh", "ch", "dh", "sil", "dil", "bpl",
+    "spl", "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d", "r8w", "r9w", "r10w",
+    "r11w", "r12w", "r13w", "r14w", "r15w", "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b",
+    "r15b", "rip", "eip", "ip", "cs", "ds", "es", "fs", "gs", "ss",
 ];
 
 /// Tokenise a full pseudo-C source blob into per-line spans.
@@ -127,9 +122,7 @@ pub fn tokenize(source: &str) -> Vec<DecompLine> {
 ///
 /// Groups on `\n` text tokens. Falls back to string tokenisation when the
 /// stream is empty.
-pub fn from_emit_tokens(
-    emit: &[(String, Option<u64>, &'static str)],
-) -> Vec<DecompLine> {
+pub fn from_emit_tokens(emit: &[(String, Option<u64>, &'static str)]) -> Vec<DecompLine> {
     // Simplified adapter: callers map EmitToken → (text, va, kind_name).
     if emit.is_empty() {
         return Vec::new();
@@ -301,10 +294,7 @@ fn tokenize_line(line: &str, out: &mut Vec<Token>) {
             continue;
         }
         // Hex / numeric literal.
-        if c == '0'
-            && i + 1 < bytes.len()
-            && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
-        {
+        if c == '0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
             let start = i;
             i += 2;
             while i < bytes.len() && (bytes[i] as char).is_ascii_hexdigit() {

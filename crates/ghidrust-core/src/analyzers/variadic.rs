@@ -3,7 +3,9 @@ use super::AnalyzerOutput;
 use crate::error::Result;
 use crate::program::{FunctionInfo, Program};
 
-const VARARGS: &[&str] = &["printf", "sprintf", "snprintf", "fprintf", "scanf", "wsprintf"];
+const VARARGS: &[&str] = &[
+    "printf", "sprintf", "snprintf", "fprintf", "scanf", "wsprintf",
+];
 
 pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     ensure_api_symbols(prog, VARARGS);

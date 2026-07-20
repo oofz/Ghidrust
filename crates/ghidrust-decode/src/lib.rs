@@ -40,7 +40,11 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
 }
 
 /// Decode a linear byte slice into a sequence of instructions (stops on first error).
-pub fn decode_bytes(bytes: &[u8], start_address: u64, max_insns: usize) -> Result<Vec<Instruction>> {
+pub fn decode_bytes(
+    bytes: &[u8],
+    start_address: u64,
+    max_insns: usize,
+) -> Result<Vec<Instruction>> {
     let mut engine = Engine::x86_64_default()?;
     let mut out = Vec::new();
     let mut off = 0usize;
@@ -66,7 +70,7 @@ pub fn decode_bytes(bytes: &[u8], start_address: u64, max_insns: usize) -> Resul
     }
     if out.is_empty() {
         return Err(Error::Decode(format!(
- "no instructions at {start_address:#x}"
+            "no instructions at {start_address:#x}"
         )));
     }
     Ok(out)
@@ -81,9 +85,9 @@ mod tests {
         let b = [0x55, 0x48, 0x89, 0xe5, 0xc3];
         let insns = decode_bytes(&b, 0x1000, 8).unwrap();
         assert_eq!(insns.len(), 3);
- assert_eq!(insns[0].mnemonic, "push");
- assert_eq!(insns[1].mnemonic, "mov");
- assert_eq!(insns[2].mnemonic, "ret");
+        assert_eq!(insns[0].mnemonic, "push");
+        assert_eq!(insns[1].mnemonic, "mov");
+        assert_eq!(insns[2].mnemonic, "ret");
     }
 
     #[test]

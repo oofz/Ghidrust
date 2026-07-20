@@ -57,10 +57,7 @@ pub fn parse_address(s: &str) -> Result<u64, String> {
 /// Parse space/hex-digit memory pattern for Search → Memory.
 /// Accepts "48 89 e5", "4889e5", "??" wildcards (byte = any).
 pub fn parse_hex_pattern(s: &str) -> Result<Vec<Option<u8>>, String> {
-    let cleaned: String = s
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect();
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     if cleaned.is_empty() {
         return Err("empty pattern".into());
     }
@@ -147,7 +144,12 @@ pub struct TextHit {
 /// filter by numeric range. Ghidrust's Stage-0 decoder emits scalars as either
 /// `0x...` (hex) or decimal literals inside the operand string; both are
 /// picked up here.
-pub fn search_scalars(listing: &[Instruction], min: i64, max: i64, max_hits: usize) -> Vec<TextHit> {
+pub fn search_scalars(
+    listing: &[Instruction],
+    min: i64,
+    max: i64,
+    max_hits: usize,
+) -> Vec<TextHit> {
     let mut hits = Vec::new();
     if max_hits == 0 || min > max {
         return hits;
@@ -178,11 +180,12 @@ pub fn extract_scalars(operands: &str) -> Vec<i64> {
     while i < bytes.len() {
         let c = bytes[i] as char;
         // Handle negative-sign prefix, but only when it directly precedes a digit.
-        let (sign, start) = if c == '-' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit() {
-            (-1i64, i + 1)
-        } else {
-            (1i64, i)
-        };
+        let (sign, start) =
+            if c == '-' && i + 1 < bytes.len() && (bytes[i + 1] as char).is_ascii_digit() {
+                (-1i64, i + 1)
+            } else {
+                (1i64, i)
+            };
         if bytes.get(start).copied() == Some(b'0')
             && matches!(bytes.get(start + 1).copied(), Some(b'x') | Some(b'X'))
         {
@@ -361,9 +364,7 @@ pub fn listing_index_at_or_before(listing: &[Instruction], va: u64) -> Option<us
     }
     let first = listing[0].address;
     let last = listing.last().unwrap();
-    let window_end = last
-        .address
-        .saturating_add(u64::from(last.length).max(1));
+    let window_end = last.address.saturating_add(u64::from(last.length).max(1));
     // Outside the loaded listing span → not a hit (do not fake index 0).
     if va < first || va >= window_end {
         return None;
@@ -500,9 +501,13 @@ pub fn stage1_pseudo_c_with_tokens(
     max_insns: usize,
 ) -> Result<(u64, String, f32, Vec<ghidrust_decomp::EmitToken>), String> {
     let entry = decompile_entry_for_va(prog, va);
-    let (_d, rep) =
-        ghidrust_decomp::decompile_stage1_at(prog, entry, max_insns, ghidrust_types::CallConv::Windows)
-            .map_err(|e| e.to_string())?;
+    let (_d, rep) = ghidrust_decomp::decompile_stage1_at(
+        prog,
+        entry,
+        max_insns,
+        ghidrust_types::CallConv::Windows,
+    )
+    .map_err(|e| e.to_string())?;
     Ok((entry, rep.pseudo_c, rep.coverage.ratio(), rep.tokens))
 }
 
@@ -515,8 +520,12 @@ pub fn pseudo_c_for_stage(
 ) -> Result<(u64, String, Option<f32>), String> {
     match stage {
         DecompStage::Stage0 => stage0_pseudo_c(prog, va, max_insns).map(|(e, t)| (e, t, None)),
-        DecompStage::Stage05 => stage05_pseudo_c(prog, va, max_insns).map(|(e, t, r)| (e, t, Some(r))),
-        DecompStage::Stage1 => stage1_pseudo_c(prog, va, max_insns).map(|(e, t, r)| (e, t, Some(r))),
+        DecompStage::Stage05 => {
+            stage05_pseudo_c(prog, va, max_insns).map(|(e, t, r)| (e, t, Some(r)))
+        }
+        DecompStage::Stage1 => {
+            stage1_pseudo_c(prog, va, max_insns).map(|(e, t, r)| (e, t, Some(r)))
+        }
     }
 }
 
@@ -553,12 +562,9 @@ mod tests {
     #[test]
     fn search_program_text_finds_listing_or_name() {
         let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
-        let listing = ghidrust_core::disassemble_range(
-            &prog,
-            prog.entry.unwrap_or(prog.image_base),
-            32,
-        )
-        .unwrap_or_default();
+        let listing =
+            ghidrust_core::disassemble_range(&prog, prog.entry.unwrap_or(prog.image_base), 32)
+                .unwrap_or_default();
         let hits = search_program_text(&prog, &listing, "push", true, 32);
         assert!(!hits.is_empty(), "expected push in listing");
     }
@@ -675,7 +681,10 @@ mod tests {
                 length: 1,
             },
         ];
-        assert_eq!(search_instruction_patterns(&listing, "push", "", 8).len(), 1);
+        assert_eq!(
+            search_instruction_patterns(&listing, "push", "", 8).len(),
+            1
+        );
         assert_eq!(search_instruction_patterns(&listing, "", "rbp", 8).len(), 1);
         assert_eq!(search_instruction_patterns(&listing, "ret", "", 8).len(), 1);
         assert!(search_instruction_patterns(&listing, "call", "", 8).is_empty());
@@ -684,12 +693,14 @@ mod tests {
     #[test]
     fn address_table_hits_reflect_program_state() {
         let mut prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
-        prog.analysis.address_tables.push(ghidrust_core::AddressTableInfo {
-            base: prog.image_base,
-            count: 2,
-            entries: vec![prog.image_base, prog.image_base + 8],
-            role: ghidrust_core::AddressTableRole::Unknown,
-        });
+        prog.analysis
+            .address_tables
+            .push(ghidrust_core::AddressTableInfo {
+                base: prog.image_base,
+                count: 2,
+                entries: vec![prog.image_base, prog.image_base + 8],
+                role: ghidrust_core::AddressTableRole::Unknown,
+            });
         let hits = address_table_hits(&prog);
         assert_eq!(hits.len(), 1);
         assert!(hits[0].text.contains("2 entries"));

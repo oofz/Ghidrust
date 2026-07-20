@@ -68,7 +68,11 @@ enum EntryClass {
 }
 
 fn entry_class(prog: &Program, va: u64) -> EntryClass {
-    match prog.blocks.iter().find(|b| va >= b.va && va < b.va + b.size) {
+    match prog
+        .blocks
+        .iter()
+        .find(|b| va >= b.va && va < b.va + b.size)
+    {
         Some(b) if b.executable => EntryClass::Code,
         Some(_) => EntryClass::Data,
         None => EntryClass::Other,
@@ -91,7 +95,15 @@ fn split_by_target_class(prog: &Program, base: u64, entries: &[u64]) -> Vec<Addr
             seg_class = c;
         }
     }
-    push_segment(prog, base, entries, seg_start, entries.len(), seg_class, &mut out);
+    push_segment(
+        prog,
+        base,
+        entries,
+        seg_start,
+        entries.len(),
+        seg_class,
+        &mut out,
+    );
     if out.is_empty() && entries.len() >= 3 {
         // Degenerate: all Other — keep as one Unknown table.
         out.push(AddressTableInfo {
@@ -188,7 +200,9 @@ fn roles_compatible(a: AddressTableRole, b: AddressTableRole) -> bool {
     // Only merge same concrete roles (or Unknown with a concrete peer).
     matches!(
         (a, b),
-        (CodePtrs, CodePtrs) | (DataPtrs, DataPtrs) | (Unknown, Unknown)
+        (CodePtrs, CodePtrs)
+            | (DataPtrs, DataPtrs)
+            | (Unknown, Unknown)
             | (Unknown, CodePtrs)
             | (CodePtrs, Unknown)
             | (Unknown, DataPtrs)
@@ -205,7 +219,11 @@ mod tests {
         let mut prog = Program::new("t".into(), "PE32+");
         prog.image_base = 0x140000000;
         prog.blocks.push(MemoryBlock {
-            name: if exec { ".text".into() } else { ".rdata".into() },
+            name: if exec {
+                ".text".into()
+            } else {
+                ".rdata".into()
+            },
             va,
             size: bytes.len() as u64,
             bytes,

@@ -41,7 +41,7 @@ fn decode_b_imm(wd: u32, address: u64, raw: &[u8], link: bool) -> Result<Instruc
     let imm26 = bit(wd, 0, 25);
     let offset = sign_extend((imm26 as u64) << 2, 28);
     let target = (address as i64).wrapping_add(offset) as u64;
- let mnemonic = if link { "bl" } else { "b" };
+    let mnemonic = if link { "bl" } else { "b" };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
@@ -59,7 +59,7 @@ fn decode_b_cond(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- format!("b.{}", super::util::cond_name(cond)),
+        format!("b.{}", super::util::cond_name(cond)),
         fmt_imm_hex(target as i64),
         4,
     ))
@@ -70,7 +70,7 @@ fn decode_br(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- "br",
+        "br",
         x(rn),
         4,
     ))
@@ -81,7 +81,7 @@ fn decode_blr(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- "blr",
+        "blr",
         x(rn),
         4,
     ))
@@ -90,7 +90,7 @@ fn decode_blr(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
 fn decode_ret(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let rn = bit(wd, 5, 9);
     let operands = if rn == 30 {
- "lr".into()
+        "lr".into()
     } else if rn == 31 {
         String::new()
     } else {
@@ -99,7 +99,7 @@ fn decode_ret(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
- "ret",
+        "ret",
         operands,
         4,
     ))
@@ -112,12 +112,12 @@ fn decode_cbz(wd: u32, address: u64, raw: &[u8], neg: bool) -> Result<Instructio
     let offset = sign_extend((imm19 as u64) << 2, 21);
     let target = (address as i64).wrapping_add(offset) as u64;
     let reg = if sf != 0 { x(rt) } else { w(rt) };
- let mnemonic = if neg { "cbnz" } else { "cbz" };
+    let mnemonic = if neg { "cbnz" } else { "cbz" };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
         mnemonic,
- format!("{}, {}", reg, fmt_imm_hex(target as i64)),
+        format!("{}, {}", reg, fmt_imm_hex(target as i64)),
         4,
     ))
 }
@@ -130,12 +130,12 @@ fn decode_tbz(wd: u32, address: u64, raw: &[u8], neg: bool) -> Result<Instructio
     let bit_pos = b40 | (b5 << 5);
     let offset = sign_extend((imm14 as u64) << 2, 16);
     let target = (address as i64).wrapping_add(offset) as u64;
- let mnemonic = if neg { "tbnz" } else { "tbz" };
+    let mnemonic = if neg { "tbnz" } else { "tbz" };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
         mnemonic,
- format!("{}, #{bit_pos}, {}", w(rt), fmt_imm_hex(target as i64)),
+        format!("{}, #{bit_pos}, {}", w(rt), fmt_imm_hex(target as i64)),
         4,
     ))
 }

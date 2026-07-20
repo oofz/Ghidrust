@@ -20,50 +20,50 @@ pub fn cmd_decode_query(args: &[String], json: bool) -> ExitCode {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
- "-query" if i + 1 < args.len() => {
+            "-query" if i + 1 < args.len() => {
                 query = Some(args[i + 1].clone());
                 i += 2;
             }
- "-arch" if i + 1 < args.len() => {
+            "-arch" if i + 1 < args.len() => {
                 arch = Some(parse_arch(&args[i + 1]).unwrap_or_else(|e| {
- eprintln!("{e}");
+                    eprintln!("{e}");
                     std::process::exit(2);
                 }));
                 i += 2;
             }
- "-mode" if i + 1 < args.len() => {
-                mode = Some(parse_mode_value(&Value::String(args[i + 1].clone())).unwrap_or_else(
-                    |e| {
- eprintln!("{e}");
+            "-mode" if i + 1 < args.len() => {
+                mode = Some(
+                    parse_mode_value(&Value::String(args[i + 1].clone())).unwrap_or_else(|e| {
+                        eprintln!("{e}");
                         std::process::exit(2);
-                    },
-                ));
+                    }),
+                );
                 i += 2;
             }
- "-id" if i + 1 < args.len() => {
+            "-id" if i + 1 < args.len() => {
                 id = args[i + 1].parse().ok();
                 i += 2;
             }
- "-index" if i + 1 < args.len() => {
+            "-index" if i + 1 < args.len() => {
                 index = args[i + 1].parse().ok();
                 i += 2;
             }
- "-bytes" if i + 1 < args.len() => {
+            "-bytes" if i + 1 < args.len() => {
                 bytes = Some(parse_hex_bytes(&args[i + 1]).unwrap_or_else(|e| {
- eprintln!("{e}");
+                    eprintln!("{e}");
                     std::process::exit(2);
                 }));
                 i += 2;
             }
- "-addr" if i + 1 < args.len() => {
+            "-addr" if i + 1 < args.len() => {
                 addr = parse_u64(&args[i + 1]).unwrap_or(0);
                 i += 2;
             }
- "-detail" => {
+            "-detail" => {
                 detail = true;
                 i += 1;
             }
- other if !other.starts_with('-') && query.is_none() => {
+            other if !other.starts_with('-') && query.is_none() => {
                 query = Some(other.to_string());
                 i += 1;
             }
@@ -72,28 +72,28 @@ pub fn cmd_decode_query(args: &[String], json: bool) -> ExitCode {
     }
 
     if detail {
- json_args["detail"] = json!(true);
+        json_args["detail"] = json!(true);
     }
     if let Some(a) = arch {
- json_args["arch"] = json!(a.name());
+        json_args["arch"] = json!(a.name());
     }
     if let Some(m) = mode {
- json_args["mode"] = json!(m.bits());
+        json_args["mode"] = json!(m.bits());
     }
     if let Some(v) = id {
- json_args["id"] = json!(v);
+        json_args["id"] = json!(v);
     }
     if let Some(v) = index {
- json_args["index"] = json!(v);
+        json_args["index"] = json!(v);
     }
     if let Some(b) = &bytes {
- json_args["bytes"] = json!(hex::encode(b));
+        json_args["bytes"] = json!(hex::encode(b));
     }
- json_args["addr"] = json!(format!("{addr:#x}"));
+    json_args["addr"] = json!(format!("{addr:#x}"));
     if let Some(q) = query {
- json_args["query"] = json!(q);
+        json_args["query"] = json!(q);
     } else {
- eprintln!("missing -query");
+        eprintln!("missing -query");
         return ExitCode::from(2);
     }
 
@@ -102,12 +102,12 @@ pub fn cmd_decode_query(args: &[String], json: bool) -> ExitCode {
             if json {
                 super::emit_json_helper(&body);
             } else {
- println!("{}", serde_json::to_string_pretty(&body).unwrap());
+                println!("{}", serde_json::to_string_pretty(&body).unwrap());
             }
             ExitCode::SUCCESS
         }
         Err(e) => {
- eprintln!("error: {e}");
+            eprintln!("error: {e}");
             ExitCode::FAILURE
         }
     }
@@ -115,15 +115,15 @@ pub fn cmd_decode_query(args: &[String], json: bool) -> ExitCode {
 
 pub fn run_decode_query(args: &Value) -> Result<Value, String> {
     let query = args
- .get("query")
+        .get("query")
         .and_then(|v| v.as_str())
- .ok_or_else(|| "missing query".to_string())?;
- let arch = if let Some(a) = args.get("arch").and_then(|v| v.as_str()) {
+        .ok_or_else(|| "missing query".to_string())?;
+    let arch = if let Some(a) = args.get("arch").and_then(|v| v.as_str()) {
         parse_arch(a)?
     } else {
         Arch::X86
     };
- let mode = if let Some(m) = args.get("mode") {
+    let mode = if let Some(m) = args.get("mode") {
         parse_mode_value(m)?
     } else if arch == Arch::X86 {
         Mode::MODE_64
@@ -135,116 +135,118 @@ pub fn run_decode_query(args: &Value) -> Result<Value, String> {
     apply_detail_from_json(&mut engine, args)?;
 
     match query {
- "insn_name" => {
+        "insn_name" => {
             let id = args
- .get("id")
+                .get("id")
                 .and_then(|v| v.as_u64())
- .ok_or_else(|| "insn_name requires id".to_string())? as u32;
+                .ok_or_else(|| "insn_name requires id".to_string())? as u32;
             let name = engine
                 .insn_name(InsnId(id))
- .ok_or_else(|| format!("unknown insn id {id}"))?;
- Ok(json!({ "query": query, "id": id, "name": name }))
+                .ok_or_else(|| format!("unknown insn id {id}"))?;
+            Ok(json!({ "query": query, "id": id, "name": name }))
         }
- "reg_name" => {
+        "reg_name" => {
             let id = args
- .get("id")
+                .get("id")
                 .and_then(|v| v.as_u64())
- .ok_or_else(|| "reg_name requires id".to_string())? as u32;
+                .ok_or_else(|| "reg_name requires id".to_string())? as u32;
             let name = engine
                 .reg_name(RegId(id))
- .ok_or_else(|| format!("unknown reg id {id}"))?;
- Ok(json!({ "query": query, "id": id, "name": name }))
+                .ok_or_else(|| format!("unknown reg id {id}"))?;
+            Ok(json!({ "query": query, "id": id, "name": name }))
         }
- "group_name" => {
+        "group_name" => {
             let id = args
- .get("id")
+                .get("id")
                 .and_then(|v| v.as_u64())
- .ok_or_else(|| "group_name requires id".to_string())? as u16;
+                .ok_or_else(|| "group_name requires id".to_string())? as u16;
             let name = engine
                 .group_name(ghidrust_core::GroupId::from_raw(id))
- .ok_or_else(|| format!("unknown group id {id}"))?;
- Ok(json!({ "query": query, "id": id, "name": name }))
+                .ok_or_else(|| format!("unknown group id {id}"))?;
+            Ok(json!({ "query": query, "id": id, "name": name }))
         }
- q @ ("insn_group" | "reg_read" | "reg_write" | "op_count" | "op_index" | "regs_access") => {
+        q @ ("insn_group" | "reg_read" | "reg_write" | "op_count" | "op_index" | "regs_access") => {
             let insn = decode_insn_arg(&mut engine, args)?;
-            let idx = args
- .get("index")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let idx = args.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             match q {
- "insn_group" => {
+                "insn_group" => {
                     let group = engine
                         .insn_group(&insn, idx)
- .ok_or_else(|| format!("no group at index {idx}"))?;
+                        .ok_or_else(|| format!("no group at index {idx}"))?;
                     Ok(json!({
- "query": query,
- "index": idx,
- "group": group,
-                    }))
+                    "query": query,
+                    "index": idx,
+                    "group": group,
+                                       }))
                 }
- "reg_read" => {
+                "reg_read" => {
                     let reg = engine
                         .reg_read(&insn, idx)
- .ok_or_else(|| format!("no reg_read at index {idx}"))?;
+                        .ok_or_else(|| format!("no reg_read at index {idx}"))?;
                     let name = engine.reg_name(reg);
- Ok(json!({ "query": query, "index": idx, "reg": reg, "name": name }))
+                    Ok(json!({ "query": query, "index": idx, "reg": reg, "name": name }))
                 }
- "reg_write" => {
+                "reg_write" => {
                     let reg = engine
                         .reg_write(&insn, idx)
- .ok_or_else(|| format!("no reg_write at index {idx}"))?;
+                        .ok_or_else(|| format!("no reg_write at index {idx}"))?;
                     let name = engine.reg_name(reg);
- Ok(json!({ "query": query, "index": idx, "reg": reg, "name": name }))
+                    Ok(json!({ "query": query, "index": idx, "reg": reg, "name": name }))
                 }
- "op_count" => Ok(json!({
- "query": query,
- "count": engine.op_count(&insn),
-                })),
- "op_index" => {
+                "op_count" => Ok(json!({
+                "query": query,
+                "count": engine.op_count(&insn),
+                               })),
+                "op_index" => {
                     let op = engine
                         .op_index(&insn, idx)
- .ok_or_else(|| format!("no operand at index {idx}"))?;
- Ok(json!({ "query": query, "index": idx, "operand": op }))
+                        .ok_or_else(|| format!("no operand at index {idx}"))?;
+                    Ok(json!({ "query": query, "index": idx, "operand": op }))
                 }
- "regs_access" => {
+                "regs_access" => {
                     let access = engine
                         .regs_access(&insn)
- .ok_or_else(|| "detail required for regs_access".to_string())?;
+                        .ok_or_else(|| "detail required for regs_access".to_string())?;
                     Ok(json!({
- "query": query,
- "read": access.read,
- "write": access.write,
- "implicit_read": access.implicit_read,
- "implicit_write": access.implicit_write,
-                    }))
+                    "query": query,
+                    "read": access.read,
+                    "write": access.write,
+                    "implicit_read": access.implicit_read,
+                    "implicit_write": access.implicit_write,
+                                       }))
                 }
                 _ => unreachable!(),
             }
         }
- other => Err(format!("unknown query: {other}")),
+        other => Err(format!("unknown query: {other}")),
     }
 }
 
-fn decode_insn_arg(engine: &mut Engine, args: &Value) -> Result<ghidrust_core::Instruction, String> {
+fn decode_insn_arg(
+    engine: &mut Engine,
+    args: &Value,
+) -> Result<ghidrust_core::Instruction, String> {
     let bytes_hex = args
- .get("bytes")
+        .get("bytes")
         .and_then(|v| v.as_str())
- .ok_or_else(|| "instruction queries require bytes".to_string())?;
+        .ok_or_else(|| "instruction queries require bytes".to_string())?;
     let bytes = parse_hex_bytes(bytes_hex)?;
     let addr = args
- .get("addr")
+        .get("addr")
         .and_then(|v| v.as_str())
         .map(parse_u64)
         .transpose()?
         .unwrap_or(0);
- if args.get("detail").and_then(|v| v.as_bool()) == Some(true) {
-        engine.option(Opt::Detail(true)).map_err(|e| e.to_string())?;
+    if args.get("detail").and_then(|v| v.as_bool()) == Some(true) {
+        engine
+            .option(Opt::Detail(true))
+            .map_err(|e| e.to_string())?;
     }
     engine.disasm_one(&bytes, addr).map_err(|e| e.to_string())
 }
 
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
- bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 }

@@ -78,18 +78,20 @@ pub fn catalog_from_report(report: &RttiReport) -> Vec<RttiCatalogEntry> {
     // Group by demangled name; collect all vtables/COLs.
     let mut by_name: HashMap<String, RttiCatalogEntry> = HashMap::new();
     for c in &report.classes {
-        let e = by_name.entry(c.name.clone()).or_insert_with(|| RttiCatalogEntry {
-            name: c.name.clone(),
-            mangled: None,
-            type_info_va: c.type_info_va,
-            col_va: c.col_va,
-            vtable_vas: vec![],
-            vtable_va: None,
-            confidence: "medium".into(),
-            notes: vec![],
-            reason: None,
-            kind: c.kind.clone(),
-        });
+        let e = by_name
+            .entry(c.name.clone())
+            .or_insert_with(|| RttiCatalogEntry {
+                name: c.name.clone(),
+                mangled: None,
+                type_info_va: c.type_info_va,
+                col_va: c.col_va,
+                vtable_vas: vec![],
+                vtable_va: None,
+                confidence: "medium".into(),
+                notes: vec![],
+                reason: None,
+                kind: c.kind.clone(),
+            });
         if e.type_info_va.is_none() {
             e.type_info_va = c.type_info_va;
         }
@@ -111,8 +113,9 @@ pub fn catalog_from_report(report: &RttiReport) -> Vec<RttiCatalogEntry> {
         if e.vtable_vas.is_empty() {
             e.reason = Some("col_incomplete_or_no_vtable_link".into());
             e.confidence = "low".into();
-            e.notes
-                .push("vtable_vas empty — COL incomplete or link failed (not inventing RVA)".into());
+            e.notes.push(
+                "vtable_vas empty — COL incomplete or link failed (not inventing RVA)".into(),
+            );
         } else if e.vtable_vas.len() > 1 {
             e.notes.push(format!(
                 "multiple vtables ({}) — MI / multiple COL; do not assume single VA",
@@ -132,7 +135,9 @@ fn matches(name: &str, needle: &str, mode: RttiMatchMode) -> bool {
     let q = needle.to_ascii_lowercase();
     match mode {
         RttiMatchMode::Exact | RttiMatchMode::Whole => n == q,
-        RttiMatchMode::Token => n.split(|c: char| !c.is_ascii_alphanumeric() && c != '_').any(|t| t == q),
+        RttiMatchMode::Token => n
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .any(|t| t == q),
         RttiMatchMode::Glob => glob_match(&n, &q),
         RttiMatchMode::Substr => n.contains(&q),
     }
@@ -241,8 +246,7 @@ pub fn enrich_class(c: &RttiClass) -> RttiCatalogEntry {
         kind: c.kind.clone(),
     };
     if e.vtable_vas.is_empty() {
-        e.notes
-            .push("vtable_vas empty — not inventing RVA".into());
+        e.notes.push("vtable_vas empty — not inventing RVA".into());
     }
     e
 }

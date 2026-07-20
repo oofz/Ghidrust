@@ -21,7 +21,10 @@ impl ArchDecode for M680xDecoder {
 
     fn open(mode: Mode) -> Result<Self> {
         if !mode.is_valid_for(Arch::M680x) {
- return Err(Error::Mode(format!("invalid m680x mode {:#x}", mode.bits())));
+            return Err(Error::Mode(format!(
+                "invalid m680x mode {:#x}",
+                mode.bits()
+            )));
         }
         let mode6809 = mode.intersects(Mode::MODE_32);
         Ok(Self { mode6809 })
@@ -49,46 +52,46 @@ impl ArchDecode for M680xDecoder {
 
 fn groups_for_mnemonic(mnemonic: &str) -> Vec<GroupId> {
     match mnemonic {
- "jsr" => vec![GroupId::Call],
- "jmp" | "bra" | "beq" => vec![GroupId::Jump],
- "rts" => vec![GroupId::Ret],
- "lda" | "ldd" | "ldx" | "ldx16" => vec![GroupId::Arch(1)],
- "sta" | "std" => vec![GroupId::Arch(2)],
- "clra" => vec![GroupId::Arch(3)],
+        "jsr" => vec![GroupId::Call],
+        "jmp" | "bra" | "beq" => vec![GroupId::Jump],
+        "rts" => vec![GroupId::Ret],
+        "lda" | "ldd" | "ldx" | "ldx16" => vec![GroupId::Arch(1)],
+        "sta" | "std" => vec![GroupId::Arch(2)],
+        "clra" => vec![GroupId::Arch(3)],
         _ => Vec::new(),
     }
 }
 
 pub fn insn_name(id: InsnId) -> Option<&'static str> {
     match id.raw() {
- 1 => Some("lda"),
- 2 => Some("sta"),
- 3 => Some("jsr"),
- 4 => Some("rts"),
- 5 => Some("bra"),
+        1 => Some("lda"),
+        2 => Some("sta"),
+        3 => Some("jsr"),
+        4 => Some("rts"),
+        5 => Some("bra"),
         _ => None,
     }
 }
 
 pub fn group_name(group: GroupId) -> Option<&'static str> {
     match group {
- GroupId::Jump => Some("jump"),
- GroupId::Call => Some("call"),
- GroupId::Ret => Some("ret"),
- GroupId::Arch(1) => Some("load"),
- GroupId::Arch(2) => Some("store"),
- GroupId::Arch(3) => Some("clear"),
+        GroupId::Jump => Some("jump"),
+        GroupId::Call => Some("call"),
+        GroupId::Ret => Some("ret"),
+        GroupId::Arch(1) => Some("load"),
+        GroupId::Arch(2) => Some("store"),
+        GroupId::Arch(3) => Some("clear"),
         _ => None,
     }
 }
 
 pub fn insn_id_for_mnemonic(mnemonic: &str) -> InsnId {
     let id = match mnemonic {
- "lda" | "ldd" | "ldx" | "ldx16" => 1,
- "sta" | "std" => 2,
- "jsr" | "jmp" => 3,
- "rts" => 4,
- "bra" | "beq" => 5,
+        "lda" | "ldd" | "ldx" | "ldx16" => 1,
+        "sta" | "std" => 2,
+        "jsr" | "jmp" => 3,
+        "rts" => 4,
+        "bra" | "beq" => 5,
         _ => 0,
     };
     InsnId(id)
@@ -103,17 +106,17 @@ mod tests {
     fn m680x_lda_and_rts() {
         let mut eng = Engine::open(Arch::M680x, Mode::LITTLE_ENDIAN).unwrap();
         let lda = eng.disasm_one(&[0x86, 0x42], 0).unwrap();
- assert_eq!(lda.mnemonic, "lda");
+        assert_eq!(lda.mnemonic, "lda");
         let rts = eng.disasm_one(&[0x39], 0).unwrap();
- assert_eq!(rts.mnemonic, "rts");
+        assert_eq!(rts.mnemonic, "rts");
     }
 
     #[test]
     fn m680x_jsr_and_bra() {
         let mut eng = Engine::open(Arch::M680x, Mode::LITTLE_ENDIAN).unwrap();
         let jsr = eng.disasm_one(&[0xbd, 0x10, 0x00], 0).unwrap();
- assert_eq!(jsr.mnemonic, "jsr");
+        assert_eq!(jsr.mnemonic, "jsr");
         let bra = eng.disasm_one(&[0x20, 0x08], 0).unwrap();
- assert_eq!(bra.mnemonic, "bra");
+        assert_eq!(bra.mnemonic, "bra");
     }
 }

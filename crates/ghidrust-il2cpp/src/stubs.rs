@@ -58,7 +58,10 @@ pub fn classify_at(prog: &Program, entry: u64) -> Option<ResolveStub> {
         if m == "call" {
             has_call = true;
         }
-        if (m == "mov" || m == "movabs") && ops.contains('[') && (ops.contains("rax") || ops.contains("eax")) {
+        if (m == "mov" || m == "movabs")
+            && ops.contains('[')
+            && (ops.contains("rax") || ops.contains("eax"))
+        {
             has_store = true;
             for t in ghidrust_core::rip_relative_targets(insn) {
                 slot_va = Some(t);
@@ -202,8 +205,8 @@ fn read_c_string(prog: &Program, va: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghidrust_core::program::{MemoryBlock, Program};
     use ghidrust_core::load_path;
+    use ghidrust_core::program::{MemoryBlock, Program};
     use std::path::PathBuf;
 
     #[test]
@@ -277,11 +280,7 @@ mod tests {
 
         let stub = classify_at(&prog, text_va).expect("stub");
         assert_eq!(stub.kind, Il2CppKind::ResolveStub);
-        assert!(stub
-            .icall_name
-            .as_deref()
-            .unwrap_or("")
-            .contains("Camera"));
+        assert!(stub.icall_name.as_deref().unwrap_or("").contains("Camera"));
         assert!(follow_stub_target(&prog, &stub).is_none());
         assert!(stub_matches_filter(&prog, &stub, "Camera"));
     }

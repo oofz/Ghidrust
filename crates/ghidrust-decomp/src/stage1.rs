@@ -24,9 +24,7 @@ use ghidrust_structure::{
     structure_function_with_hints, NaturalLoop, Region, ShortCircuitClause, ShortCircuitKind,
     StructureHints, StructureReport, SwitchCase,
 };
-use ghidrust_types::{
-    recover_with_name, CallConv, ParamList, RustType, StackLocal, TypeRecovery,
-};
+use ghidrust_types::{recover_with_name, CallConv, ParamList, RustType, StackLocal, TypeRecovery};
 
 /// Everything Stage-1 produces alongside the C text: SSA, structure, types
 /// so callers (bench, GUI, MCP) can display the intermediate views without
@@ -131,15 +129,7 @@ pub fn emit_stage1_full(
     let fold = FoldPlan::build(&ssa);
 
     let (text, tokens) = render_function(
-        name,
-        entry,
-        blocks,
-        &ssa,
-        &structure,
-        &types,
-        coverage,
-        &fold,
-        emit_hints,
+        name, entry, blocks, &ssa, &structure, &types, coverage, &fold, emit_hints,
     );
 
     Stage1Result {
@@ -480,10 +470,7 @@ fn render_block_body(
     let last_idx = block.ops.len().saturating_sub(1);
     for (i, op) in block.ops.iter().enumerate() {
         let is_last = i == last_idx;
-        if skip_terminator
-            && is_last
-            && matches!(op.opcode, OpCode::CBranch | OpCode::Branch)
-        {
+        if skip_terminator && is_last && matches!(op.opcode, OpCode::CBranch | OpCode::Branch) {
             continue;
         }
         // R1: skip assignments whose result was fully inlined.
@@ -512,10 +499,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
     match op.opcode {
         OpCode::Return => Some("return;".to_string()),
         OpCode::Nop => None,
-        OpCode::Branch => Some(format!(
-            "goto {};",
-            emit_branch_target(op.inputs.first()?)
-        )),
+        OpCode::Branch => Some(format!("goto {};", emit_branch_target(op.inputs.first()?))),
         OpCode::CBranch => {
             // If used at Region::Block level (not consumed by an if/while
             // wrapper) print the raw cbranch so control flow stays visible.
@@ -550,15 +534,15 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             // R6: annotate known vtable bases when the target folds to a const VA.
             if let Some(va) = tgt.as_const() {
                 if let Some(cls) = ctx.emit_hints.class_for_vtable(va) {
-                    return Some(format!(
-                        "/* virtual {}.vftable */ (*({:#x}))();",
-                        cls, va
-                    ));
+                    return Some(format!("/* virtual {}.vftable */ (*({:#x}))();", cls, va));
                 }
             }
             Some(format!("(*({}))();", format_operand_ctx(tgt, ctx)))
         }
-        OpCode::Push => Some(format!("push({});", format_operand_ctx(op.inputs.first()?, ctx))),
+        OpCode::Push => Some(format!(
+            "push({});",
+            format_operand_ctx(op.inputs.first()?, ctx)
+        )),
         OpCode::Pop => {
             let dst = op.output?;
             Some(format!("{} = pop();", format_value_named(dst, ctx.types)))
@@ -667,10 +651,7 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
                 "{} = ({} << {}) | {};",
                 format_value_named(dst, ctx.types),
                 format_operand_ctx(a, ctx),
-                op.inputs
-                    .first()
-                    .map(|v| v.varnode().size * 8)
-                    .unwrap_or(0),
+                op.inputs.first().map(|v| v.varnode().size * 8).unwrap_or(0),
                 format_operand_ctx(b, ctx)
             ))
         }
@@ -709,19 +690,13 @@ fn emit_op(op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
             let dst = op.output?;
             let addr = op.inputs.first()?;
             let deref = format_deref(addr, ctx);
-            Some(format!(
-                "{} = {deref};",
-                format_value_named(dst, ctx.types)
-            ))
+            Some(format!("{} = {deref};", format_value_named(dst, ctx.types)))
         }
         OpCode::Store => {
             let addr = op.inputs.first()?;
             let val = op.inputs.get(1)?;
             let deref = format_deref(addr, ctx);
-            Some(format!(
-                "{deref} = {};",
-                format_operand_ctx(val, ctx)
-            ))
+            Some(format!("{deref} = {};", format_operand_ctx(val, ctx)))
         }
         OpCode::Unimplemented => Some(format!(
             "/* unimplemented: {} */",
@@ -738,10 +713,7 @@ fn binop(sym: &str, op: &SsaOp, ctx: &mut RenderCtx) -> Option<String> {
     let out_txt = format_value_named(dst, ctx.types);
     if let SsaOperand::Value(av) = a {
         if av.space == dst.space && av.offset == dst.offset && av.size == dst.size {
-            return Some(format!(
-                "{out_txt} {sym}= {};",
-                format_operand_ctx(b, ctx)
-            ));
+            return Some(format!("{out_txt} {sym}= {};", format_operand_ctx(b, ctx)));
         }
     }
     Some(format!(
@@ -785,10 +757,7 @@ fn format_deref(addr: &SsaOperand, ctx: &RenderCtx) -> String {
             if let RustType::ArrayPtr { elem_width, .. } = base_ty {
                 if elem_width > 0 && offset % elem_width as u64 == 0 {
                     let idx = offset / elem_width as u64;
-                    return format!(
-                        "{}[{idx}]",
-                        format_value_named(base, ctx.types)
-                    );
+                    return format!("{}[{idx}]", format_value_named(base, ctx.types));
                 }
             }
         }
@@ -803,13 +772,9 @@ fn format_operand_ctx(op: &SsaOperand, ctx: &RenderCtx) -> String {
             let tys = ctx.types;
             let ssa = ctx.ssa;
             let fold = ctx.fold;
-            fold_expr_for(
-                *v,
-                ssa,
-                fold,
-                &|o| format_operand(o, tys),
-                &|val| format_value_named(val, tys),
-            )
+            fold_expr_for(*v, ssa, fold, &|o| format_operand(o, tys), &|val| {
+                format_value_named(val, tys)
+            })
             .unwrap_or_else(|| format_value_named(*v, tys))
         }
         _ => format_operand(op, ctx.types),
@@ -898,7 +863,9 @@ fn format_operand_bare(op: &SsaOperand, tys: &TypeRecovery) -> String {
         SsaOperand::Const(v) if v.space == AddrSpace::Constant => format!("{:#x}", v.offset),
         SsaOperand::Value(v) => {
             let raw = format_value_named(*v, tys);
-            raw.split_once('#').map(|(name, _)| name.to_string()).unwrap_or(raw)
+            raw.split_once('#')
+                .map(|(name, _)| name.to_string())
+                .unwrap_or(raw)
         }
         _ => format_operand(op, tys),
     }
@@ -1045,9 +1012,15 @@ mod tests {
             "recovered int return type expected:\n{text}"
         );
         assert!(text.contains("return;"), "return missing:\n{text}");
-        assert!(text.contains("Stage-1"), "must self-identify as Stage-1:\n{text}");
+        assert!(
+            text.contains("Stage-1"),
+            "must self-identify as Stage-1:\n{text}"
+        );
         // eax = 0 idiom lowered
-        assert!(text.contains("= 0;"), "xor idiom collapse expected:\n{text}");
+        assert!(
+            text.contains("= 0;"),
+            "xor idiom collapse expected:\n{text}"
+        );
     }
 
     #[test]
@@ -1310,7 +1283,13 @@ mod tests {
             length: 2,
         };
         let d2 = decompile_instructions("wibbler", 0x4010, &[unknown.clone()]);
-        let rep2 = emit_stage1(&d2.name, d2.entry, &d2.blocks, &[unknown], CallConv::SystemV);
+        let rep2 = emit_stage1(
+            &d2.name,
+            d2.entry,
+            &d2.blocks,
+            &[unknown],
+            CallConv::SystemV,
+        );
         assert!(
             rep2.pseudo_c.contains("unimplemented"),
             "genuinely unlifted opcode should stay Unimplemented:\n{}",

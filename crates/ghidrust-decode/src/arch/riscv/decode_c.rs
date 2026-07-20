@@ -8,7 +8,7 @@ pub fn decode(half: u16, is64: bool) -> Result<(String, String, usize)> {
         0x0 => quad0(half, funct3),
         0x1 => quad1(half, funct3, is64),
         0x2 => quad2(half, funct3, is64),
- _ => Err(Error::Decode("invalid compressed quadrant".into())),
+        _ => Err(Error::Decode("invalid compressed quadrant".into())),
     }
 }
 
@@ -16,25 +16,37 @@ fn quad0(half: u16, funct3: u16) -> Result<(String, String, usize)> {
     match funct3 {
         0b000 => {
             let nzuimm = c_nzuimm(half);
- Ok(("c.addi4spn".into(), format!("{}, sp, {nzuimm}", c_rd(half)), 2))
+            Ok((
+                "c.addi4spn".into(),
+                format!("{}, sp, {nzuimm}", c_rd(half)),
+                2,
+            ))
         }
         0b010 => {
             let offset = c_lw_offset(half);
             Ok((
- "c.lw".into(),
- format!("{}, {offset}({})", reg_name_num(c_rd(half)), reg_name_num(c_rs1(half))),
+                "c.lw".into(),
+                format!(
+                    "{}, {offset}({})",
+                    reg_name_num(c_rd(half)),
+                    reg_name_num(c_rs1(half))
+                ),
                 2,
             ))
         }
         0b110 => {
             let offset = c_sw_offset(half);
             Ok((
- "c.sw".into(),
- format!("{}, {offset}({})", reg_name_num(c_rs2(half)), reg_name_num(c_rs1(half))),
+                "c.sw".into(),
+                format!(
+                    "{}, {offset}({})",
+                    reg_name_num(c_rs2(half)),
+                    reg_name_num(c_rs1(half))
+                ),
                 2,
             ))
         }
- _ => Err(Error::Decode("invalid c.quad0".into())),
+        _ => Err(Error::Decode("invalid c.quad0".into())),
     }
 }
 
@@ -43,33 +55,37 @@ fn quad1(half: u16, funct3: u16, is64: bool) -> Result<(String, String, usize)> 
         0b000 => {
             let rd = ((half >> 7) & 0x1f) as u32;
             if rd == 0 {
- Ok(("c.nop".into(), String::new(), 2))
+                Ok(("c.nop".into(), String::new(), 2))
             } else {
                 let imm = c_imm6(half);
- Ok(("c.addi".into(), format!("{}, {imm}", reg_name_num(rd)), 2))
+                Ok(("c.addi".into(), format!("{}, {imm}", reg_name_num(rd)), 2))
             }
         }
         0b001 => {
             if is64 {
- Ok(("c.addiw".into(), format!("{}, {}", reg_name_num(c_rd(half)), c_imm6(half)), 2))
+                Ok((
+                    "c.addiw".into(),
+                    format!("{}, {}", reg_name_num(c_rd(half)), c_imm6(half)),
+                    2,
+                ))
             } else {
                 let offset = c_j_offset(half);
- Ok(("c.j".into(), format!("{offset:#x}"), 2))
+                Ok(("c.j".into(), format!("{offset:#x}"), 2))
             }
         }
         0b010 => {
             let rd = ((half >> 7) & 0x1f) as u32;
             let imm = c_imm6(half);
- Ok(("c.li".into(), format!("{}, {imm}", reg_name_num(rd)), 2))
+            Ok(("c.li".into(), format!("{}, {imm}", reg_name_num(rd)), 2))
         }
         0b011 => {
             let rd = ((half >> 7) & 0x1f) as u32;
             if rd == 2 {
                 let imm = c_sp_imm(half);
- Ok(("c.addi16sp".into(), format!("sp, {imm}"), 2))
+                Ok(("c.addi16sp".into(), format!("sp, {imm}"), 2))
             } else {
                 let imm = c_lui_imm(half);
- Ok(("c.lui".into(), format!("{}, {imm:#x}", reg_name_num(rd)), 2))
+                Ok(("c.lui".into(), format!("{}, {imm:#x}", reg_name_num(rd)), 2))
             }
         }
         0b100 => {
@@ -77,34 +93,34 @@ fn quad1(half: u16, funct3: u16, is64: bool) -> Result<(String, String, usize)> 
             let rd = c_rdp(half);
             let imm = c_srli_imm(half);
             let name = match kind {
- 0b00 => "c.srli",
- 0b01 => "c.srai",
- 0b10 => "c.andi",
- _ => return Err(Error::Decode("invalid c.alu".into())),
+                0b00 => "c.srli",
+                0b01 => "c.srai",
+                0b10 => "c.andi",
+                _ => return Err(Error::Decode("invalid c.alu".into())),
             };
- Ok((name.into(), format!("{}, {imm}", reg_name_num(rd)), 2))
+            Ok((name.into(), format!("{}, {imm}", reg_name_num(rd)), 2))
         }
         0b101 => {
             let offset = c_j_offset(half);
- Ok(("c.j".into(), format!("{offset:#x}"), 2))
+            Ok(("c.j".into(), format!("{offset:#x}"), 2))
         }
         0b110 => {
             let offset = c_b_offset(half);
             Ok((
- "c.beqz".into(),
- format!("{}, {offset:#x}", reg_name_num(c_rdp(half))),
+                "c.beqz".into(),
+                format!("{}, {offset:#x}", reg_name_num(c_rdp(half))),
                 2,
             ))
         }
         0b111 => {
             let offset = c_b_offset(half);
             Ok((
- "c.bnez".into(),
- format!("{}, {offset:#x}", reg_name_num(c_rdp(half))),
+                "c.bnez".into(),
+                format!("{}, {offset:#x}", reg_name_num(c_rdp(half))),
                 2,
             ))
         }
- _ => Err(Error::Decode("invalid c.quad1".into())),
+        _ => Err(Error::Decode("invalid c.quad1".into())),
     }
 }
 
@@ -113,29 +129,29 @@ fn quad2(half: u16, funct3: u16, is64: bool) -> Result<(String, String, usize)> 
         0b000 => {
             let rs1 = ((half >> 7) & 0x1f) as u32;
             if rs1 == 0 {
- return Err(Error::Decode("reserved c.jr".into()));
+                return Err(Error::Decode("reserved c.jr".into()));
             }
- Ok(("c.jr".into(), format!("{}", reg_name_num(rs1)), 2))
+            Ok(("c.jr".into(), format!("{}", reg_name_num(rs1)), 2))
         }
         0b001 => {
             let rd = ((half >> 7) & 0x1f) as u32;
- Ok(("c.jal".into(), format!("{}", reg_name_num(rd)), 2))
+            Ok(("c.jal".into(), format!("{}", reg_name_num(rd)), 2))
         }
         0b010 => {
             let offset = c_ldsp_offset(half, is64);
- let name = if is64 { "c.ldsp" } else { "c.lwsp" };
+            let name = if is64 { "c.ldsp" } else { "c.lwsp" };
             Ok((
                 name.into(),
- format!("{}, {offset}(sp)", reg_name_num(c_rd(half))),
+                format!("{}, {offset}(sp)", reg_name_num(c_rd(half))),
                 2,
             ))
         }
         0b110 => {
             let offset = c_sdsp_offset(half, is64);
- let name = if is64 { "c.sdsp" } else { "c.swsp" };
+            let name = if is64 { "c.sdsp" } else { "c.swsp" };
             Ok((
                 name.into(),
- format!("{}, {offset}(sp)", reg_name_num(c_rs2(half))),
+                format!("{}, {offset}(sp)", reg_name_num(c_rs2(half))),
                 2,
             ))
         }
@@ -144,18 +160,26 @@ fn quad2(half: u16, funct3: u16, is64: bool) -> Result<(String, String, usize)> 
             if bit12 == 0 {
                 let rd = c_rdp(half);
                 let rs2 = c_rs2p(half);
- Ok(("c.mv".into(), format!("{}, {}", reg_name_num(rd), reg_name_num(rs2)), 2))
+                Ok((
+                    "c.mv".into(),
+                    format!("{}, {}", reg_name_num(rd), reg_name_num(rs2)),
+                    2,
+                ))
             } else {
                 let rd = c_rdp(half);
                 let rs2 = c_rs2p(half);
                 if rs2 == 0 {
- Ok(("c.ebreak".into(), String::new(), 2))
+                    Ok(("c.ebreak".into(), String::new(), 2))
                 } else {
- Ok(("c.add".into(), format!("{}, {}", reg_name_num(rd), reg_name_num(rs2)), 2))
+                    Ok((
+                        "c.add".into(),
+                        format!("{}, {}", reg_name_num(rd), reg_name_num(rs2)),
+                        2,
+                    ))
                 }
             }
         }
- _ => Err(Error::Decode("invalid c.quad2".into())),
+        _ => Err(Error::Decode("invalid c.quad2".into())),
     }
 }
 

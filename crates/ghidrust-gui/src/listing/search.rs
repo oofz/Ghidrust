@@ -40,11 +40,9 @@ pub fn matches(insn: &Instruction, search: &ListingSearch) -> bool {
     }
     if !search.insn_id.trim().is_empty() {
         let q = search.insn_id.trim();
- let id_s = format!("{}", insn.id.raw());
- let name = insn_name(search.arch, insn.id).unwrap_or("");
-        if !id_s.contains(q)
-            && !name.to_ascii_lowercase().contains(&q.to_ascii_lowercase())
-        {
+        let id_s = format!("{}", insn.id.raw());
+        let name = insn_name(search.arch, insn.id).unwrap_or("");
+        if !id_s.contains(q) && !name.to_ascii_lowercase().contains(&q.to_ascii_lowercase()) {
             return false;
         }
     }
@@ -55,7 +53,7 @@ pub fn matches(insn: &Instruction, search: &ListingSearch) -> bool {
         };
         let hit = d.groups.iter().any(|g| {
             group_name(search.arch, *g)
- .unwrap_or("")
+                .unwrap_or("")
                 .to_ascii_lowercase()
                 .contains(&q)
         });
@@ -68,24 +66,24 @@ pub fn matches(insn: &Instruction, search: &ListingSearch) -> bool {
 
 pub fn ui_search_bar(ui: &mut egui::Ui, search: &mut ListingSearch) {
     ui.horizontal(|ui| {
- ui.label("Filter:");
+        ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut search.mnemonic)
                 .desired_width(90.0)
- .hint_text("mnemonic"),
+                .hint_text("mnemonic"),
         );
         ui.add(
             egui::TextEdit::singleline(&mut search.insn_id)
                 .desired_width(70.0)
- .hint_text("id"),
+                .hint_text("id"),
         );
         ui.add(
             egui::TextEdit::singleline(&mut search.group)
                 .desired_width(90.0)
- .hint_text("group"),
+                .hint_text("group"),
         );
- if search.is_active() && ui.small_button("Clear").clicked() {
- *search = ListingSearch::default();
+        if search.is_active() && ui.small_button("Clear").clicked() {
+            *search = ListingSearch::default();
         }
     });
 }

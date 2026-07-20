@@ -127,9 +127,8 @@ impl Project {
         } else {
             (path.to_path_buf(), path.join(PROJECT_FILE))
         };
-        let data = fs::read_to_string(&json_path).map_err(|e| {
-            Error::Io(format!("open project {}: {e}", json_path.display()))
-        })?;
+        let data = fs::read_to_string(&json_path)
+            .map_err(|e| Error::Io(format!("open project {}: {e}", json_path.display())))?;
         let meta: ProjectMeta =
             serde_json::from_str(&data).map_err(|e| Error::Parse(format!("project json: {e}")))?;
         Ok(Self { root, meta })
@@ -239,7 +238,9 @@ impl Project {
     }
 
     pub fn analysis_export_path(&self, id: &str) -> PathBuf {
-        self.root.join("exports").join(format!("{id}_analysis.json"))
+        self.root
+            .join("exports")
+            .join(format!("{id}_analysis.json"))
     }
 
     /// Load imported binary into a Program (does not auto-load saved analysis).
@@ -248,7 +249,10 @@ impl Project {
     }
 
     /// Load program + apply saved analysis state if present.
-    pub fn load_program_with_results(&self, entry: &ProjectFileEntry) -> Result<(Program, Option<SavedAnalysis>)> {
+    pub fn load_program_with_results(
+        &self,
+        entry: &ProjectFileEntry,
+    ) -> Result<(Program, Option<SavedAnalysis>)> {
         let mut prog = self.load_program(entry)?;
         let saved = self.load_saved_analysis(&entry.id)?;
         if let Some(ref s) = saved {
@@ -263,12 +267,7 @@ impl Project {
             for (va, name) in &prog.edits.renames.clone() {
                 if let Some(f) = prog.function_at_mut(*va) {
                     f.name = name.clone();
-                } else if let Some(sym) = prog
-                    .analysis
-                    .symbols
-                    .iter_mut()
-                    .find(|s| s.va == *va)
-                {
+                } else if let Some(sym) = prog.analysis.symbols.iter_mut().find(|s| s.va == *va) {
                     sym.name = name.clone();
                 }
             }
@@ -514,11 +513,7 @@ fn unique_id(display: &str, existing: &[ProjectFileEntry]) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    let stem = if stem.is_empty() {
-        "bin".into()
-    } else {
-        stem
-    };
+    let stem = if stem.is_empty() { "bin".into() } else { stem };
     let mut n = 0u32;
     loop {
         let id = if n == 0 {
@@ -540,10 +535,7 @@ mod tests {
 
     #[test]
     fn create_import_analyze_reopen() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust_proj_test_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust_proj_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut proj = Project::create(&dir, "TestProj").unwrap();
         assert!(proj.project_json_path().is_file());
@@ -591,10 +583,7 @@ mod tests {
 
     #[test]
     fn tree_rows_multi_file_active_and_status() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust_tree_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust_tree_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut proj = Project::create(&dir, "Multi").unwrap();
         let a = proj.import_file(fixture_path("tiny_x64.pe")).unwrap();
@@ -619,10 +608,7 @@ mod tests {
 
     #[test]
     fn remove_file_drops_import_and_results() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust_rm_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust_rm_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut proj = Project::create(&dir, "Rm").unwrap();
         let a = proj.import_file(fixture_path("tiny_x64.pe")).unwrap();
@@ -645,10 +631,7 @@ mod tests {
 
     #[test]
     fn analysis_bin_roundtrip_faster_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust_bin_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust_bin_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut proj = Project::create(&dir, "Bin").unwrap();
         let a = proj.import_file(fixture_path("tiny_x64.pe")).unwrap();
@@ -673,10 +656,7 @@ mod tests {
     fn program_edits_round_trip_through_save_and_load() {
         use crate::edits::{CommentKind, FunctionSignatureEdit};
 
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust_edits_rt_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust_edits_rt_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let mut proj = Project::create(&dir, "Edits").unwrap();
         let entry = proj.import_file(fixture_path("tiny_x64.pe")).unwrap();
@@ -714,25 +694,28 @@ mod tests {
         prog.edits.add_function_tag(va, "SANITIZED");
 
         let listing = disassemble_range(&prog, va, 8).unwrap_or_default();
-        proj.save_program_results(&entry.id, &prog, &listing, &["Function Start Search".into()])
-            .unwrap();
+        proj.save_program_results(
+            &entry.id,
+            &prog,
+            &listing,
+            &["Function Start Search".into()],
+        )
+        .unwrap();
 
         // Reopen: full replay must land back on Program::edits and mirror
         // the rename into analysis.functions.
         let proj2 = Project::open(&dir).unwrap();
-        let e2 = proj2
-            .meta
-            .files
-            .iter()
-            .find(|f| f.id == entry.id)
-            .unwrap();
+        let e2 = proj2.meta.files.iter().find(|f| f.id == entry.id).unwrap();
         let (prog2, saved2) = proj2.load_program_with_results(e2).unwrap();
         let saved2 = saved2.expect("saved analysis");
         assert_eq!(saved2.edits.rename_at(va), Some("my_main"));
         assert_eq!(prog2.edits.rename_at(va), Some("my_main"));
         assert_eq!(prog2.edits.retype_at(va), Some("int32_t *"));
         assert_eq!(prog2.edits.comment_at(va, CommentKind::Eol), Some("eol!"));
-        assert_eq!(prog2.edits.comment_at(va, CommentKind::Plate), Some("plate!"));
+        assert_eq!(
+            prog2.edits.comment_at(va, CommentKind::Plate),
+            Some("plate!")
+        );
         let sig = prog2.edits.function_signature(va).unwrap();
         assert_eq!(sig.signature, "int32_t my_main(char *argv)");
         assert_eq!(sig.return_type.as_deref(), Some("int32_t"));

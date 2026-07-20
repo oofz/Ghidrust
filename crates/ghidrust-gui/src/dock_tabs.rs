@@ -55,10 +55,8 @@ pub fn default_dock_state() -> DockState<DockTab> {
     let [left, right] =
         dock.main_surface_mut()
             .split_right(NodeIndex::root(), 0.55, vec![DockTab::Decompiler]);
-    dock.main_surface_mut()
-        .set_active_tab(left, TabIndex(0)); // Listing
-    dock.main_surface_mut()
-        .set_active_tab(right, TabIndex(0)); // Decompiler
+    dock.main_surface_mut().set_active_tab(left, TabIndex(0)); // Listing
+    dock.main_surface_mut().set_active_tab(right, TabIndex(0)); // Decompiler
     dock.set_focused_node_and_surface((SurfaceIndex::main(), left));
     dock
 }

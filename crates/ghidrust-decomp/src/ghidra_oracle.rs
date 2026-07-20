@@ -230,7 +230,10 @@ impl GhidraOracleReport {
             self.ghidrust.avg_lift_ratio * 100.0
         ));
         match self.ghidra_total_us {
-            Some(us) => s.push_str(&format!("ghidra:   total_wall_ms={:.3}\n", us as f64 / 1000.0)),
+            Some(us) => s.push_str(&format!(
+                "ghidra:   total_wall_ms={:.3}\n",
+                us as f64 / 1000.0
+            )),
             None => s.push_str("ghidra:   unavailable (see methodology)\n"),
         }
         s.push_str(&format!(
@@ -346,8 +349,11 @@ fn normalize_token(tok: &str) -> String {
     if t.starts_with("param_") || t.starts_with("arg_") {
         return "PARAM".into();
     }
-    if (t.starts_with('i') || t.starts_with('u') || t.starts_with('l')
-        || t.starts_with('c') || t.starts_with('s'))
+    if (t.starts_with('i')
+        || t.starts_with('u')
+        || t.starts_with('l')
+        || t.starts_with('c')
+        || t.starts_with('s'))
         && t.ends_with(|c: char| c.is_ascii_digit())
         && t.starts_with(|c: char| c.is_ascii_lowercase())
         && t.contains("Var")
@@ -407,7 +413,11 @@ pub fn token_similarity(a: &str, b: &str) -> f32 {
 ///    keeps `token_similarity = None` and never invents wall time.
 pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
     let t0 = Instant::now();
-    let max_functions = if cfg.max_functions == 0 { 8 } else { cfg.max_functions };
+    let max_functions = if cfg.max_functions == 0 {
+        8
+    } else {
+        cfg.max_functions
+    };
     let max_insns = if cfg.max_insns_per_fn == 0 {
         128
     } else {
@@ -433,15 +443,9 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
     //    Ghidrust analyzer's function list (capped by `max_functions`).
     //    When Ghidra is unavailable we fall back to the Ghidrust list
     //    unchanged so the methodology-only run keeps producing rows.
-    let ghidrust_entries: Vec<u64> = prog
-        .analysis
-        .functions
-        .iter()
-        .map(|f| f.entry)
-        .collect();
+    let ghidrust_entries: Vec<u64> = prog.analysis.functions.iter().map(|f| f.entry).collect();
     let shared_entries: Vec<u64> = if let Some(cap) = &effective_captured {
-        let ghidra_set: std::collections::BTreeSet<u64> =
-            cap.iter().map(|c| c.entry).collect();
+        let ghidra_set: std::collections::BTreeSet<u64> = cap.iter().map(|c| c.entry).collect();
         let mut inter: Vec<u64> = ghidrust_entries
             .iter()
             .copied()
@@ -459,7 +463,11 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
         }
         inter
     } else {
-        ghidrust_entries.iter().copied().take(max_functions).collect()
+        ghidrust_entries
+            .iter()
+            .copied()
+            .take(max_functions)
+            .collect()
     };
 
     // 3. Ghidrust side: run the selected stage on the shared entry set.
@@ -564,9 +572,7 @@ pub fn compare(prog: &Program, cfg: &GhidraOracleConfig) -> GhidraOracleReport {
                 ghidra_blocks_estimated: 0,
                 ghidrust_insns: f.insn_count,
                 match_kind: MatchKind::MissingGhidra,
-                notes: format!(
-                    "{note_head} — see docs/GHIDRA_HEADTOHEAD.md § Runbook"
-                ),
+                notes: format!("{note_head} — see docs/GHIDRA_HEADTOHEAD.md § Runbook"),
                 token_similarity: None,
                 ghidrust_stage1_us: f.stage1_us,
                 ghidra_wall_us: None,
@@ -617,8 +623,7 @@ pub fn shared_entry_list(
     captured: &[CapturedGhidraDecompile],
     max_functions: usize,
 ) -> Vec<u64> {
-    let ghidra_set: std::collections::BTreeSet<u64> =
-        captured.iter().map(|c| c.entry).collect();
+    let ghidra_set: std::collections::BTreeSet<u64> = captured.iter().map(|c| c.entry).collect();
     prog.analysis
         .functions
         .iter()
@@ -652,7 +657,10 @@ pub enum GhidraSpawnError {
     BinaryMissing(PathBuf),
     TempSetup(String),
     Spawn(String),
-    NonZeroExit { code: Option<i32>, stderr: String },
+    NonZeroExit {
+        code: Option<i32>,
+        stderr: String,
+    },
     Timeout(Duration),
     ParseCapture(String),
     /// analyzeHeadless exited 0 but never wrote our capture JSON (typical
@@ -670,7 +678,9 @@ impl std::fmt::Display for GhidraSpawnError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InstallMissing(p) => write!(f, "ghidra install dir missing: {}", p.display()),
-            Self::HeadlessMissing(p) => write!(f, "analyzeHeadless not found under {}", p.display()),
+            Self::HeadlessMissing(p) => {
+                write!(f, "analyzeHeadless not found under {}", p.display())
+            }
             Self::BinaryMissing(p) => write!(f, "binary not readable: {}", p.display()),
             Self::TempSetup(e) => write!(f, "temp setup failed: {e}"),
             Self::Spawn(e) => write!(f, "spawn failed: {e}"),
@@ -680,7 +690,11 @@ impl std::fmt::Display for GhidraSpawnError {
             }
             Self::Timeout(d) => write!(f, "analyzeHeadless timed out after {}s", d.as_secs()),
             Self::ParseCapture(e) => write!(f, "capture JSON parse failed: {e}"),
-            Self::NoCaptureEmitted { path, scratch, stderr_tail } => {
+            Self::NoCaptureEmitted {
+                path,
+                scratch,
+                stderr_tail,
+            } => {
                 write!(
                     f,
                     "no capture file written at {} (scratch kept at {} for inspection); stderr tail: {}",
@@ -896,8 +910,8 @@ pub fn spawn_ghidra_headless(
     }
     let text = std::fs::read_to_string(&out_json)
         .map_err(|e| GhidraSpawnError::ParseCapture(e.to_string()))?;
-    let parsed: Vec<CapturedGhidraDecompile> = serde_json::from_str(&text)
-        .map_err(|e| GhidraSpawnError::ParseCapture(e.to_string()))?;
+    let parsed: Vec<CapturedGhidraDecompile> =
+        serde_json::from_str(&text).map_err(|e| GhidraSpawnError::ParseCapture(e.to_string()))?;
 
     let _ = std::fs::remove_dir_all(&scratch);
     Ok(parsed)
@@ -1026,9 +1040,10 @@ mod tests {
         // Even with just one captured row, the aggregate wall time must be
         // reported (>=1234) and the row must not be Missing.
         assert_eq!(rep.ghidra_total_us, Some(1234));
-        let similar_or_divergent = rep.rows.iter().any(|r| {
-            matches!(r.match_kind, MatchKind::Similar | MatchKind::Divergent)
-        });
+        let similar_or_divergent = rep
+            .rows
+            .iter()
+            .any(|r| matches!(r.match_kind, MatchKind::Similar | MatchKind::Divergent));
         assert!(similar_or_divergent, "captured row should classify");
     }
 
@@ -1222,7 +1237,10 @@ mod tests {
         if prog.analysis.functions.iter().any(|f| f.entry == entry) {
             assert!(shared.contains(&entry), "expected shared entry: {shared:?}");
         }
-        assert!(!shared.contains(&0xdeadbeef), "capture-only entries filtered out");
+        assert!(
+            !shared.contains(&0xdeadbeef),
+            "capture-only entries filtered out"
+        );
     }
 
     #[test]
@@ -1246,7 +1264,10 @@ mod tests {
             matched.token_similarity.is_some(),
             "Stage-1 row should carry token_similarity"
         );
-        assert!(matched.ghidrust_stage1_us > 0, "Stage-1 wall must be captured");
+        assert!(
+            matched.ghidrust_stage1_us > 0,
+            "Stage-1 wall must be captured"
+        );
     }
 
     #[test]

@@ -612,6 +612,26 @@ You should not need to type JSON by hand day-to-day — the IDE/agent does that 
 
 ---
 
+## Decrypt and crypto discovery
+
+Use the discovery order **Find Crypt → recover strings → capabilities → recipe peel**. Results are evidence-based; a successful GCM recipe returns the counter-mode plaintext path but does not authenticate a tag.
+
+```bash
+# Locate known cryptographic tables and likely decrypt/encoding sites
+ghidrust crypt-constants PATH --algo AES --json
+ghidrust recover-strings PATH --only stack,tight,decoded --json
+ghidrust crypto-capabilities PATH --tag decrypt --json
+
+# Peel explicit data or ask the bounded heuristic to try common transforms
+ghidrust decode bake -b64 SGVsbG8= -op FromBase64 --json
+ghidrust decode bake -hex CIPHERTEXT -op AESDecrypt -key-hex KEY -iv-hex IV -mode cbc --json
+ghidrust decode magic -b64 SGVsbG8= -depth 3 -crib Hello --json
+```
+
+MCP equivalents are `crypt_constants`, `recover_strings`, `list_crypto_capabilities`, `decode_bake`, and `decode_magic`. See [skill/decrypt-feature-test-log.md](skill/decrypt-feature-test-log.md) for the tested feature matrix.
+
+---
+
 ## Architecture
 
 ```

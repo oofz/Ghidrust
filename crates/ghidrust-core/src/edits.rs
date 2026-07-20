@@ -192,10 +192,7 @@ mod comments_serde {
         de: D,
     ) -> Result<BTreeMap<(u64, CommentKind), String>, D::Error> {
         let rows: Vec<Row> = Vec::deserialize(de)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| ((r.va, r.kind), r.text))
-            .collect())
+        Ok(rows.into_iter().map(|r| ((r.va, r.kind), r.text)).collect())
     }
 }
 
@@ -405,10 +402,7 @@ impl ProgramEdits {
             return;
         }
         self.all_function_tags.insert(tag.clone());
-        self.function_tags
-            .entry(entry)
-            .or_default()
-            .insert(tag);
+        self.function_tags.entry(entry).or_default().insert(tag);
     }
 
     /// Remove `tag` from the function at `entry`. Does not remove the tag from
@@ -509,16 +503,52 @@ impl Program {
 /// Built-in data types exposes in the "BuiltInTypes" archive (subset relevant
 /// to Ghidrust's Stage-0 rendering). Ordered as shows them in the DTM.
 pub const BUILTIN_TYPES: &[&str] = &[
-    "void", "bool",
-    "byte", "sbyte", "word", "sword", "dword", "sdword", "qword", "sqword",
-    "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t",
-    "int64_t", "uint64_t",
-    "char", "uchar", "wchar_t", "wchar16", "wchar32",
-    "short", "ushort", "int", "uint", "long", "ulong", "longlong", "ulonglong",
-    "float", "double", "longdouble",
-    "pointer", "pointer32", "pointer64",
-    "undefined", "undefined1", "undefined2", "undefined4", "undefined8",
-    "string", "unicode", "TerminatedCString", "TerminatedUnicode",
+    "void",
+    "bool",
+    "byte",
+    "sbyte",
+    "word",
+    "sword",
+    "dword",
+    "sdword",
+    "qword",
+    "sqword",
+    "int8_t",
+    "uint8_t",
+    "int16_t",
+    "uint16_t",
+    "int32_t",
+    "uint32_t",
+    "int64_t",
+    "uint64_t",
+    "char",
+    "uchar",
+    "wchar_t",
+    "wchar16",
+    "wchar32",
+    "short",
+    "ushort",
+    "int",
+    "uint",
+    "long",
+    "ulong",
+    "longlong",
+    "ulonglong",
+    "float",
+    "double",
+    "longdouble",
+    "pointer",
+    "pointer32",
+    "pointer64",
+    "undefined",
+    "undefined1",
+    "undefined2",
+    "undefined4",
+    "undefined8",
+    "string",
+    "unicode",
+    "TerminatedCString",
+    "TerminatedUnicode",
 ];
 
 #[cfg(test)]
@@ -542,7 +572,9 @@ mod tests {
         e.set_comment(0x1000, CommentKind::Plate, "**PLATE**");
         let all = e.comments_at(0x1000);
         assert_eq!(all.len(), 2);
-        assert!(all.iter().any(|(k, t)| *k == CommentKind::Eol && *t == "eol!"));
+        assert!(all
+            .iter()
+            .any(|(k, t)| *k == CommentKind::Eol && *t == "eol!"));
         e.set_comment(0x1000, CommentKind::Eol, "");
         assert_eq!(e.comments_at(0x1000).len(), 1);
     }
@@ -675,7 +707,9 @@ mod tests {
 
     #[test]
     fn builtin_types_include_essentials() {
-        let want = ["void", "byte", "word", "dword", "qword", "char", "int", "pointer"];
+        let want = [
+            "void", "byte", "word", "dword", "qword", "char", "int", "pointer",
+        ];
         for w in want {
             assert!(BUILTIN_TYPES.contains(&w), "missing builtin type {w}");
         }

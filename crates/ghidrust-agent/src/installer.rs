@@ -47,7 +47,9 @@ pub fn install_command_for_platform() -> Option<InstallCommand> {
                 "-Command".into(),
                 one_liner.clone(),
             ],
-            display: format!("powershell -NoProfile -ExecutionPolicy Bypass -Command \"{one_liner}\""),
+            display: format!(
+                "powershell -NoProfile -ExecutionPolicy Bypass -Command \"{one_liner}\""
+            ),
             docs_url: "https://github.com/xai-org/grok-build/blob/main/README.md",
         })
     }
@@ -91,8 +93,20 @@ pub fn grok_binary_path() -> Option<PathBuf> {
         candidates.push(PathBuf::from(&home).join(".grok/bin").join(exe_name));
     }
     if let Ok(userprofile) = std::env::var("USERPROFILE") {
-        candidates.push(PathBuf::from(&userprofile).join(".grok").join("bin").join(exe_name));
-        candidates.push(PathBuf::from(&userprofile).join("AppData").join("Local").join("Programs").join("grok").join(exe_name));
+        candidates.push(
+            PathBuf::from(&userprofile)
+                .join(".grok")
+                .join("bin")
+                .join(exe_name),
+        );
+        candidates.push(
+            PathBuf::from(&userprofile)
+                .join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("grok")
+                .join(exe_name),
+        );
     }
     candidates.into_iter().find(|c| c.is_file())
 }

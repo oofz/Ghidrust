@@ -7,9 +7,7 @@
 //! 4. Decoded instructions — absolute operand hex + RIP-relative targets
 //! 5. Import / IAT slots — `call/jmp [rip+disp]` landing on IAT VAs
 
-use crate::disasm::{
-    decode_one, disassemble_range, disassemble_range_ex, DisasmMode,
-};
+use crate::disasm::{decode_one, disassemble_range, disassemble_range_ex, DisasmMode};
 use crate::program::{ImportEntry, Program};
 use serde::Serialize;
 
@@ -69,7 +67,13 @@ pub fn xrefs_to(
 
     for r in &prog.analysis.references {
         if r.to == target {
-            out.push(xref(r.from, r.to, static_kind(&r.kind), r.kind.clone(), None));
+            out.push(xref(
+                r.from,
+                r.to,
+                static_kind(&r.kind),
+                r.kind.clone(),
+                None,
+            ));
         }
     }
 
@@ -348,10 +352,7 @@ pub fn rip_relative_targets(insn: &crate::disasm::Instruction) -> Vec<u64> {
     let mut i = 0;
     while i + 5 < bytes.len() {
         // look for "[rip"
-        if bytes[i] == b'['
-            && i + 4 < bytes.len()
-            && &ops[i..i + 4] == "[rip"
-        {
+        if bytes[i] == b'[' && i + 4 < bytes.len() && &ops[i..i + 4] == "[rip" {
             let after = i + 4;
             let rest = &ops[after..];
             if let Some((disp, consumed)) = parse_rip_disp(rest) {
@@ -440,11 +441,7 @@ fn scan_exec_xrefs_to(prog: &Program, target: u64, out: &mut Vec<XRef>) {
     }
 }
 
-fn push_listing_xrefs_to(
-    listing: &[crate::disasm::Instruction],
-    target: u64,
-    out: &mut Vec<XRef>,
-) {
+fn push_listing_xrefs_to(listing: &[crate::disasm::Instruction], target: u64, out: &mut Vec<XRef>) {
     for insn in listing {
         if instruction_targets(insn).contains(&target) {
             out.push(xref(
@@ -458,13 +455,7 @@ fn push_listing_xrefs_to(
     }
 }
 
-fn xref(
-    from: u64,
-    to: u64,
-    kind: &'static str,
-    preview: String,
-    encoding: Option<String>,
-) -> XRef {
+fn xref(from: u64, to: u64, kind: &'static str, preview: String, encoding: Option<String>) -> XRef {
     XRef {
         from,
         to,
@@ -478,7 +469,10 @@ fn xref(
 }
 
 fn resolve_target_fn(prog: &Program, va: u64) -> (Option<u64>, Option<String>) {
-    if let Some(f) = prog.function_at(va).or_else(|| prog.function_containing(va)) {
+    if let Some(f) = prog
+        .function_at(va)
+        .or_else(|| prog.function_containing(va))
+    {
         (Some(f.entry), Some(f.name.clone()))
     } else {
         (None, None)
@@ -490,7 +484,10 @@ fn attribute(prog: &Program, r: &mut XRef) {
         r.from_entry = Some(f.entry);
         r.from_function = Some(f.name.clone());
     }
-    if let Some(f) = prog.function_at(r.to).or_else(|| prog.function_containing(r.to)) {
+    if let Some(f) = prog
+        .function_at(r.to)
+        .or_else(|| prog.function_containing(r.to))
+    {
         r.to_entry = Some(f.entry);
     }
 }
@@ -563,7 +560,11 @@ mod tests {
         let insn = decode_one(&bytes, 0x1000).unwrap();
         assert_eq!(insn.mnemonic, "lea");
         let tgts = instruction_targets(&insn);
-        assert!(tgts.contains(&0x1017), "targets={tgts:?} ops={}", insn.operands);
+        assert!(
+            tgts.contains(&0x1017),
+            "targets={tgts:?} ops={}",
+            insn.operands
+        );
     }
 
     #[test]
@@ -581,12 +582,14 @@ mod tests {
     fn xrefs_to_returns_analysis_and_ptr_table_refs() {
         let mut prog = load_path(fixture_path("analysis_lab.pe")).unwrap();
         let entry = prog.entry.unwrap();
-        prog.analysis.address_tables.push(crate::program::AddressTableInfo {
-            base: prog.image_base,
-            count: 1,
-            entries: vec![entry],
-            role: crate::program::AddressTableRole::Unknown,
-        });
+        prog.analysis
+            .address_tables
+            .push(crate::program::AddressTableInfo {
+                base: prog.image_base,
+                count: 1,
+                entries: vec![entry],
+                role: crate::program::AddressTableRole::Unknown,
+            });
         prog.analysis.references.push(ReferenceInfo {
             from: prog.image_base + 0x40,
             to: entry,
@@ -634,10 +637,8 @@ mod tests {
         });
         let refs = xrefs_to_string_filter_opts(&prog, "WideLab", "utf16le", false);
         assert!(
-            refs.iter().any(|r| {
-                r.from == insn_va
-                    && r.encoding.as_deref() == Some("utf16le")
-            }),
+            refs.iter()
+                .any(|r| { r.from == insn_va && r.encoding.as_deref() == Some("utf16le") }),
             "{refs:?}"
         );
         let ascii_only = xrefs_to_string_filter_opts(&prog, "WideLab", "ascii", false);
@@ -765,7 +766,9 @@ mod tests {
 
         let edges = calls_callees(&prog, caller);
         assert!(
-            edges.iter().any(|e| e.to == callee && e.to_entry == Some(callee)),
+            edges
+                .iter()
+                .any(|e| e.to == callee && e.to_entry == Some(callee)),
             "{edges:?}"
         );
     }

@@ -257,8 +257,7 @@ pub fn build_cfg_with_leaders(
     for (i, aop) in seq.addressed.iter().enumerate() {
         op_index_by_addr.entry(aop.address).or_insert(i);
     }
-    let instruction_starts: BTreeSet<u64> =
-        seq.addressed.iter().map(|a| a.address).collect();
+    let instruction_starts: BTreeSet<u64> = seq.addressed.iter().map(|a| a.address).collect();
 
     for i in 0..seq.addressed.len() {
         let aop = &seq.addressed[i];
@@ -439,9 +438,7 @@ pub fn block_defs(cfg: &Cfg) -> Vec<HashSet<(ghidrust_ir::AddrSpace, u64)>> {
 /// dominance-frontier blocks reached by its defs. Output maps
 /// `(space, offset) → set of block ids needing a phi`. This is the direct
 /// input for the rename pass we will land next.
-pub fn phi_placement(
-    cfg: &Cfg,
-) -> BTreeMap<(ghidrust_ir::AddrSpace, u64), BTreeSet<u32>> {
+pub fn phi_placement(cfg: &Cfg) -> BTreeMap<(ghidrust_ir::AddrSpace, u64), BTreeSet<u32>> {
     let df = cfg.dominance_frontiers();
     let defs = block_defs(cfg);
     let mut needs: BTreeMap<(ghidrust_ir::AddrSpace, u64), BTreeSet<u32>> = BTreeMap::new();
@@ -503,7 +500,11 @@ mod tests {
         // c3     ret
         let bytes = [0x39, 0xc1, 0x74, 0x02, 0x31, 0xc0, 0xc3, 0x31, 0xc9, 0xc3];
         let cfg = cfg_for(&bytes, 0x2000);
-        assert!(cfg.len() >= 2, "expected multiple blocks, got {}", cfg.len());
+        assert!(
+            cfg.len() >= 2,
+            "expected multiple blocks, got {}",
+            cfg.len()
+        );
         // Entry block ends with CBranch → two successors.
         assert!(cfg.blocks[0].successors.len() >= 2);
         // Everything must be reachable from entry.

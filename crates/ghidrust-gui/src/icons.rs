@@ -31,9 +31,7 @@ pub fn m3_icon(ui: &mut Ui, icon: M3Icon, size: f32, color: Color32) -> egui::Re
 fn paint_icon(painter: &egui::Painter, rect: Rect, icon: M3Icon, color: Color32) {
     let s = rect.width().min(rect.height());
     let origin = rect.center() - Vec2::splat(s * 0.5);
-    let map = |x: f32, y: f32| -> Pos2 {
-        Pos2::new(origin.x + x / VB * s, origin.y + y / VB * s)
-    };
+    let map = |x: f32, y: f32| -> Pos2 { Pos2::new(origin.x + x / VB * s, origin.y + y / VB * s) };
     let stroke = Stroke::new((s / VB) * 1.75, color);
 
     match icon {
@@ -52,7 +50,11 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: M3Icon, color: Color32)
                 map(12.0, 6.0),
                 map(10.0, 4.0),
             ];
-            painter.add(egui::Shape::convex_polygon(pts.to_vec(), color.gamma_multiply(0.35), stroke));
+            painter.add(egui::Shape::convex_polygon(
+                pts.to_vec(),
+                color.gamma_multiply(0.35),
+                stroke,
+            ));
         }
         M3Icon::CheckCircle => {
             // Outer circle fill + check mark
@@ -77,7 +79,11 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: M3Icon, color: Color32)
         M3Icon::PlayArrow => {
             // Triangle pointing right: (8,5) (8,19) (19,12)
             let pts = [map(8.0, 5.0), map(8.0, 19.0), map(19.0, 12.0)];
-            painter.add(egui::Shape::convex_polygon(pts.to_vec(), color, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(
+                pts.to_vec(),
+                color,
+                Stroke::NONE,
+            ));
         }
     }
 }
@@ -104,7 +110,11 @@ pub fn status_badge(ui: &mut Ui, analyzed: bool, analyzed_color: Color32, muted:
         ui.spacing_mut().item_spacing.x = 4.0;
         if analyzed {
             m3_icon(ui, M3Icon::CheckCircle, 14.0, analyzed_color);
-            ui.label(egui::RichText::new("Analyzed").small().color(analyzed_color));
+            ui.label(
+                egui::RichText::new("Analyzed")
+                    .small()
+                    .color(analyzed_color),
+            );
         } else {
             m3_icon(ui, M3Icon::RadioUnchecked, 14.0, muted);
             ui.label(egui::RichText::new("Not analyzed").small().color(muted));

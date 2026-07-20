@@ -35,7 +35,11 @@ pub fn default_start_va(prog: &Program, focus: Option<u64>) -> u64 {
 pub const GOTO_MAX_INSNS: usize = 64;
 
 /// Reload helper tuned for go-to navigation (smaller window).
-pub fn reload_for_goto(prog: &Program, va: u64, opts: &DecodeUiOpts) -> Result<Vec<ghidrust_core::Instruction>, String> {
+pub fn reload_for_goto(
+    prog: &Program,
+    va: u64,
+    opts: &DecodeUiOpts,
+) -> Result<Vec<ghidrust_core::Instruction>, String> {
     let mut nav_opts = opts.clone();
     nav_opts.max_insns = GOTO_MAX_INSNS;
     nav_opts.walk_mode = WalkMode::Bounded;

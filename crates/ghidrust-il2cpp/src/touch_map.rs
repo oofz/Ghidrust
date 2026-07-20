@@ -111,7 +111,9 @@ pub fn build_touch_map(
         }
         let (rva, va, conf, note) = match map_by_idx.get(&m.index) {
             Some(e) if e.rva.is_some() => {
-                let note = e.body_class.map(|c| format!("body_class={}", body_class_str(c)));
+                let note = e
+                    .body_class
+                    .map(|c| format!("body_class={}", body_class_str(c)));
                 (e.rva, e.va, TouchConfidence::RvaBound, note)
             }
             Some(_) => (
@@ -136,9 +138,10 @@ pub fn build_touch_map(
 
     for t in meta.filter_types(filter) {
         let full = t.full_name();
-        if rows.iter().any(|r| {
-            r.kind == TouchKind::Type && r.full_name.as_deref() == Some(full.as_str())
-        }) {
+        if rows
+            .iter()
+            .any(|r| r.kind == TouchKind::Type && r.full_name.as_deref() == Some(full.as_str()))
+        {
             continue;
         }
         rows.push(TouchMapRow {
@@ -268,11 +271,9 @@ mod tests {
         let meta = Il2CppMetadata::parse(&bytes).unwrap();
         let report = build_touch_map(&meta, "Camera", None);
         assert!(report.row_count >= 1);
-        assert!(report.rows.iter().any(|r| {
-            r.full_name
-                .as_deref()
-                .unwrap_or("")
-                .contains("Camera")
-        }));
+        assert!(report
+            .rows
+            .iter()
+            .any(|r| { r.full_name.as_deref().unwrap_or("").contains("Camera") }));
     }
 }

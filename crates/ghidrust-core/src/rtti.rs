@@ -58,9 +58,7 @@ pub fn recover_rtti(prog: &Program) -> Result<RttiReport> {
     }
 
     if report.classes.is_empty() {
-        report
-            .notes
-            .push("no RTTI class names recovered".into());
+        report.notes.push("no RTTI class names recovered".into());
     } else {
         report.notes.push(format!(
             "recovered {} class record(s)",
@@ -202,7 +200,7 @@ fn find_vtable_for_col(prog: &Program, col_va: u64) -> Option<u64> {
         while off + 8 <= b.len() {
             let val = u64::from_le_bytes(b[off..off + 8].try_into().unwrap());
             if val == col_va {
-                // On MSVC x64, the COL pointer sits at vtable[-1]; first virtfn at this+8? 
+                // On MSVC x64, the COL pointer sits at vtable[-1]; first virtfn at this+8?
                 // Actually: object.vfptr -> vtable[0] which is first function; COL is at vfptr[-1].
                 // So the pointer we found is at address A where *A == col; vtable starts at A+8.
                 return Some(block.va + off as u64 + 8);
@@ -220,7 +218,10 @@ fn scan_itanium_typeinfo_names(prog: &Program) -> Vec<(u64, String)> {
         let mut i = 0;
         while i + 4 < b.len() {
             // _ZTS... null-terminated typeinfo name strings
-            if b[i] == b'_' && b.get(i + 1) == Some(&b'Z') && b.get(i + 2) == Some(&b'T') && b.get(i + 3) == Some(&b'S')
+            if b[i] == b'_'
+                && b.get(i + 1) == Some(&b'Z')
+                && b.get(i + 2) == Some(&b'T')
+                && b.get(i + 3) == Some(&b'S')
             {
                 if let Some(s) = read_cstr(b, i) {
                     if s.len() > 4 && s.len() < 256 {

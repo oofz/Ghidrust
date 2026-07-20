@@ -55,7 +55,7 @@ pub trait ArchDecode: Send {
                 Ok(insn) => {
                     let len = insn.length as usize;
                     if len == 0 {
- return Err(Error::Decode("zero-length instruction".into()));
+                        return Err(Error::Decode("zero-length instruction".into()));
                     }
                     off += len;
                     va = va.wrapping_add(len as u64);
@@ -76,13 +76,13 @@ pub trait ArchDecode: Send {
 pub fn open_decoder(arch: Arch, mode: Mode) -> Result<Box<dyn ArchDecode>> {
     if !crate::support::support(crate::support::SupportQuery::Arch(arch)) {
         return Err(Error::Arch(format!(
- "architecture {:?} is not supported",
+            "architecture {:?} is not supported",
             arch
         )));
     }
     if !mode.is_valid_for(arch) {
         return Err(Error::Mode(format!(
- "invalid mode {:#x} for {:?}",
+            "invalid mode {:#x} for {:?}",
             mode.bits(),
             arch
         )));
@@ -112,7 +112,7 @@ pub fn open_decoder(arch: Arch, mode: Mode) -> Result<Box<dyn ArchDecode>> {
         Arch::Sh => Ok(Box::new(sh::ShDecoder::open(mode)?)),
         Arch::Xtensa => Ok(Box::new(xtensa::XtensaDecoder::open(mode)?)),
         other => Err(Error::Arch(format!(
- "decoder for {:?} is not implemented",
+            "decoder for {:?} is not implemented",
             other
         ))),
     }

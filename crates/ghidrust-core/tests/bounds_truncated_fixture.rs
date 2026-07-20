@@ -54,8 +54,8 @@ fn linear_returns_more_than_prologue_only_bounded() {
         Some(short_end),
     )
     .expect("bounded");
-    let linear = disassemble_range_ex(&prog, entry, 80, false, DisasmMode::Linear, None)
-        .expect("linear");
+    let linear =
+        disassemble_range_ex(&prog, entry, 80, false, DisasmMode::Linear, None).expect("linear");
 
     assert_eq!(bounded.stop_reason, DisasmStopReason::FunctionEnd);
     assert!(

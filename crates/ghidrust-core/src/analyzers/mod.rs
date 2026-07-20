@@ -4,14 +4,17 @@ mod address_tables;
 mod aggressive;
 mod call_convention;
 mod call_fixup;
-mod demangle_ms;
+pub mod crypt_constants;
+pub mod crypto_capabilities;
 mod decomp_param;
 mod decomp_switch;
+mod demangle_ms;
 mod embedded_media;
 mod external_params;
 mod fid;
 mod function_start;
 mod noreturn;
+pub mod obfuscated_strings;
 mod pdb;
 mod resources;
 mod scan_util;
@@ -25,6 +28,14 @@ use crate::program::Program;
 use crate::rtti::{recover_rtti, RttiReport};
 use serde::Serialize;
 
+pub use crypt_constants::{crypt_xref_seed_vas, scan_crypt_constants, CryptConstantHit};
+pub use crypto_capabilities::{
+    scan_crypto_capabilities, suggest_ops_for_capability, CryptoCapabilityHit,
+};
+pub use obfuscated_strings::{
+    decoder_seed_vas, recover_obfuscated_strings, ObfuscatedStringHit, ObfuscatedStringKind,
+    RecoverStringsOpts,
+};
 pub use strings::{
     collect_strings, collect_strings_bytes, collect_strings_opts, scan_ascii_strings,
     scan_utf16le_strings, FoundString, StringCollectOpts, StringMatchMode,
@@ -38,13 +49,16 @@ pub const ANALYZER_NAMES: &[&str] = &[
     "Call Convention ID",
     "Call-Fixup Installer",
     "Create Address Tables",
+    "Crypto Capabilities",
     "Decompiler Parameter ID",
     "Decompiler Switch Analysis",
     "Demangler Microsoft",
     "Embedded Media",
+    "Find Crypt",
     "Function ID",
     "Function Start Search",
     "Non-Returning Functions - Discovered",
+    "Obfuscated Strings",
     "PDB MSDIA",
     "PDB Universal",
     "Shared Return Calls",
@@ -108,6 +122,12 @@ pub struct AnalyzerOutput {
     pub varargs_entries: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_params: Option<Vec<(u64, String)>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crypt_constants: Option<Vec<CryptConstantHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub obfuscated_strings: Option<Vec<ObfuscatedStringHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crypto_capabilities: Option<Vec<CryptoCapabilityHit>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -130,6 +150,7 @@ pub fn analyzer_catalog() -> Vec<AnalyzerInfo> {
                     | "Create Address Tables"
                     | "Embedded Media"
                     | "Demangler Microsoft"
+                    | "Find Crypt"
             ),
             status: AnalyzerStatus::Implemented,
         })
@@ -214,13 +235,16 @@ fn run_one(prog: &mut Program, name: &str) -> Result<AnalyzerOutput> {
         "Call Convention ID" => call_convention::run(prog),
         "Call-Fixup Installer" => call_fixup::run(prog),
         "Create Address Tables" => address_tables::run(prog),
+        "Crypto Capabilities" => crypto_capabilities::run(prog),
         "Decompiler Parameter ID" => decomp_param::run(prog),
         "Decompiler Switch Analysis" => decomp_switch::run(prog),
         "Demangler Microsoft" => demangle_ms::run(prog),
         "Embedded Media" => embedded_media::run(prog),
+        "Find Crypt" => crypt_constants::run(prog),
         "Function ID" => fid::run(prog),
         "Function Start Search" => function_start::run(prog),
         "Non-Returning Functions - Discovered" => noreturn::run(prog),
+        "Obfuscated Strings" => obfuscated_strings::run(prog),
         "PDB MSDIA" => pdb::run_msdia(prog),
         "PDB Universal" => pdb::run_universal(prog),
         "Shared Return Calls" => shared_return::run(prog),
@@ -257,10 +281,8 @@ mod tests {
     #[test]
     fn catalog_all_implemented() {
         let cat = analyzer_catalog();
-        assert_eq!(cat.len(), 21);
-        assert!(cat
-            .iter()
-            .all(|c| c.status == AnalyzerStatus::Implemented));
+        assert_eq!(cat.len(), 24);
+        assert!(cat.iter().all(|c| c.status == AnalyzerStatus::Implemented));
     }
 
     #[test]
@@ -288,10 +310,7 @@ mod tests {
                 r.message
             );
         }
-        let with_gpu = rep
-            .results
-            .iter()
-            .any(|r| r.message.contains("gpu_enrich"));
+        let with_gpu = rep.results.iter().any(|r| r.message.contains("gpu_enrich"));
         assert!(
             with_gpu,
             "expected gpu_enrich annotation in messages: {:?}",

@@ -241,11 +241,7 @@ fn rename_block(
     //     block and produce SsaOps; the block was seeded empty above.
     let src_ops = cfg.blocks[b as usize].ops.clone();
     for op in src_ops {
-        let inputs: Vec<SsaOperand> = op
-            .inputs
-            .iter()
-            .map(|v| rename_input(v, stacks))
-            .collect();
+        let inputs: Vec<SsaOperand> = op.inputs.iter().map(|v| rename_input(v, stacks)).collect();
         let output = op.output.as_ref().map(|v| {
             let key = (v.space, v.offset);
             let ver = new_version(versions, key);
@@ -298,10 +294,7 @@ fn rename_block(
     }
 }
 
-fn rename_input(
-    v: &Varnode,
-    stacks: &HashMap<(AddrSpace, u64), Vec<u32>>,
-) -> SsaOperand {
+fn rename_input(v: &Varnode, stacks: &HashMap<(AddrSpace, u64), Vec<u32>>) -> SsaOperand {
     match v.space {
         AddrSpace::Constant => SsaOperand::Const(v.clone()),
         _ => {
@@ -440,7 +433,11 @@ pub fn const_fold(func: &mut SsaFunction) -> usize {
                 let a_const = op.inputs.first().and_then(SsaOperand::as_const);
                 let b_const = op.inputs.get(1).and_then(SsaOperand::as_const);
                 let width = dst.size.max(1);
-                let mask = if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                let mask = if width >= 8 {
+                    u64::MAX
+                } else {
+                    (1u64 << (width * 8)) - 1
+                };
                 let folded = match op.opcode {
                     OpCode::IntAdd => match (a_const, b_const) {
                         (Some(a), Some(b)) => Some(a.wrapping_add(b) & mask),
@@ -499,9 +496,7 @@ pub fn const_fold(func: &mut SsaFunction) -> usize {
                         _ => None,
                     },
                     OpCode::IntSLessEqual => match (a_const, b_const) {
-                        (Some(a), Some(b)) => {
-                            Some(if (a as i64) <= (b as i64) { 1 } else { 0 })
-                        }
+                        (Some(a), Some(b)) => Some(if (a as i64) <= (b as i64) { 1 } else { 0 }),
                         _ => None,
                     },
                     OpCode::IntZExt | OpCode::IntSExt | OpCode::Copy | OpCode::Cast => {
@@ -509,11 +504,8 @@ pub fn const_fold(func: &mut SsaFunction) -> usize {
                         // sign-extended to the destination width.
                         a_const.map(|a| match op.opcode {
                             OpCode::IntSExt => {
-                                let src_size = op
-                                    .inputs
-                                    .first()
-                                    .map(|v| v.varnode().size)
-                                    .unwrap_or(width);
+                                let src_size =
+                                    op.inputs.first().map(|v| v.varnode().size).unwrap_or(width);
                                 if src_size >= 8 {
                                     a & mask
                                 } else {
@@ -868,11 +860,7 @@ mod tests {
             PcodeOp::new(OpCode::Branch, None, vec![Varnode::constant(0x200, 8)]),
         );
         // Block 3 @ 0x200: return rax
-        seq.push_addressed(
-            0x200,
-            1,
-            PcodeOp::new(OpCode::Return, None, vec![rax]),
-        );
+        seq.push_addressed(0x200, 1, PcodeOp::new(OpCode::Return, None, vec![rax]));
         seq
     }
 
@@ -901,7 +889,11 @@ mod tests {
         let cfg = build_cfg(&diamond_seq(), 0x0, 0x201);
         let func = build_ssa(&cfg);
         // RAX has: two block defs + one phi def = 3 total versions expected.
-        let rax_ver = func.versions.get(&(AddrSpace::Register, 0)).copied().unwrap_or(0);
+        let rax_ver = func
+            .versions
+            .get(&(AddrSpace::Register, 0))
+            .copied()
+            .unwrap_or(0);
         assert!(rax_ver >= 3, "expected >=3 rax versions, got {rax_ver}");
     }
 
@@ -926,7 +918,10 @@ mod tests {
         let func = build_ssa(&cfg);
         let dump = dump_ssa(&func);
         assert!(dump.contains("φ("), "dump should show phi op: {dump}");
-        assert!(dump.contains("reg0#"), "dump should show versioned rax: {dump}");
+        assert!(
+            dump.contains("reg0#"),
+            "dump should show versioned rax: {dump}"
+        );
     }
 
     #[test]
@@ -939,12 +934,20 @@ mod tests {
         seq.push_addressed(
             0x0,
             1,
-            PcodeOp::new(OpCode::Copy, Some(t0.clone()), vec![Varnode::constant(0x100, 8)]),
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(t0.clone()),
+                vec![Varnode::constant(0x100, 8)],
+            ),
         );
         seq.push_addressed(
             0x1,
             1,
-            PcodeOp::new(OpCode::Copy, Some(t1.clone()), vec![Varnode::constant(0x20, 8)]),
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(t1.clone()),
+                vec![Varnode::constant(0x20, 8)],
+            ),
         );
         seq.push_addressed(
             0x2,
@@ -976,24 +979,31 @@ mod tests {
         seq.push_addressed(
             0x0,
             1,
-            PcodeOp::new(OpCode::Copy, Some(t0.clone()), vec![Varnode::constant(1, 8)]),
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(t0.clone()),
+                vec![Varnode::constant(1, 8)],
+            ),
         );
         seq.push_addressed(
             0x1,
             1,
-            PcodeOp::new(OpCode::Copy, Some(t1.clone()), vec![Varnode::constant(2, 8)]),
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(t1.clone()),
+                vec![Varnode::constant(2, 8)],
+            ),
         );
-        seq.push_addressed(
-            0x2,
-            1,
-            PcodeOp::new(OpCode::IntAdd, Some(t2), vec![t0, t1]),
-        );
+        seq.push_addressed(0x2, 1, PcodeOp::new(OpCode::IntAdd, Some(t2), vec![t0, t1]));
         seq.push_addressed(0x3, 1, PcodeOp::new(OpCode::Return, None, vec![]));
         let cfg = build_cfg(&seq, 0x0, 0x4);
         let mut func = build_ssa(&cfg);
         let before = func.blocks[0].ops.len();
         let removed = dead_code_eliminate(&mut func);
-        assert!(removed >= 3, "expected at least 3 dead ops removed; got {removed}");
+        assert!(
+            removed >= 3,
+            "expected at least 3 dead ops removed; got {removed}"
+        );
         assert!(func.blocks[0].ops.len() < before);
         // Return must survive because it's a control-flow op.
         assert!(func.blocks[0]
@@ -1065,7 +1075,11 @@ mod tests {
         seq.push_addressed(
             0x0,
             1,
-            PcodeOp::new(OpCode::Copy, Some(t0.clone()), vec![Varnode::constant(0x1234, 8)]),
+            PcodeOp::new(
+                OpCode::Copy,
+                Some(t0.clone()),
+                vec![Varnode::constant(0x1234, 8)],
+            ),
         );
         seq.push_addressed(
             0x1,
@@ -1081,7 +1095,10 @@ mod tests {
         let cfg = build_cfg(&seq, 0x0, 0x4);
         let mut func = build_ssa(&cfg);
         let rewrote = copy_propagate(&mut func);
-        assert!(rewrote > 0, "copy_propagate should rewrite at least one operand");
+        assert!(
+            rewrote > 0,
+            "copy_propagate should rewrite at least one operand"
+        );
         let ret_op = func.blocks[0]
             .ops
             .iter()

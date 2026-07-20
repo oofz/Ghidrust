@@ -17,31 +17,37 @@ fn decode_branch(word: u32, cond: u32, address: u64, raw: &[u8]) -> Result<Instr
     let (mnemonic, operands) = if link != 0 {
         (
             if suffix.is_empty() {
- "bl".to_string()
+                "bl".to_string()
             } else {
- format!("bl{suffix}")
+                format!("bl{suffix}")
             },
             fmt_imm_hex(target as i64),
         )
     } else {
         (
             if suffix.is_empty() {
- "b".to_string()
+                "b".to_string()
             } else {
- format!("b{suffix}")
+                format!("b{suffix}")
             },
             fmt_imm_hex(target as i64),
         )
     };
-    Ok(Instruction::with_text(address, raw.to_vec(), mnemonic, operands, 4))
+    Ok(Instruction::with_text(
+        address,
+        raw.to_vec(),
+        mnemonic,
+        operands,
+        4,
+    ))
 }
 
 pub fn try_decode_bx(word: u32, address: u64, raw: &[u8]) -> Option<Result<Instruction>> {
- // BX / BLX register: cond 0001 0010 1111 1111 1111 0000 Rm
+    // BX / BLX register: cond 0001 0010 1111 1111 1111 0000 Rm
     if (word & 0x0ff0_00f0) == 0x0120_00f0 {
         let rm = word & 0xf;
         let link = (word >> 21) & 1;
- let mnemonic = if link != 0 { "blx" } else { "bx" };
+        let mnemonic = if link != 0 { "blx" } else { "bx" };
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),

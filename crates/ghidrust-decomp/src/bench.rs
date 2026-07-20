@@ -72,8 +72,8 @@ impl BenchReport {
 
     pub fn to_text(&self) -> String {
         let mut s = String::new();
-        let stage1_populated = self.stage1_total_us > 0
-            || self.per_function.iter().any(|f| f.stage1_us > 0);
+        let stage1_populated =
+            self.stage1_total_us > 0 || self.per_function.iter().any(|f| f.stage1_us > 0);
         if stage1_populated {
             s.push_str("=== Ghidrust decompile-bench (Stage-0 vs Stage-0.5 vs Stage-1) ===\n");
         } else {
@@ -150,11 +150,7 @@ fn truncate(s: &str, n: usize) -> String {
 /// disassemble each with `max_insns_per_fn`, then run Stage-0 and Stage-0.5
 /// end-to-end. When `prog.analysis.functions` is empty the entry point is
 /// benched instead so the harness still yields useful timings on a fresh load.
-pub fn bench_program(
-    prog: &Program,
-    max_functions: usize,
-    max_insns_per_fn: usize,
-) -> BenchReport {
+pub fn bench_program(prog: &Program, max_functions: usize, max_insns_per_fn: usize) -> BenchReport {
     let mut targets: Vec<(String, u64)> = prog
         .analysis
         .functions
@@ -330,8 +326,7 @@ fn bench_one(name: &str, entry: u64, insns: &[ghidrust_core::Instruction]) -> Fu
     let s0_dur = s0_start.elapsed();
 
     let s05_start = Instant::now();
-    let (s05, cov): (DecompileResult, LiftCoverage) =
-        decompile_instructions_ir(name, entry, insns);
+    let (s05, cov): (DecompileResult, LiftCoverage) = decompile_instructions_ir(name, entry, insns);
     let s05_dur = s05_start.elapsed();
 
     FunctionBench {
@@ -413,13 +408,7 @@ mod tests {
     fn bench_program_stage1_captures_stage1_text_and_wall() {
         let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
         let entry = prog.entry.unwrap();
-        let rep = bench_program_stage1(
-            &prog,
-            Some(&[entry]),
-            4,
-            32,
-            CallConv::Windows,
-        );
+        let rep = bench_program_stage1(&prog, Some(&[entry]), 4, 32, CallConv::Windows);
         assert_eq!(rep.function_count, 1);
         let f = &rep.per_function[0];
         assert_eq!(f.entry, entry);
@@ -432,16 +421,13 @@ mod tests {
     fn bench_program_stage1_parallel_matches_serial_shape() {
         let prog = load_path(fixture_path("tiny_x64.pe")).unwrap();
         let entry = prog.entry.unwrap();
-        let serial =
-            bench_program_stage1(&prog, Some(&[entry]), 4, 32, CallConv::Windows);
-        let par =
-            bench_program_stage1_parallel(&prog, Some(&[entry]), 4, 32, CallConv::Windows);
+        let serial = bench_program_stage1(&prog, Some(&[entry]), 4, 32, CallConv::Windows);
+        let par = bench_program_stage1_parallel(&prog, Some(&[entry]), 4, 32, CallConv::Windows);
         assert_eq!(serial.function_count, par.function_count);
         // Text output must be identical — parallelism only changes
         // scheduling, not the emit.
         assert_eq!(
-            serial.per_function[0].stage1_text,
-            par.per_function[0].stage1_text,
+            serial.per_function[0].stage1_text, par.per_function[0].stage1_text,
             "parallel bench must produce identical Stage-1 text"
         );
     }

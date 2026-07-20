@@ -1,11 +1,11 @@
 pub fn gpr(n: u32) -> String {
- format!("r{n}")
+    format!("r{n}")
 }
 
 pub fn lr() -> &'static str {
- "lr"
+    "lr"
 }
 
 pub fn ctr() -> &'static str {
- "ctr"
+    "ctr"
 }

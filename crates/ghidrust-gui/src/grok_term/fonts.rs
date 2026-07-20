@@ -34,7 +34,9 @@ fn candidate_mono_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         out.push(PathBuf::from("/System/Library/Fonts/Menlo.ttc"));
-        out.push(PathBuf::from("/System/Library/Fonts/Supplemental/Courier New.ttf"));
+        out.push(PathBuf::from(
+            "/System/Library/Fonts/Supplemental/Courier New.ttf",
+        ));
         out.push(PathBuf::from("/System/Library/Fonts/Apple Symbols.ttf"));
     }
     #[cfg(target_os = "linux")]
@@ -87,10 +89,7 @@ pub fn install_terminal_fonts(ctx: &eframe::egui::Context) {
     }
 
     // Primary mono = first candidate; remaining act as fallbacks for missing glyphs.
-    let mono = fonts
-        .families
-        .entry(FontFamily::Monospace)
-        .or_default();
+    let mono = fonts.families.entry(FontFamily::Monospace).or_default();
     // Put our fonts first; keep egui defaults after as last resort.
     let mut rest = mono.clone();
     mono.clear();
@@ -104,10 +103,7 @@ pub fn install_terminal_fonts(ctx: &eframe::egui::Context) {
     }
 
     // Also prepend to Proportional so UI chrome can fall back if needed.
-    let prop = fonts
-        .families
-        .entry(FontFamily::Proportional)
-        .or_default();
+    let prop = fonts.families.entry(FontFamily::Proportional).or_default();
     for k in loaded.iter().rev() {
         if !prop.contains(k) {
             prop.insert(0, k.clone());

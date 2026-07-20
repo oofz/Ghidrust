@@ -41,43 +41,216 @@ pub fn builtin_catalog() -> Vec<ScriptEntry> {
         key_binding: String::new(),
     };
     vec![
-        s("mcp.list_methods", "MCP · Functions", "Enumerate methods in the active program (paginated)."),
-        s("mcp.list_functions", "MCP · Functions", "List every recovered function entry."),
-        s("mcp.search_functions_by_name", "MCP · Functions", "Substring search over function names."),
-        s("mcp.decompile_function", "MCP · Decompiler", "Return pseudo-C for a named function."),
-        s("mcp.decompile_function_by_address", "MCP · Decompiler", "Return pseudo-C for a function at a VA."),
-        s("mcp.disassemble_function", "MCP · Decompiler", "Return decoded listing for a function."),
-        s("mcp.rename_function", "MCP · Edits", "Rename the function at a VA."),
-        s("mcp.rename_function_by_address", "MCP · Edits", "Rename by address."),
-        s("mcp.rename_variable", "MCP · Edits", "Rename a local variable inside a function."),
-        s("mcp.rename_data", "MCP · Edits", "Rename a global data item."),
-        s("mcp.set_function_prototype", "MCP · Edits", "Set the C signature of a function."),
-        s("mcp.set_local_variable_type", "MCP · Edits", "Retype a local variable."),
-        s("mcp.set_decompiler_comment", "MCP · Comments", "Attach a decompiler-side comment."),
-        s("mcp.set_disassembly_comment", "MCP · Comments", "Attach a listing-side comment."),
-        s("mcp.list_classes", "MCP · Program", "Enumerate C++/RTTI classes recovered."),
-        s("mcp.list_namespaces", "MCP · Program", "Enumerate scoped namespaces."),
-        s("mcp.list_segments", "MCP · Program", "Enumerate mapped memory blocks / sections."),
-        s("mcp.list_imports", "MCP · Program", "Enumerate PE import / IAT slots."),
-        s("mcp.list_exports", "MCP · Program", "Enumerate exported symbols."),
-        s("mcp.list_data_items", "MCP · Program", "Enumerate defined data items."),
-        s("mcp.list_strings", "MCP · Program", "ASCII/UTF-16 strings; match/limit/raw blob."),
-        s("mcp.search_strings", "MCP · Program", "Alias of list_strings (filter-oriented)."),
-        s("mcp.get_import_xrefs", "MCP · Xrefs", "Code sites referencing an import IAT slot."),
-        s("mcp.get_string_xrefs", "MCP · Xrefs", "Resolve strings by filter, then xrefs to each."),
-        s("mcp.get_xrefs_to", "MCP · Xrefs", "Refs to a VA; optional skip_stubs/classify."),
-        s("mcp.get_xrefs_from", "MCP · Xrefs", "References emitted from a VA."),
-        s("mcp.get_function_xrefs", "MCP · Xrefs", "Callers and callees of a function."),
-        s("mcp.il2cpp_meta", "MCP · IL2CPP", "Parse global-metadata.dat types/methods."),
-        s("mcp.il2cpp_map", "MCP · IL2CPP", "Metadata ↔ RVA map (null when unproven)."),
-        s("mcp.il2cpp_stubs", "MCP · IL2CPP", "List IL2CPP resolve stubs by icall name."),
-        s("mcp.unity_inventory", "MCP · Unity", "Player install inventory (assemblies, plugins, metadata)."),
-        s("mcp.function_at", "MCP · Functions", "Containing function for a body VA."),
-        s("mcp.function_create", "MCP · Functions", "Create/heal a function at VA (optional end)."),
-        s("mcp.decompile", "MCP · Decompile", "Stage-1 C; optional follow_stub for IL2CPP."),
-        s("mcp.get_current_address", "MCP · Cursor", "Report the currently focused Listing VA."),
-        s("mcp.get_current_function", "MCP · Cursor", "Report the function containing the cursor."),
-        s("mcp.get_function_by_address", "MCP · Functions", "Fetch function metadata by VA."),
+        s(
+            "mcp.list_methods",
+            "MCP · Functions",
+            "Enumerate methods in the active program (paginated).",
+        ),
+        s(
+            "mcp.list_functions",
+            "MCP · Functions",
+            "List every recovered function entry.",
+        ),
+        s(
+            "mcp.search_functions_by_name",
+            "MCP · Functions",
+            "Substring search over function names.",
+        ),
+        s(
+            "mcp.decompile_function",
+            "MCP · Decompiler",
+            "Return pseudo-C for a named function.",
+        ),
+        s(
+            "mcp.decompile_function_by_address",
+            "MCP · Decompiler",
+            "Return pseudo-C for a function at a VA.",
+        ),
+        s(
+            "mcp.disassemble_function",
+            "MCP · Decompiler",
+            "Return decoded listing for a function.",
+        ),
+        s(
+            "mcp.rename_function",
+            "MCP · Edits",
+            "Rename the function at a VA.",
+        ),
+        s(
+            "mcp.rename_function_by_address",
+            "MCP · Edits",
+            "Rename by address.",
+        ),
+        s(
+            "mcp.rename_variable",
+            "MCP · Edits",
+            "Rename a local variable inside a function.",
+        ),
+        s(
+            "mcp.rename_data",
+            "MCP · Edits",
+            "Rename a global data item.",
+        ),
+        s(
+            "mcp.set_function_prototype",
+            "MCP · Edits",
+            "Set the C signature of a function.",
+        ),
+        s(
+            "mcp.set_local_variable_type",
+            "MCP · Edits",
+            "Retype a local variable.",
+        ),
+        s(
+            "mcp.set_decompiler_comment",
+            "MCP · Comments",
+            "Attach a decompiler-side comment.",
+        ),
+        s(
+            "mcp.set_disassembly_comment",
+            "MCP · Comments",
+            "Attach a listing-side comment.",
+        ),
+        s(
+            "mcp.list_classes",
+            "MCP · Program",
+            "Enumerate C++/RTTI classes recovered.",
+        ),
+        s(
+            "mcp.list_namespaces",
+            "MCP · Program",
+            "Enumerate scoped namespaces.",
+        ),
+        s(
+            "mcp.list_segments",
+            "MCP · Program",
+            "Enumerate mapped memory blocks / sections.",
+        ),
+        s(
+            "mcp.list_imports",
+            "MCP · Program",
+            "Enumerate PE import / IAT slots.",
+        ),
+        s(
+            "mcp.list_exports",
+            "MCP · Program",
+            "Enumerate exported symbols.",
+        ),
+        s(
+            "mcp.list_data_items",
+            "MCP · Program",
+            "Enumerate defined data items.",
+        ),
+        s(
+            "mcp.list_strings",
+            "MCP · Program",
+            "ASCII/UTF-16 strings; match/limit/raw blob.",
+        ),
+        s(
+            "mcp.search_strings",
+            "MCP · Program",
+            "Alias of list_strings (filter-oriented).",
+        ),
+        s(
+            "mcp.get_import_xrefs",
+            "MCP · Xrefs",
+            "Code sites referencing an import IAT slot.",
+        ),
+        s(
+            "mcp.get_string_xrefs",
+            "MCP · Xrefs",
+            "Resolve strings by filter, then xrefs to each.",
+        ),
+        s(
+            "mcp.get_xrefs_to",
+            "MCP · Xrefs",
+            "Refs to a VA; optional skip_stubs/classify.",
+        ),
+        s(
+            "mcp.get_xrefs_from",
+            "MCP · Xrefs",
+            "References emitted from a VA.",
+        ),
+        s(
+            "mcp.get_function_xrefs",
+            "MCP · Xrefs",
+            "Callers and callees of a function.",
+        ),
+        s(
+            "mcp.il2cpp_meta",
+            "MCP · IL2CPP",
+            "Parse global-metadata.dat types/methods.",
+        ),
+        s(
+            "mcp.il2cpp_map",
+            "MCP · IL2CPP",
+            "Metadata ↔ RVA map (null when unproven).",
+        ),
+        s(
+            "mcp.il2cpp_stubs",
+            "MCP · IL2CPP",
+            "List IL2CPP resolve stubs by icall name.",
+        ),
+        s(
+            "mcp.unity_inventory",
+            "MCP · Unity",
+            "Player install inventory (assemblies, plugins, metadata).",
+        ),
+        s(
+            "mcp.function_at",
+            "MCP · Functions",
+            "Containing function for a body VA.",
+        ),
+        s(
+            "mcp.function_create",
+            "MCP · Functions",
+            "Create/heal a function at VA (optional end).",
+        ),
+        s(
+            "mcp.decompile",
+            "MCP · Decompile",
+            "Stage-1 C; optional follow_stub for IL2CPP.",
+        ),
+        s(
+            "mcp.get_current_address",
+            "MCP · Cursor",
+            "Report the currently focused Listing VA.",
+        ),
+        s(
+            "mcp.get_current_function",
+            "MCP · Cursor",
+            "Report the function containing the cursor.",
+        ),
+        s(
+            "mcp.get_function_by_address",
+            "MCP · Functions",
+            "Fetch function metadata by VA.",
+        ),
+        s(
+            "crypt_constants",
+            "MCP · Crypto",
+            "Crypto Constants constant-table hits.",
+        ),
+        s(
+            "recover_strings",
+            "MCP · Crypto",
+            "Recover obfuscated strings, optionally scoped to functions.",
+        ),
+        s(
+            "decode_bake",
+            "MCP · Crypto",
+            "Bake explicit decode operations over input bytes.",
+        ),
+        s(
+            "decode_magic",
+            "MCP · Crypto",
+            "Suggest and apply a decode recipe from input bytes.",
+        ),
+        s(
+            "list_crypto_capabilities",
+            "MCP · Crypto",
+            "List detected cryptographic capabilities.",
+        ),
     ]
 }
 
@@ -235,11 +408,7 @@ pub fn render_script_manager(
     );
     ui.separator();
 
-    let mut categories: Vec<String> = state
-        .catalog
-        .iter()
-        .map(|s| s.category.clone())
-        .collect();
+    let mut categories: Vec<String> = state.catalog.iter().map(|s| s.category.clone()).collect();
     categories.sort();
     categories.dedup();
 
@@ -300,7 +469,11 @@ pub fn render_script_manager(
                     for (idx, s) in &rows {
                         let is_sel = state.selected == Some(*idx);
                         let name_text = egui::RichText::new(&s.name).monospace();
-                        let name_text = if is_sel { name_text.color(primary) } else { name_text };
+                        let name_text = if is_sel {
+                            name_text.color(primary)
+                        } else {
+                            name_text
+                        };
                         if ui.selectable_label(is_sel, name_text).clicked() {
                             state.selected = Some(*idx);
                         }
@@ -352,7 +525,8 @@ pub fn render_text_editor(
 ) -> TextEditorRequest {
     ui.heading("Text Editor");
     ui.small(
-        egui::RichText::new("Text Editor · in-memory tabs on top of the local filesystem").color(muted),
+        egui::RichText::new("Text Editor · in-memory tabs on top of the local filesystem")
+            .color(muted),
     );
     ui.separator();
 
@@ -438,11 +612,14 @@ pub fn render_text_editor(
 }
 
 /// Render the MCP REPL.
-pub fn render_mcp_repl(state: &mut MacropadReplState, ui: &mut Ui, muted: Color32, primary: Color32) {
+pub fn render_mcp_repl(
+    state: &mut MacropadReplState,
+    ui: &mut Ui,
+    muted: Color32,
+    primary: Color32,
+) {
     ui.heading("Python (MCP REPL)");
-    ui.small(
-        egui::RichText::new("MCP REPL · pipes to ghidrust mcp (stub)").color(muted),
-    );
+    ui.small(egui::RichText::new("MCP REPL · pipes to ghidrust mcp (stub)").color(muted));
     ui.separator();
 
     egui::ScrollArea::vertical()
@@ -488,6 +665,11 @@ mod tests {
             "mcp.decompile_function",
             "mcp.rename_function",
             "mcp.get_xrefs_to",
+            "crypt_constants",
+            "recover_strings",
+            "decode_bake",
+            "decode_magic",
+            "list_crypto_capabilities",
         ] {
             assert!(cat.iter().any(|s| s.name == want), "missing {want}");
         }

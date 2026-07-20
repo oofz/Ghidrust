@@ -159,21 +159,14 @@ pub fn inventory_path(root: impl AsRef<Path>) -> Result<UnityInventory, String> 
             if let Ok(prog) = load_path(&p) {
                 for e in &prog.imports {
                     let dll = e.dll.to_ascii_lowercase();
-                    let name = e
-                        .name
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
+                    let name = e.name.as_deref().unwrap_or("").to_ascii_lowercase();
                     if dll.contains("openxr")
                         || dll.contains("xr")
                         || name.contains("openxr")
                         || name.contains("xrgetinstance")
                     {
-                        let label = format!(
-                            "{}!{}",
-                            e.dll,
-                            e.name.clone().unwrap_or_else(|| "?".into())
-                        );
+                        let label =
+                            format!("{}!{}", e.dll, e.name.clone().unwrap_or_else(|| "?".into()));
                         if !native_xr_imports.contains(&label) {
                             native_xr_imports.push(label);
                         }
@@ -217,13 +210,15 @@ pub fn inventory_path(root: impl AsRef<Path>) -> Result<UnityInventory, String> 
             || root.join("GameAssembly.dll").is_file(),
         mono: scripting_assemblies.iter().any(|a| a.contains("mscorlib"))
             && !root.join("GameAssembly.dll").is_file(),
-        burst: scripting_assemblies.iter().any(|a| a.contains("Unity.Burst")),
-        urp: scripting_assemblies
+        burst: scripting_assemblies
             .iter()
-            .any(|a| a.contains("UniversalRenderPipeline") || a.contains("Unity.RenderPipelines.Universal")),
-        hdrp: scripting_assemblies
-            .iter()
-            .any(|a| a.contains("HighDefinition") || a.contains("Unity.RenderPipelines.HighDefinition")),
+            .any(|a| a.contains("Unity.Burst")),
+        urp: scripting_assemblies.iter().any(|a| {
+            a.contains("UniversalRenderPipeline") || a.contains("Unity.RenderPipelines.Universal")
+        }),
+        hdrp: scripting_assemblies.iter().any(|a| {
+            a.contains("HighDefinition") || a.contains("Unity.RenderPipelines.HighDefinition")
+        }),
     };
 
     let (verdict, confidence) = verdict(
@@ -358,18 +353,19 @@ fn peek_metadata(data_dir: &Path) -> MetadataPeek {
             encrypted_or_obfuscated: false,
             note: None,
         },
-        Err(ghidrust_il2cpp::Error::EncryptedOrObfuscated { magic, version_field }) => {
-            MetadataPeek {
-                path: path_s,
-                present: true,
-                magic: Some(format!("{magic:#010x}")),
-                version: Some(version_field),
-                encrypted_or_obfuscated: true,
-                note: Some(format!(
-                    "expected magic {METADATA_MAGIC:#010x}; treat as encrypted/obfuscated"
-                )),
-            }
-        }
+        Err(ghidrust_il2cpp::Error::EncryptedOrObfuscated {
+            magic,
+            version_field,
+        }) => MetadataPeek {
+            path: path_s,
+            present: true,
+            magic: Some(format!("{magic:#010x}")),
+            version: Some(version_field),
+            encrypted_or_obfuscated: true,
+            note: Some(format!(
+                "expected magic {METADATA_MAGIC:#010x}; treat as encrypted/obfuscated"
+            )),
+        },
         Err(e) => MetadataPeek {
             path: path_s,
             present: true,
@@ -407,10 +403,7 @@ fn classify_assemblies(names: &[String]) -> (Vec<String>, Vec<String>) {
 
 fn find_subsystem_manifests(data_dir: &Path) -> Vec<String> {
     let mut out = Vec::new();
-    let roots = [
-        data_dir.join("StreamingAssets"),
-        data_dir.join("Plugins"),
-    ];
+    let roots = [data_dir.join("StreamingAssets"), data_dir.join("Plugins")];
     for root in roots {
         if !root.exists() {
             continue;
@@ -512,11 +505,7 @@ mod tests {
 
     fn tempfile_dir(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "ghidrust_unity_inv_{}_{}",
-            tag,
-            std::process::id()
-        ));
+        p.push(format!("ghidrust_unity_inv_{}_{}", tag, std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p

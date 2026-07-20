@@ -7,8 +7,8 @@ pub fn try_decode(wd: u32, address: u64, raw: &[u8]) -> Option<Result<Instructio
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),
- "nop",
- "",
+            "nop",
+            "",
             4,
         )));
     }
@@ -17,8 +17,8 @@ pub fn try_decode(wd: u32, address: u64, raw: &[u8]) -> Option<Result<Instructio
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),
- "svc",
- format!("#{imm}"),
+            "svc",
+            format!("#{imm}"),
             4,
         )));
     }
@@ -27,8 +27,8 @@ pub fn try_decode(wd: u32, address: u64, raw: &[u8]) -> Option<Result<Instructio
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),
- "brk",
- format!("#{imm}"),
+            "brk",
+            format!("#{imm}"),
             4,
         )));
     }
@@ -36,8 +36,8 @@ pub fn try_decode(wd: u32, address: u64, raw: &[u8]) -> Option<Result<Instructio
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),
- "yield",
- "",
+            "yield",
+            "",
             4,
         )));
     }

@@ -107,14 +107,16 @@ pub fn run_kernel(
         match caught {
             Ok(Ok(r)) => return r,
             Ok(Err(reason)) => {
-                let mut r = run_kernel_cpu_fallback(hay, kind, needle, image_base, image_end, wall0);
+                let mut r =
+                    run_kernel_cpu_fallback(hay, kind, needle, image_base, image_end, wall0);
                 r.backend = "cpu_kernel_fallback".into();
                 r.device = reason;
                 r.note = "GPU init/kernel failed; same algorithm on CPU".into();
                 return r;
             }
             Err(_) => {
-                let mut r = run_kernel_cpu_fallback(hay, kind, needle, image_base, image_end, wall0);
+                let mut r =
+                    run_kernel_cpu_fallback(hay, kind, needle, image_base, image_end, wall0);
                 r.backend = "cpu_kernel_fallback".into();
                 r.device = "wgpu panic/validation".into();
                 r.note = "GPU panicked; same algorithm on CPU".into();

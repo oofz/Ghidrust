@@ -182,7 +182,10 @@ pub fn compare_baseline(current: &MethodMap, baseline: &MethodMap) -> BuildSkew 
     let mut missing = Vec::new();
     for e in &baseline.entries {
         if !cur_by_name.contains_key(e.full_name.as_str())
-            && !current.entries.iter().any(|c| c.method_index == e.method_index)
+            && !current
+                .entries
+                .iter()
+                .any(|c| c.method_index == e.method_index)
         {
             missing.push(SkewName {
                 full_name: e.full_name.clone(),
@@ -256,9 +259,7 @@ fn find_method_pointers(prog: &Program, notes: &mut Vec<String>) -> Option<Vec<u
             p.len()
         ));
     } else {
-        notes.push(
-            "no multi-field-validated method pointer array found; RVAs left null".into(),
-        );
+        notes.push("no multi-field-validated method pointer array found; RVAs left null".into());
     }
     best
 }

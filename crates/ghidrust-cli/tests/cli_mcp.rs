@@ -53,7 +53,10 @@ fn cli_disasm_pretty_brief_and_text_out() {
     );
     let pretty_s = String::from_utf8_lossy(&pretty.stdout);
     assert!(pretty_s.contains("; entry="), "{pretty_s}");
-    assert!(pretty_s.contains("push") || pretty_s.contains("ret"), "{pretty_s}");
+    assert!(
+        pretty_s.contains("push") || pretty_s.contains("ret"),
+        "{pretty_s}"
+    );
 
     let brief = bin()
         .args(["disasm", pe_s, "-count", "5", "-brief"])
@@ -83,7 +86,10 @@ fn cli_disasm_pretty_brief_and_text_out() {
         String::from_utf8_lossy(&out.stderr)
     );
     let file = std::fs::read_to_string(&tmp).expect("read text out");
-    assert!(file.contains(':') && !file.trim_start().starts_with('{'), "{file}");
+    assert!(
+        file.contains(':') && !file.trim_start().starts_with('{'),
+        "{file}"
+    );
     let _ = std::fs::remove_file(&tmp);
 
     let json = bin()

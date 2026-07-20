@@ -78,9 +78,8 @@ impl GrokPaneState {
         if let Some(sess) = &mut self.session {
             if sess.poll_exited() {
                 self.session = None;
-                self.status = Some(
-                    "Grok exited. Click Start / Restart to open a new TUI session.".into(),
-                );
+                self.status =
+                    Some("Grok exited. Click Start / Restart to open a new TUI session.".into());
             }
         }
     }
@@ -172,13 +171,7 @@ pub fn render_grok_pane(
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Grok").color(primary).strong());
         if let Some(sess) = &state.session {
-            ui.small(
-                RichText::new(format!(
-                    "TUI · {}",
-                    sess.project_root.display()
-                ))
-                .color(muted),
-            );
+            ui.small(RichText::new(format!("TUI · {}", sess.project_root.display())).color(muted));
         } else if let Some(bin) = &state.grok_bin {
             ui.small(RichText::new(format!("grok: {}", bin.display())).color(muted));
         } else {
@@ -406,15 +399,16 @@ mod tests {
 
     #[test]
     fn ensure_skill_turns_checklist_skill_green() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust-gui-skill-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust-gui-skill-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut state = GrokPaneState::new();
         ensure_skill_for_project(&mut state, &dir, None);
-        assert!(state.skill_wire_error.is_none(), "{:?}", state.skill_wire_error);
+        assert!(
+            state.skill_wire_error.is_none(),
+            "{:?}",
+            state.skill_wire_error
+        );
         let skill = pane_start_checklist(&dir)
             .into_iter()
             .find(|r| r.label == "Skill")

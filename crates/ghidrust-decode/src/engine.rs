@@ -15,14 +15,17 @@ pub struct Engine {
     decoder: Box<dyn ArchDecode>,
     options: EngineOptions,
     last_error: Option<Error>,
- hooks: &'static dyn AllocHooks,
+    hooks: &'static dyn AllocHooks,
     open: bool,
 }
 
 impl Engine {
     pub fn open(arch: Arch, mode: Mode) -> Result<Self> {
         if !support(SupportQuery::Arch(arch)) {
- return Err(Error::Arch(format!("architecture {:?} is not supported", arch)));
+            return Err(Error::Arch(format!(
+                "architecture {:?} is not supported",
+                arch
+            )));
         }
         let decoder = open_decoder(arch, mode)?;
         debug_assert_eq!(decoder.arch(), arch);
@@ -59,7 +62,7 @@ impl Engine {
         self.options.apply(opt)
     }
 
- pub fn version(&self) -> &'static str {
+    pub fn version(&self) -> &'static str {
         VERSION
     }
 
@@ -73,7 +76,10 @@ impl Engine {
 
     pub fn disasm(&mut self, bytes: &[u8], address: u64, count: usize) -> Result<Vec<Instruction>> {
         self.require_open()?;
-        match self.decoder.decode_many(bytes, address, count, &self.options) {
+        match self
+            .decoder
+            .decode_many(bytes, address, count, &self.options)
+        {
             Ok(v) => Ok(v),
             Err(e) => {
                 self.last_error = Some(e.clone());
@@ -82,11 +88,7 @@ impl Engine {
         }
     }
 
- pub fn disasm_iter<'a>(
- &'a mut self,
- bytes: &'a [u8],
-        address: u64,
- ) -> DisasmIter<'a> {
+    pub fn disasm_iter<'a>(&'a mut self, bytes: &'a [u8], address: u64) -> DisasmIter<'a> {
         DisasmIter {
             engine: self,
             bytes,
@@ -106,15 +108,15 @@ impl Engine {
         }
     }
 
- pub fn reg_name(&self, reg: RegId) -> Option<&'static str> {
+    pub fn reg_name(&self, reg: RegId) -> Option<&'static str> {
         names::reg_name(self.arch, reg)
     }
 
- pub fn insn_name(&self, id: crate::insn::InsnId) -> Option<&'static str> {
+    pub fn insn_name(&self, id: crate::insn::InsnId) -> Option<&'static str> {
         names::insn_name(self.arch, id)
     }
 
- pub fn group_name(&self, group: GroupId) -> Option<&'static str> {
+    pub fn group_name(&self, group: GroupId) -> Option<&'static str> {
         names::group_name(self.arch, group)
     }
 
@@ -141,21 +143,18 @@ impl Engine {
     }
 
     pub fn op_count(&self, insn: &Instruction) -> usize {
-        insn.detail
-            .as_ref()
-            .map(|d| d.operands.len())
-            .unwrap_or(0)
+        insn.detail.as_ref().map(|d| d.operands.len()).unwrap_or(0)
     }
 
- pub fn op_index<'a>(
+    pub fn op_index<'a>(
         &self,
- insn: &'a Instruction,
+        insn: &'a Instruction,
         index: usize,
- ) -> Option<&'a crate::operand::Operand> {
+    ) -> Option<&'a crate::operand::Operand> {
         insn.detail.as_ref()?.operands.get(index)
     }
 
- pub fn regs_access<'a>(&self, insn: &'a Instruction) -> Option<RegsAccess<'a>> {
+    pub fn regs_access<'a>(&self, insn: &'a Instruction) -> Option<RegsAccess<'a>> {
         insn.detail.as_ref().map(|d| RegsAccess {
             read: &d.regs_read,
             write: &d.regs_write,
@@ -164,7 +163,7 @@ impl Engine {
         })
     }
 
- pub fn hooks(&self) -> &'static dyn AllocHooks {
+    pub fn hooks(&self) -> &'static dyn AllocHooks {
         self.hooks
     }
 
@@ -172,21 +171,21 @@ impl Engine {
         if self.open {
             Ok(())
         } else {
- Err(Error::Handle("engine is closed".into()))
+            Err(Error::Handle("engine is closed".into()))
         }
     }
 }
 
 pub struct RegsAccess<'a> {
- pub read: &'a [RegId],
- pub write: &'a [RegId],
- pub implicit_read: &'a [RegId],
- pub implicit_write: &'a [RegId],
+    pub read: &'a [RegId],
+    pub write: &'a [RegId],
+    pub implicit_read: &'a [RegId],
+    pub implicit_write: &'a [RegId],
 }
 
 pub struct DisasmIter<'a> {
- engine: &'a mut Engine,
- bytes: &'a [u8],
+    engine: &'a mut Engine,
+    bytes: &'a [u8],
     address: u64,
     offset: usize,
 }
@@ -198,11 +197,14 @@ impl<'a> Iterator for DisasmIter<'a> {
         if self.offset >= self.bytes.len() {
             return None;
         }
-        match self.engine.disasm_one(&self.bytes[self.offset..], self.address) {
+        match self
+            .engine
+            .disasm_one(&self.bytes[self.offset..], self.address)
+        {
             Ok(insn) => {
                 let len = insn.length as usize;
                 if len == 0 {
- return Some(Err(Error::Decode("zero-length instruction".into())));
+                    return Some(Err(Error::Decode("zero-length instruction".into())));
                 }
                 self.offset += len;
                 self.address = self.address.wrapping_add(len as u64);
@@ -224,12 +226,12 @@ mod tests {
         let bytes = [0x55, 0x48, 0x89, 0xe5, 0xc3];
         let insns = engine.disasm(&bytes, 0x1000, 8).unwrap();
         assert_eq!(insns.len(), 3);
- assert_eq!(insns[0].mnemonic, "push");
- assert_eq!(insns[0].operands, "rbp");
+        assert_eq!(insns[0].mnemonic, "push");
+        assert_eq!(insns[0].operands, "rbp");
         assert_eq!(insns[0].id, InsnId(1));
- assert_eq!(insns[1].mnemonic, "mov");
- assert_eq!(insns[1].operands, "rbp, rsp");
- assert_eq!(insns[2].mnemonic, "ret");
+        assert_eq!(insns[1].mnemonic, "mov");
+        assert_eq!(insns[1].operands, "rbp, rsp");
+        assert_eq!(insns[2].mnemonic, "ret");
         assert_eq!(insns[2].length, 1);
     }
 
@@ -238,7 +240,7 @@ mod tests {
         for arch in Arch::ALL {
             assert!(
                 Engine::support(SupportQuery::Arch(arch)),
- "{arch:?} should be supported"
+                "{arch:?} should be supported"
             );
         }
         assert!(Engine::support(SupportQuery::All));
@@ -254,7 +256,7 @@ mod tests {
         let mut engine = Engine::x86_64_default().unwrap();
         let bytes = [0x55, 0x48, 0x89, 0xe5, 0xc3];
         let one = engine.disasm_one(&bytes, 0x1000).unwrap();
- assert_eq!(one.mnemonic, "push");
+        assert_eq!(one.mnemonic, "push");
         let all: Result<Vec<_>> = engine.disasm_iter(&bytes, 0x1000).collect();
         assert_eq!(all.unwrap().len(), 3);
     }

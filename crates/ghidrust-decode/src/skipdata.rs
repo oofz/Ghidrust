@@ -16,11 +16,11 @@ pub enum SkipdataHandler {
 }
 
 impl std::fmt::Debug for SkipdataHandler {
- fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
- SkipdataHandler::None => write!(f, "SkipdataHandler::None"),
- SkipdataHandler::Trait(_) => write!(f, "SkipdataHandler::Trait(_)"),
- SkipdataHandler::Fn(_) => write!(f, "SkipdataHandler::Fn(_)"),
+            SkipdataHandler::None => write!(f, "SkipdataHandler::None"),
+            SkipdataHandler::Trait(_) => write!(f, "SkipdataHandler::Trait(_)"),
+            SkipdataHandler::Fn(_) => write!(f, "SkipdataHandler::Fn(_)"),
         }
     }
 }
@@ -68,10 +68,10 @@ impl SkipdataConfig {
 }
 
 impl std::fmt::Debug for SkipdataConfig {
- fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
- f.debug_struct("SkipdataConfig")
- .field("mnemonic", &self.mnemonic)
- .field("handler", &self.handler)
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SkipdataConfig")
+            .field("mnemonic", &self.mnemonic)
+            .field("handler", &self.handler)
             .finish()
     }
 }

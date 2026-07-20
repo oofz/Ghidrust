@@ -28,6 +28,9 @@ pub enum PaneKind {
     DataTypeManager,
     DataTypePreview,
     DecompiledView, // Alias for main Decompiler; kept as tab in center
+    CryptoCapabilities,
+    CryptoConstants,
+    Decrypt,
     DefinedData,
     DefinedStrings,
     DisassembledView,
@@ -66,6 +69,7 @@ pub enum PaneKind {
     FileSystemBrowser,
     /// Spilled analysis artifact catalog + preview via `ghidrust_core::artifacts`.
     AnalysisArtifacts,
+    RecoveredStrings,
 }
 
 impl PaneKind {
@@ -89,7 +93,10 @@ impl PaneKind {
         PaneKind::ChecksumGenerator,
         PaneKind::CommentWindow,
         PaneKind::Console,
+        PaneKind::CryptoCapabilities,
+        PaneKind::CryptoConstants,
         PaneKind::DataTypePreview,
+        PaneKind::Decrypt,
         PaneKind::DefinedData,
         PaneKind::DefinedStrings,
         PaneKind::DisassembledView,
@@ -103,6 +110,7 @@ impl PaneKind {
         PaneKind::FunctionsWindow,
         PaneKind::MemoryMap,
         PaneKind::Python,
+        PaneKind::RecoveredStrings,
         PaneKind::RegisterManager,
         PaneKind::RelocationTable,
         PaneKind::ScriptManager,
@@ -130,6 +138,9 @@ impl PaneKind {
             PaneKind::DataTypeManager => "Data Type Manager",
             PaneKind::DataTypePreview => "Data Type Preview",
             PaneKind::DecompiledView => "Decompile",
+            PaneKind::CryptoCapabilities => "Crypto Capabilities",
+            PaneKind::CryptoConstants => "Crypto Constants",
+            PaneKind::Decrypt => "Decrypt",
             PaneKind::DefinedData => "Defined Data",
             PaneKind::DefinedStrings => "Defined Strings",
             PaneKind::DisassembledView => "Disassembled View",
@@ -147,6 +158,7 @@ impl PaneKind {
             PaneKind::ProgramTree => "Program Trees",
             PaneKind::ProjectTree => "Project Tree",
             PaneKind::Python => "Python",
+            PaneKind::RecoveredStrings => "Recovered Strings",
             PaneKind::RegisterManager => "Register Manager",
             PaneKind::RelocationTable => "Relocation Table",
             PaneKind::ScriptManager => "Script Manager",
@@ -183,6 +195,9 @@ impl PaneKind {
             PaneKind::DataTypeManager => "DataTypeManagerPlugin",
             PaneKind::DataTypePreview => "DataTypePreviewPlugin",
             PaneKind::DecompiledView => "DecompilePlugin",
+            PaneKind::CryptoCapabilities => "CryptoCapabilitiesPlugin",
+            PaneKind::CryptoConstants => "CryptConstantsPlugin",
+            PaneKind::Decrypt => "DecryptPanePlugin",
             PaneKind::DefinedData => "DataWindowPlugin",
             PaneKind::DefinedStrings => "ViewStringsPlugin",
             PaneKind::DisassembledView => "DisassembledViewPlugin",
@@ -200,6 +215,7 @@ impl PaneKind {
             PaneKind::ProgramTree => "ProgramTreePlugin",
             PaneKind::ProjectTree => "FrontEndTool",
             PaneKind::Python => "InterpreterPanelPlugin",
+            PaneKind::RecoveredStrings => "RecoveredStringsPlugin",
             PaneKind::RegisterManager => "RegisterPlugin",
             PaneKind::RelocationTable => "RelocationTablePlugin",
             PaneKind::ScriptManager => "ScriptMgrPlugin",
@@ -228,6 +244,10 @@ impl PaneKind {
                 | PaneKind::SymbolTree
                 | PaneKind::Console
                 | PaneKind::DefinedStrings
+                | PaneKind::CryptoConstants
+                | PaneKind::RecoveredStrings
+                | PaneKind::CryptoCapabilities
+                | PaneKind::Decrypt
                 | PaneKind::FunctionsWindow
                 | PaneKind::MemoryMap
                 | PaneKind::SymbolTable
@@ -269,6 +289,9 @@ impl PaneKind {
             PaneKind::DataTypeManager => "pane_dtm_win",
             PaneKind::DataTypePreview => "pane_dtpreview",
             PaneKind::DecompiledView => "pane_decompile_win",
+            PaneKind::CryptoCapabilities => "pane_crypto_capabilities",
+            PaneKind::CryptoConstants => "pane_crypto_constants",
+            PaneKind::Decrypt => "pane_decrypt",
             PaneKind::DefinedData => "pane_defined_data",
             PaneKind::DefinedStrings => "pane_defined_strings",
             PaneKind::DisassembledView => "pane_disasm_view",
@@ -286,6 +309,7 @@ impl PaneKind {
             PaneKind::ProgramTree => "pane_program_tree_win",
             PaneKind::ProjectTree => "pane_project_tree_win",
             PaneKind::Python => "pane_python",
+            PaneKind::RecoveredStrings => "pane_recovered_strings",
             PaneKind::RegisterManager => "pane_register_manager",
             PaneKind::RelocationTable => "pane_relocations",
             PaneKind::ScriptManager => "pane_script_manager",
@@ -335,11 +359,11 @@ impl BookmarkKind {
     /// color for margin marker / row tint.
     pub fn color(self) -> Color32 {
         match self {
-            BookmarkKind::Note => Color32::from_rgb(0x9C, 0x27, 0xB0),      // purple
-            BookmarkKind::Info => Color32::from_rgb(0x03, 0xA9, 0xF4),      // cyan
-            BookmarkKind::Analysis => Color32::from_rgb(0xFF, 0x98, 0x00),  // orange
-            BookmarkKind::Error => Color32::from_rgb(0xE5, 0x39, 0x35),     // red
-            BookmarkKind::Warning => Color32::from_rgb(0xFB, 0xC0, 0x2D),   // amber
+            BookmarkKind::Note => Color32::from_rgb(0x9C, 0x27, 0xB0), // purple
+            BookmarkKind::Info => Color32::from_rgb(0x03, 0xA9, 0xF4), // cyan
+            BookmarkKind::Analysis => Color32::from_rgb(0xFF, 0x98, 0x00), // orange
+            BookmarkKind::Error => Color32::from_rgb(0xE5, 0x39, 0x35), // red
+            BookmarkKind::Warning => Color32::from_rgb(0xFB, 0xC0, 0x2D), // amber
         }
     }
 }
@@ -356,9 +380,7 @@ pub struct Bookmark {
 /// Render "backend pending" empty state for a pane; used by any provider without backing data.
 pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
     ui.heading(kind.title());
-    ui.small(
-        RichText::new(format!("Provider · {}", kind.plugin())).color(muted),
-    );
+    ui.small(RichText::new(format!("Provider · {}", kind.plugin())).color(muted));
     ui.separator();
     ui.add_space(4.0);
     ui.label(
@@ -367,9 +389,14 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
             .italics(),
     );
     ui.add_space(4.0);
-    ui.small(RichText::new("Pane is present in the shell catalog. Backing analysis \
+    ui.small(
+        RichText::new(
+            "Pane is present in the shell catalog. Backing analysis \
                             and interactive actions land in later work — see \
-                            internal UI notes.").color(muted));
+                            internal UI notes.",
+        )
+        .color(muted),
+    );
 }
 
 /// One-liner hint pointing at which analyzer/model would fill this pane.
@@ -384,6 +411,9 @@ pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
         PaneKind::DataTypeManager => "Backend pending — DTM tree (Built-In / Program / Archive) lands in .",
         PaneKind::DataTypePreview => "",
         PaneKind::DecompiledView => "Stage-1 SSA-C (expression fold + typed locals/params). Emit-time tokens when available; rename/commit wired.",
+        PaneKind::CryptoCapabilities => "",
+        PaneKind::CryptoConstants => "",
+        PaneKind::Decrypt => "",
         PaneKind::DefinedData => "Backend pending — Program::data_items model lands in .",
         PaneKind::DefinedStrings => "Uses ghidrust-core::analyzers::strings::run — session-only until Program::strings lands.",
         PaneKind::DisassembledView => "Backend pending — virtual disassembly + pcode preview lands in .",
@@ -401,6 +431,7 @@ pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
         PaneKind::ProgramTree => "",
         PaneKind::ProjectTree => "",
         PaneKind::Python => "Backend pending — scripting host / MCP REPL lands in .",
+        PaneKind::RecoveredStrings => "",
         PaneKind::RegisterManager => "Backend pending — register lattice values from live/debug backends.",
         PaneKind::RelocationTable => "Uses Program::sections metadata; full PE/ELF reloc parse lands in .",
         PaneKind::ScriptManager => "Backend pending — script catalog lands in .",
@@ -496,11 +527,7 @@ mod tests {
     #[test]
     fn off_layout_providers_present() {
         let names: Vec<&'static str> = PaneKind::ALL.iter().map(|k| k.title()).collect();
-        for expected in [
-            "Function Call Trees",
-            "Function Call Graph",
-            "Text Editor",
-        ] {
+        for expected in ["Function Call Trees", "Function Call Graph", "Text Editor"] {
             assert!(
                 names.contains(&expected),
                 "missing off-layout provider `{expected}` in PaneKind::ALL"

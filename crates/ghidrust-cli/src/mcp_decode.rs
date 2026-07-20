@@ -69,7 +69,8 @@ pub fn disassemble_tool_def() -> McpToolDef {
 pub fn decode_support_tool_def() -> McpToolDef {
     McpToolDef {
         name: "decode_support",
-        description: "Decode engine version, supported arches, options, syntax values, and compile features",
+        description:
+            "Decode engine version, supported arches, options, syntax values, and compile features",
         input_schema: json!({ "type": "object", "properties": {} }),
     }
 }

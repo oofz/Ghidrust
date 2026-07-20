@@ -51,6 +51,12 @@ const EXPECTED_MCP_TOOLS: &[&str] = &[
     "rtti_gpu_bench",
     "list_strings",
     "search_strings",
+    "crypt_constants",
+    "list_crypt_constants",
+    "recover_strings",
+    "decode_bake",
+    "decode_magic",
+    "list_crypto_capabilities",
     "il2cpp_meta",
     "il2cpp_map",
     "il2cpp_touch_map",
@@ -81,6 +87,10 @@ const EXPECTED_CLI_COMMANDS: &[&str] = &[
     "analyzers",
     "analyze",
     "strings",
+    "crypt-constants",
+    "recover-strings",
+    "crypto-capabilities",
+    "decode",
     "xrefs",
     "imports",
     "function-at",
@@ -127,22 +137,28 @@ fn workspace_root() -> PathBuf {
 }
 
 fn fixture(name: &str) -> PathBuf {
-    workspace_root.join("fixtures").join(name)
+    workspace_root().join("fixtures").join(name)
 }
 
 fn pe() -> String {
-    fixture("tiny_x64.pe").to_string_lossy().into_owned()}
+    fixture("tiny_x64.pe").to_string_lossy().into_owned()
+}
 fn lab() -> String {
-    fixture("analysis_lab.pe").to_string_lossy().into_owned()}
+    fixture("analysis_lab.pe").to_string_lossy().into_owned()
+}
 fn elf() -> String {
-    fixture("tiny_x64.elf").to_string_lossy().into_owned()}
+    fixture("tiny_x64.elf").to_string_lossy().into_owned()
+}
 fn il2cpp_pe() -> String {
     fixture("il2cpp/il2cpp_stub_lab.pe")
         .to_string_lossy()
         .into_owned()
 }
 fn il2cpp_meta() -> String {
-    fixture("il2cpp/meta_v31.dat").to_string_lossy().into_owned()}
+    fixture("il2cpp/meta_v31.dat")
+        .to_string_lossy()
+        .into_owned()
+}
 
 fn truncate(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
@@ -150,7 +166,10 @@ fn truncate(s: &str, n: usize) -> String {
 
 fn run_cli(args: &[&str]) -> (bool, i32, String, String, f64) {
     let t = Instant::now();
-    let out = Command::new(bin).args(args).output.expect("spawn ghidrust");
+    let out = Command::new(bin())
+        .args(args)
+        .output()
+        .expect("spawn ghidrust");
     let code = out.status.code().unwrap_or(-1);
     (
         out.status.success(),
@@ -237,7 +256,7 @@ fn expect_cli_honest(name: &str, args: &[&str], markers: &[&str]) -> EvalRow {
     let (ok, code, stdout, stderr, ms) = run_cli(args);
     let blob = format!("{stdout}{stderr}");
     let marked = markers.is_empty() || markers.iter().any(|m| blob.contains(m));
-    let honest = (ok || code == 1 || code == 2) && marked && !blob.to_lowercase.contains("panic");
+    let honest = (ok || code == 1 || code == 2) && marked && !blob.to_lowercase().contains("panic");
     if honest {
         row_pass("cli", name, ms, format!("exit={code}"))
     } else {
@@ -256,7 +275,7 @@ fn expect_cli_json(name: &str, args: &[&str]) -> EvalRow {
     let (ok, code, stdout, stderr, ms) = run_cli(args);
     let t = stdout.trim_start();
     if ok && (t.starts_with('{') || t.starts_with('[')) {
-        row_pass("cli", name, ms, format!("json len={}", stdout.len))
+        row_pass("cli", name, ms, format!("json len={}", stdout.len()))
     } else {
         row_fail(
             "cli",
@@ -269,7 +288,7 @@ fn expect_cli_json(name: &str, args: &[&str]) -> EvalRow {
 }
 
 fn write_reports(rows: &[EvalRow]) {
-    let dev = workspace_root.join("dev");
+    let dev = workspace_root().join("dev");
     let _ = std::fs::create_dir_all(&dev);
     let pass = rows.iter().filter(|r| r.status == "PASS").count();
     let fail = rows.iter().filter(|r| r.status == "FAIL").count();
@@ -278,12 +297,12 @@ fn write_reports(rows: &[EvalRow]) {
     let json_path = dev.join("eval_cli_mcp_surface.json");
     let report = json!({
     "environment": {
-    "cli": bin.display.to_string(),
+    "cli": bin().display().to_string(),
     "package_version()": env!("CARGO_PKG_VERSION"),
-    "expected_mcp_tools": EXPECTED_MCP_TOOLS.len,
-    "expected_cli_commands": EXPECTED_CLI_COMMANDS.len,
+    "expected_mcp_tools": EXPECTED_MCP_TOOLS.len(),
+    "expected_cli_commands": EXPECTED_CLI_COMMANDS.len(),
            },
-    "summary": { "pass": pass, "fail": fail, "skip": skip, "total": rows.len },
+    "summary": { "pass": pass, "fail": fail, "skip": skip, "total": rows.len() },
     "rows": rows,
        });
     std::fs::write(&json_path, serde_json::to_string_pretty(&report).unwrap()).unwrap();
@@ -304,7 +323,7 @@ fn write_reports(rows: &[EvalRow]) {
         md.push_str(&format!(
             "| {} | `{}` | {} | {:.1} | {} |\n",
             r.kind,
-            r.name().replace('|', "\\|"),
+            r.name.as_str().replace('|', "\\|"),
             r.status,
             r.elapsed_ms,
             r.evidence.replace('|', "\\|").replace('\n', " ")
@@ -315,7 +334,7 @@ fn write_reports(rows: &[EvalRow]) {
         for r in rows.iter().filter(|r| r.status == "FAIL") {
             md.push_str(&format!(
                 "### `{}`\n```\n{}\n```\n\n",
-                r.name(),
+                r.name.as_str(),
                 r.error.as_deref().unwrap_or("(no detail)")
             ));
         }
@@ -323,7 +342,7 @@ fn write_reports(rows: &[EvalRow]) {
     std::fs::write(dev.join("EVAL_CLI_MCP_SURFACE_REPORT.md"), md).unwrap();
     eprintln!(
         "=== CLI/MCP SURFACE EVAL PASS={pass} FAIL={fail} SKIP={skip} ===\nreport: {}\njson : {}",
-        dev.join("EVAL_CLI_MCP_SURFACE_REPORT.md").display,
+        dev.join("EVAL_CLI_MCP_SURFACE_REPORT.md").display(),
         json_path.display()
     );
 }
@@ -369,7 +388,7 @@ fn mcp_response_for(stdout: &str, id: u64) -> Option<Value> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if v.get("id").and_then(|x| x.as_u64) == Some(id) {
+        if v.get("id").and_then(|x| x.as_u64()) == Some(id) {
             return Some(v);
         }
     }
@@ -460,7 +479,7 @@ fn mcp_process_chain(image: &str) -> (bool, String, f64, Vec<(&'static str, bool
             }
             all.push_str(line);
             if let Ok(v) = serde_json::from_str::<Value>(line) {
-                if v.get("id").and_then(|x| x.as_u64) == Some(want) {
+                if v.get("id").and_then(|x| x.as_u64()) == Some(want) {
                     return v.get("result").is_some() || v.get("error").is_some();
                 }
             }
@@ -488,7 +507,8 @@ fn mcp_process_chain(image: &str) -> (bool, String, f64, Vec<(&'static str, bool
     let launch_ok = read_id(&mut reader, &mut all, &mut line, 2);
     let sid = extract_session_id(&all);
 
-    let mut results: Vec<(&'static str, bool)> = vec![("process_launch", launch_ok && sid.is_some())];
+    let mut results: Vec<(&'static str, bool)> =
+        vec![("process_launch", launch_ok && sid.is_some())];
 
     if let Some(session) = sid {
         let steps: Vec<(&str, Value)> = vec![
@@ -539,7 +559,7 @@ fn mcp_process_chain(image: &str) -> (bool, String, f64, Vec<(&'static str, bool
 }
 
 fn tempfile_dir() -> PathBuf {
-    let p = std::env::temp_dir.join(format!("ghidrust_eval_surface_{}", std::process::id));
+    let p = std::env::temp_dir().join(format!("ghidrust_eval_surface_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&p);
     // Drop a tiny file so inventory/tree have something to list.
     let _ = std::fs::write(p.join("marker.txt"), b"ghidrust-eval\n");
@@ -668,6 +688,31 @@ fn eval_cli_mcp_surface_catalog() {
         "cli:strings",
         &["strings", &lab, "-filter", "ExitProcess", "-json"],
         &["ExitProcess"],
+    ));
+    rows.push(expect_cli_json(
+        "cli:crypt-constants",
+        &["crypt-constants", &lab, "-json"],
+    ));
+    rows.push(expect_cli_json(
+        "cli:recover-strings",
+        &["recover-strings", &lab, "-json"],
+    ));
+    rows.push(expect_cli_json(
+        "cli:crypto-capabilities",
+        &["crypto-capabilities", &lab, "-json"],
+    ));
+    rows.push(expect_cli_ok(
+        "cli:decode",
+        &[
+            "decode",
+            "bake",
+            "-b64",
+            "SGVsbG8=",
+            "-op",
+            "FromBase64",
+            "-json",
+        ],
+        &["Hello"],
     ));
     // Empty arrays are valid when the fixture has no code refs / import table.
     rows.push(expect_cli_json(
@@ -812,7 +857,7 @@ fn eval_cli_mcp_surface_catalog() {
     // Project lifecycle
     rows.push(expect_cli_json(
         "cli:project_create",
-        &["project", "create", proj.to_str.unwrap(), "-json"],
+        &["project", "create", proj.to_str().unwrap(), "-json"],
     ));
     rows.push(expect_cli_json(
         "cli:project_import",
@@ -820,12 +865,12 @@ fn eval_cli_mcp_surface_catalog() {
     ));
     rows.push(expect_cli_honest(
         "cli:project_list",
-        &["project", "list", proj.to_str.unwrap(), "-json"],
+        &["project", "list", proj.to_str().unwrap(), "-json"],
         &["{", "[", "files", "name", "error"],
     ));
     rows.push(expect_cli_honest(
         "cli:project_open",
-        &["project", "open", proj.to_str.unwrap(), "-json"],
+        &["project", "open", proj.to_str().unwrap(), "-json"],
         &["{", "[", "name", "files", "error"],
     ));
     rows.push(expect_cli_honest(
@@ -842,7 +887,7 @@ fn eval_cli_mcp_surface_catalog() {
     ));
     rows.push(expect_cli_honest(
         "cli:project_export",
-        &["project", "export", proj.to_str.unwrap(), "-json"],
+        &["project", "export", proj.to_str().unwrap(), "-json"],
         &["{", "[", "export", "listing", "analysis", "error", "ok"],
     ));
 
@@ -886,7 +931,7 @@ fn eval_cli_mcp_surface_catalog() {
                 "catalog",
                 "mcp_tools_list_complete",
                 ms,
-                format!("all {} tools listed", EXPECTED_MCP_TOOLS.len),
+                format!("all {} tools listed", EXPECTED_MCP_TOOLS.len()),
             ));
         } else {
             rows.push(row_fail(
@@ -928,6 +973,21 @@ fn eval_cli_mcp_surface_catalog() {
             "search_strings",
             json!({ "path": lab, "filter": "ExitProcess" }),
         ),
+        ("crypt_constants", json!({ "path": lab })),
+        ("list_crypt_constants", json!({ "path": lab, "limit": 8 })),
+        ("recover_strings", json!({ "path": lab, "limit": 32 })),
+        (
+            "decode_bake",
+            json!({
+                "input_b64": "SGVsbG8=",
+                "recipe": [{ "op": "FromBase64", "args": {} }]
+            }),
+        ),
+        (
+            "decode_magic",
+            json!({ "input_b64": "SGVsbG8=", "depth": 2 }),
+        ),
+        ("list_crypto_capabilities", json!({ "path": lab })),
         ("list_imports", json!({ "path": lab })),
         ("function_at", json!({ "path": lab, "addr": "0x140001000" })),
         (
@@ -1000,7 +1060,9 @@ fn eval_cli_mcp_surface_catalog() {
         let (ok, stdout, stderr, ms_total) = mcp_exchange(&reqs);
         let per = ms_total / id_names.len().max(1) as f64;
         for (cid, name) in id_names {
-            let wired = ok && mcp_tool_wired(&stdout, cid);
+            let wired = ok
+                && mcp_tool_wired(&stdout, cid)
+                && (name != "decode_bake" || stdout.contains("Hello"));
             if wired {
                 rows.push(row_pass(
                     "mcp",
@@ -1050,7 +1112,7 @@ fn eval_cli_mcp_surface_catalog() {
     // Every expected MCP tool must have a row
     for tool in EXPECTED_MCP_TOOLS {
         let key = format!("mcp:{tool}");
-        if !rows.iter().any(|r| r.name() == key) {
+        if !rows.iter().any(|r| r.name.as_str() == key) {
             rows.push(row_fail(
                 "mcp",
                 key,
@@ -1065,16 +1127,17 @@ fn eval_cli_mcp_surface_catalog() {
     for cmd in EXPECTED_CLI_COMMANDS {
         let covered = rows.iter().any(|r| {
             r.kind == "cli"
-                && (r.name() == format!("cli:{cmd}")
-                    || r.name().starts_with(&format!("cli:{cmd}_"))
-                    || (*cmd == "mcp" && r.name() == "cli:mcp_stdio_boots")
-                    || (*cmd == "function" && r.name().starts_with("cli:function"))
-                    || (*cmd == "il2cpp" && r.name().starts_with("cli:il2cpp"))
-                    || (*cmd == "artifact" && r.name().starts_with("cli:artifact"))
-                    || (*cmd == "process" && r.name().starts_with("cli:process"))
-                    || (*cmd == "project" && r.name().starts_with("cli:project"))
+                && (r.name.as_str() == format!("cli:{cmd}")
+                    || r.name.as_str().starts_with(&format!("cli:{cmd}_"))
+                    || (*cmd == "mcp" && r.name.as_str() == "cli:mcp_stdio_boots")
+                    || (*cmd == "function" && r.name.as_str().starts_with("cli:function"))
+                    || (*cmd == "il2cpp" && r.name.as_str().starts_with("cli:il2cpp"))
+                    || (*cmd == "artifact" && r.name.as_str().starts_with("cli:artifact"))
+                    || (*cmd == "process" && r.name.as_str().starts_with("cli:process"))
+                    || (*cmd == "project" && r.name.as_str().starts_with("cli:project"))
                     || (*cmd == "disasm"
-                        && (r.name() == "cli:disasm" || r.name() == "cli:disassemble_alias")))
+                        && (r.name.as_str() == "cli:disasm"
+                            || r.name.as_str() == "cli:disassemble_alias")))
         });
         if covered {
             rows.push(row_pass(

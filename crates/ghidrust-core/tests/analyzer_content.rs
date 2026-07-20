@@ -10,7 +10,11 @@ fn run(name: &str) -> AnalyzerOutput {
     let mut prog = lab();
     let rep = run_analyzers(&mut prog, &[name]).unwrap();
     assert_eq!(rep.results.len(), 1);
-    assert_eq!(rep.results[0].status, "ok", "{}: {}", name, rep.results[0].message);
+    assert_eq!(
+        rep.results[0].status, "ok",
+        "{}: {}",
+        name, rep.results[0].message
+    );
     rep.results.into_iter().next().unwrap()
 }
 
@@ -19,7 +23,12 @@ fn ascii_strings_finds_api_and_class_names() {
     let o = run("ASCII Strings");
     let s = o.strings.as_ref().expect("strings field");
     assert!(s.iter().any(|x| x.value.contains("ExitProcess")), "{s:?}");
-    assert!(s.iter().any(|x| x.value.contains("printf") || x.value.contains("LabClass") || x.value.contains("MyFunc")), "{s:?}");
+    assert!(
+        s.iter().any(|x| x.value.contains("printf")
+            || x.value.contains("LabClass")
+            || x.value.contains("MyFunc")),
+        "{s:?}"
+    );
 }
 
 #[test]
@@ -29,7 +38,8 @@ fn function_start_finds_entry_and_lab_functions() {
     assert!(fns.iter().any(|f| f.entry == 0x140001000), "{fns:?}");
     // prologue-based starts
     assert!(
-        fns.iter().any(|f| f.entry == 0x140001030 || f.entry == 0x140001018),
+        fns.iter()
+            .any(|f| f.entry == 0x140001030 || f.entry == 0x140001018),
         "expected stack/orphan start: {fns:?}"
     );
     // Must NOT create mid-prologue seed at 0x140001034 (sub rsp inside func_stack)
@@ -66,7 +76,9 @@ fn aggressive_finds_orphan_or_gap_code() {
         .as_ref()
         .expect("recovered_ranges");
     assert!(
-        ranges.iter().any(|r| r.start == 0x140001018 || r.start == 0x140001030),
+        ranges
+            .iter()
+            .any(|r| r.start == 0x140001018 || r.start == 0x140001030),
         "expected gap recovery: {ranges:?}"
     );
 }
@@ -77,18 +89,22 @@ fn call_convention_tags_entry() {
     run_analyzers(&mut prog, &["Function Start Search"]).unwrap();
     let rep = run_analyzers(&mut prog, &["Call Convention ID"]).unwrap();
     let c = rep.results[0].conventions.as_ref().expect("conventions");
-    assert!(c.iter().any(|(va, name)| *va == 0x140001000 && !name.is_empty()), "{c:?}");
+    assert!(
+        c.iter()
+            .any(|(va, name)| *va == 0x140001000 && !name.is_empty()),
+        "{c:?}"
+    );
 }
 
 #[test]
 fn call_fixup_finds_security_cookie_string() {
     let o = run("Call-Fixup Installer");
     let f = o.call_fixups.as_ref().expect("call_fixups");
+    assert!(f.iter().any(|x| x.fixup_name == "security_cookie"), "{f:?}");
     assert!(
-        f.iter().any(|x| x.fixup_name == "security_cookie"),
-        "{f:?}"
+        f.iter().any(|x| x.call_va == 0x140002018),
+        "cookie VA: {f:?}"
     );
-    assert!(f.iter().any(|x| x.call_va == 0x140002018), "cookie VA: {f:?}");
 }
 
 #[test]
@@ -161,7 +177,10 @@ fn demangler_microsoft_lab_mangled() {
 fn embedded_media_finds_png() {
     let o = run("Embedded Media");
     let m = o.media.as_ref().expect("media");
-    assert!(m.iter().any(|h| h.kind == "PNG" && h.va == 0x140002050), "{m:?}");
+    assert!(
+        m.iter().any(|h| h.kind == "PNG" && h.va == 0x140002050),
+        "{m:?}"
+    );
 }
 
 #[test]
@@ -171,7 +190,8 @@ fn function_id_matches_entry_prolog() {
     let rep = run_analyzers(&mut prog, &["Function ID"]).unwrap();
     let m = rep.results[0].fid_matches.as_ref().expect("fid");
     assert!(
-        m.iter().any(|x| x.entry == 0x140001000 && x.matched_name.contains("fid_")),
+        m.iter()
+            .any(|x| x.entry == 0x140001000 && x.matched_name.contains("fid_")),
         "{m:?}"
     );
 }
@@ -191,7 +211,8 @@ fn pdb_universal_parses_stream_symbols() {
     let s = o.symbols.as_ref().expect("pdb symbols");
     assert!(s.iter().any(|x| x.name.contains("MSF7")), "{s:?}");
     assert!(
-        s.iter().any(|x| x.name == "LabEntry" || x.name == "LabStackFrame"),
+        s.iter()
+            .any(|x| x.name == "LabEntry" || x.name == "LabStackFrame"),
         "stream names: {s:?}"
     );
 }
@@ -200,7 +221,11 @@ fn pdb_universal_parses_stream_symbols() {
 fn pdb_msdia_same_portable_path() {
     let o = run("PDB MSDIA");
     let s = o.symbols.as_ref().expect("symbols");
-    assert!(s.iter().any(|x| x.name == "LabNoReturn" || x.name.contains("Lab")), "{s:?}");
+    assert!(
+        s.iter()
+            .any(|x| x.name == "LabNoReturn" || x.name.contains("Lab")),
+        "{s:?}"
+    );
 }
 
 #[test]
@@ -210,7 +235,10 @@ fn shared_return_matches_two_epilogues() {
     let rep = run_analyzers(&mut prog, &["Shared Return Calls"]).unwrap();
     let sh = rep.results[0].shared_returns.as_ref().expect("shared");
     assert!(sh.len() >= 2, "{sh:?}");
-    assert!(sh.contains(&0x140001070) || sh.iter().any(|&e| e == 0x140001090 || e == 0x140001070), "{sh:?}");
+    assert!(
+        sh.contains(&0x140001070) || sh.iter().any(|&e| e == 0x140001090 || e == 0x140001070),
+        "{sh:?}"
+    );
 }
 
 #[test]
@@ -223,7 +251,9 @@ fn stack_recovers_frame_size() {
     assert!(stack_fn.is_some(), "{frames:?}");
     let locals = &stack_fn.unwrap().1;
     assert!(
-        locals.iter().any(|l| l.contains("frame_size=0x20") || l.contains("param_")),
+        locals
+            .iter()
+            .any(|l| l.contains("frame_size=0x20") || l.contains("param_")),
         "{locals:?}"
     );
 }
@@ -239,9 +269,17 @@ fn stack_entry_not_polluted_by_later_body() {
         .iter()
         .find(|f| f.entry == 0x140001000)
         .expect("entry");
-    assert!(entry_fn.end <= 0x140001018, "entry end: {:#x}", entry_fn.end);
+    assert!(
+        entry_fn.end <= 0x140001018,
+        "entry end: {:#x}",
+        entry_fn.end
+    );
     let rep = run_analyzers(&mut prog, &["Stack"]).unwrap();
-    let frames = rep.results[0].stack_frames.as_ref().cloned().unwrap_or_default();
+    let frames = rep.results[0]
+        .stack_frames
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
     // Entry has no sub rsp / param spill — must not appear in frames (no filler)
     assert!(
         !frames.iter().any(|(va, _)| *va == 0x140001000),
@@ -249,8 +287,10 @@ fn stack_entry_not_polluted_by_later_body() {
     );
     // func_stack still real
     assert!(
-        frames.iter().any(|(va, locs)| *va == 0x140001030
-            && locs.iter().any(|l| l.contains("frame_size=0x20"))),
+        frames
+            .iter()
+            .any(|(va, locs)| *va == 0x140001030
+                && locs.iter().any(|l| l.contains("frame_size=0x20"))),
         "{frames:?}"
     );
 }
@@ -275,7 +315,8 @@ fn external_params_exitprocess() {
     let o = run("Windows x86 Propagate External Parameters");
     let e = o.external_params.as_ref().expect("external_params");
     assert!(
-        e.iter().any(|(va, p)| *va == 0x140002000 && p.contains("ExitProcess")),
+        e.iter()
+            .any(|(va, p)| *va == 0x140002000 && p.contains("ExitProcess")),
         "{e:?}"
     );
 }
@@ -285,7 +326,8 @@ fn resources_find_version_marker() {
     let o = run("WindowsResourceReference");
     let r = o.resources.as_ref().expect("resources");
     assert!(
-        r.iter().any(|x| x.name.contains("VERSION") && x.va == 0x140002090),
+        r.iter()
+            .any(|x| x.name.contains("VERSION") && x.va == 0x140002090),
         "{r:?}"
     );
 }
@@ -298,13 +340,19 @@ fn bare_tiny_pe_no_fake_switch_or_pdb_entry() {
     if let Some(sw) = &rep.results[0].switches {
         for s in sw {
             assert!(
-                !(s.jump_va == prog.entry.unwrap() && s.cases.len() == 2 && s.cases[0].1 == prog.entry.unwrap()),
+                !(s.jump_va == prog.entry.unwrap()
+                    && s.cases.len() == 2
+                    && s.cases[0].1 == prog.entry.unwrap()),
                 "fabricated switch at entry: {s:?}"
             );
         }
     }
     let rep2 = run_analyzers(&mut prog, &["PDB Universal"]).unwrap();
-    let syms = rep2.results[0].symbols.as_ref().cloned().unwrap_or_default();
+    let syms = rep2.results[0]
+        .symbols
+        .as_ref()
+        .cloned()
+        .unwrap_or_default();
     assert!(
         !syms.iter().any(|s| s.name == "PDB_entry"),
         "fabricated PDB_entry: {syms:?}"

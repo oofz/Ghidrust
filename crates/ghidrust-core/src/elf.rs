@@ -135,7 +135,9 @@ pub fn load_elf(data: &[u8], name: impl Into<String>) -> Result<Program> {
             let p_filesz = rdu64(data, off + 32)? as usize;
             let p_memsz = rdu64(data, off + 40)? as usize;
             let mut bytes = vec![0u8; p_memsz];
-            let n = p_filesz.min(data.len().saturating_sub(p_offset)).min(p_memsz);
+            let n = p_filesz
+                .min(data.len().saturating_sub(p_offset))
+                .min(p_memsz);
             if n > 0 {
                 bytes[..n].copy_from_slice(&data[p_offset..p_offset + n]);
             }

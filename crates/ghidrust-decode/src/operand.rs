@@ -16,7 +16,10 @@ pub enum OpType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operand {
     Reg(RegId),
-    Imm { value: i64, size: u8 },
+    Imm {
+        value: i64,
+        size: u8,
+    },
     Mem {
         base: RegId,
         index: RegId,

@@ -13,9 +13,9 @@ pub struct SectionNote {
 
 /// Well-known PE section names (informational allowlist).
 const STANDARD_PE_NAMES: &[&str] = &[
-    ".text", ".rdata", ".data", ".pdata", ".xdata", ".bss", ".edata", ".idata",
-    ".rsrc", ".reloc", ".tls", ".debug", ".didat", ".gfids", ".00cfg", ".CRT",
-    ".code", ".idata", "CODE", "DATA", "BSS", ".rodata",
+    ".text", ".rdata", ".data", ".pdata", ".xdata", ".bss", ".edata", ".idata", ".rsrc", ".reloc",
+    ".tls", ".debug", ".didat", ".gfids", ".00cfg", ".CRT", ".code", ".idata", "CODE", "DATA",
+    "BSS", ".rodata",
 ];
 
 fn is_standard_name(name: &str) -> bool {
@@ -85,7 +85,11 @@ fn notes_for_section(prog: &Program, s: &SectionInfo) -> Vec<SectionNote> {
     }
     // Tiny high-entropy tip: small section with high byte entropy in mapped bytes.
     if s.virtual_size > 0 && s.virtual_size <= 0x1000 {
-        if let Some(block) = prog.blocks.iter().find(|b| b.name == s.name || b.va == s.va) {
+        if let Some(block) = prog
+            .blocks
+            .iter()
+            .find(|b| b.name == s.name || b.va == s.va)
+        {
             let sample_len = (block.bytes.len()).min(256);
             if sample_len >= 32 {
                 let ent = sample_entropy(&block.bytes[..sample_len]);

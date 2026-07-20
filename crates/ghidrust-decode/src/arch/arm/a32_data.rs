@@ -28,19 +28,25 @@ fn decode_dp_imm(word: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let mnemonic = if suffix.is_empty() {
         base.to_string()
     } else {
- format!("{base}{suffix}")
+        format!("{base}{suffix}")
     };
     let operands = if is_dp_compare(opcode) {
- format!("{}, {}, #{:#x}", gpr(rn), gpr(rd), imm)
+        format!("{}, {}, #{:#x}", gpr(rn), gpr(rd), imm)
     } else if opcode == 0b1101 && rn == 0xf {
- // mov
- format!("{}, #{:#x}", gpr(rd), imm)
+        // mov
+        format!("{}, #{:#x}", gpr(rd), imm)
     } else if opcode == 0b1111 && rn == 0xf {
- format!("{}, #{:#x}", gpr(rd), imm)
+        format!("{}, #{:#x}", gpr(rd), imm)
     } else {
- format!("{}, {}, #{:#x}", gpr(rd), gpr(rn), imm)
+        format!("{}, {}, #{:#x}", gpr(rd), gpr(rn), imm)
     };
-    Ok(Instruction::with_text(address, raw.to_vec(), mnemonic, operands, 4))
+    Ok(Instruction::with_text(
+        address,
+        raw.to_vec(),
+        mnemonic,
+        operands,
+        4,
+    ))
 }
 
 fn decode_dp_reg(word: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
@@ -58,19 +64,25 @@ fn decode_dp_reg(word: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let mnemonic = if suffix.is_empty() {
         base.to_string()
     } else {
- format!("{base}{suffix}")
+        format!("{base}{suffix}")
     };
     let shift_str = fmt_shift_reg(shift_type, shift_imm);
     let operands = if is_dp_compare(opcode) {
- format!("{}, {}{}", gpr(rn), gpr(rs), shift_str)
+        format!("{}, {}{}", gpr(rn), gpr(rs), shift_str)
     } else if opcode == 0b1101 && rn == 0xf {
- format!("{}, {}{}", gpr(rd), gpr(rs), shift_str)
+        format!("{}, {}{}", gpr(rd), gpr(rs), shift_str)
     } else if opcode == 0b1111 && rn == 0xf {
- format!("{}, {}{}", gpr(rd), gpr(rs), shift_str)
+        format!("{}, {}{}", gpr(rd), gpr(rs), shift_str)
     } else {
- format!("{}, {}, {}{}", gpr(rd), gpr(rn), gpr(rs), shift_str)
+        format!("{}, {}, {}{}", gpr(rd), gpr(rn), gpr(rs), shift_str)
     };
-    Ok(Instruction::with_text(address, raw.to_vec(), mnemonic, operands, 4))
+    Ok(Instruction::with_text(
+        address,
+        raw.to_vec(),
+        mnemonic,
+        operands,
+        4,
+    ))
 }
 
 fn decode_multiply(word: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
@@ -83,40 +95,43 @@ fn decode_multiply(word: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
     let suffix = cond_suffix(cond);
     let (base, operands) = if a {
         (
- "mla",
- format!("{}, {}, {}, {}", gpr(rd), gpr(rm), gpr(rs), gpr(rn)),
+            "mla",
+            format!("{}, {}, {}, {}", gpr(rd), gpr(rm), gpr(rs), gpr(rn)),
         )
     } else {
-        (
- "mul",
- format!("{}, {}, {}", gpr(rd), gpr(rm), gpr(rs)),
-        )
+        ("mul", format!("{}, {}, {}", gpr(rd), gpr(rm), gpr(rs)))
     };
     let mnemonic = if suffix.is_empty() {
         base.to_string()
     } else {
- format!("{base}{suffix}")
+        format!("{base}{suffix}")
     };
-    Ok(Instruction::with_text(address, raw.to_vec(), mnemonic, operands, 4))
+    Ok(Instruction::with_text(
+        address,
+        raw.to_vec(),
+        mnemonic,
+        operands,
+        4,
+    ))
 }
 
 pub fn try_decode_misc(word: u32, address: u64, raw: &[u8]) -> Option<Result<Instruction>> {
- // CLZ Rd, Rm: cond 0001 0110 1111 Rm 0000 0001 Rd
+    // CLZ Rd, Rm: cond 0001 0110 1111 Rm 0000 0001 Rd
     if (word & 0x0ff0_0f70) == 0x0160_0f10 {
         let cond = (word >> 28) & 0xf;
         let rd = (word >> 12) & 0xf;
         let rm = word & 0xf;
         let suffix = cond_suffix(cond);
         let mnemonic = if suffix.is_empty() {
- "clz".into()
+            "clz".into()
         } else {
- format!("clz{suffix}")
+            format!("clz{suffix}")
         };
         return Some(Ok(Instruction::with_text(
             address,
             raw.to_vec(),
             mnemonic,
- format!("{}, {}", gpr(rd), gpr(rm)),
+            format!("{}, {}", gpr(rd), gpr(rm)),
             4,
         )));
     }

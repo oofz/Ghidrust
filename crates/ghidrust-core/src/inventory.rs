@@ -154,7 +154,15 @@ pub fn inventory_pe_dir(
     }
     let mut entries = Vec::new();
     let mut notes = Vec::new();
-    walk_pe(root, root, 0, max_depth, with_hash, &mut entries, &mut notes);
+    walk_pe(
+        root,
+        root,
+        0,
+        max_depth,
+        with_hash,
+        &mut entries,
+        &mut notes,
+    );
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(PeInventory {
         schema_version: PE_INVENTORY_SCHEMA,
@@ -345,10 +353,7 @@ mod tests {
 
     #[test]
     fn inventory_finds_pe_in_dir() {
-        let dir = std::env::temp_dir().join(format!(
-            "ghidrust-inv-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("ghidrust-inv-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let pe = fixture_path("tiny_x64.pe");

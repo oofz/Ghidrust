@@ -234,15 +234,7 @@ pub fn gpu_enrich_analyzers(prog: &mut Program, names: &[&str]) -> Vec<(String, 
         } else {
             flatten_image(prog)
         };
-        let n = merge_seeds_into_program(
-            prog,
-            name,
-            st,
-            &run.hits,
-            &run.hit_aux,
-            &map,
-            &hay,
-        );
+        let n = merge_seeds_into_program(prog, name, st, &run.hits, &run.hit_aux, &map, &hay);
         out.push((name.into(), n, run.backend));
     }
     out
@@ -348,7 +340,9 @@ mod tests {
         );
         assert!(row.gpu_device_ms >= 0.0);
         // GPU primary scales with tiled hay (throughput workload)
-        assert!(row.gpu_primary >= row.analyzer_oracle || row.gpu_primary > 0 || row.cpu_primary == 0);
+        assert!(
+            row.gpu_primary >= row.analyzer_oracle || row.gpu_primary > 0 || row.cpu_primary == 0
+        );
     }
 
     #[test]

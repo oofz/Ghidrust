@@ -88,7 +88,6 @@ impl PtySession {
             Ok(())
         }
     }
-
 }
 
 impl Drop for PtySession {
@@ -214,14 +213,14 @@ mod windows {
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
     use windows_sys::Win32::Foundation::{
-        CloseHandle, DuplicateHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE, DUPLICATE_SAME_ACCESS,
+        CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, FALSE, HANDLE, INVALID_HANDLE_VALUE,
     };
     use windows_sys::Win32::System::Console::{
         ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
     };
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
-        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, GetCurrentProcess,
+        CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess, GetExitCodeProcess,
         InitializeProcThreadAttributeList, TerminateProcess, UpdateProcThreadAttribute,
         CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
         PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTUPINFOEXW, STARTUPINFOW,
@@ -429,9 +428,7 @@ mod windows {
         let _ = file.into_raw_handle();
         match result {
             Ok(n) => Ok(n),
-            Err(e)
-                if e.raw_os_error() == Some(109) || e.kind() == io::ErrorKind::BrokenPipe =>
-            {
+            Err(e) if e.raw_os_error() == Some(109) || e.kind() == io::ErrorKind::BrokenPipe => {
                 Ok(0)
             }
             Err(e) => Err(e),
@@ -507,7 +504,15 @@ mod unix {
         let mut win: libc::winsize = unsafe { std::mem::zeroed() };
         win.ws_col = cols;
         win.ws_row = rows;
-        let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &win) };
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &win,
+            )
+        };
         if rc != 0 {
             return Err(io::Error::last_os_error());
         }

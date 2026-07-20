@@ -5,7 +5,7 @@ use crate::insn::Instruction;
 
 pub fn decode(bytes: &[u8], address: u64, big_endian: bool) -> Result<Instruction> {
     if bytes.len() < 4 {
- return Err(Error::Decode("truncated Thumb32 instruction".into()));
+        return Err(Error::Decode("truncated Thumb32 instruction".into()));
     }
     let hw1 = super::util::read_u16_le(bytes, big_endian)?;
     let hw2 = super::util::read_u16_le(&bytes[2..], big_endian)?;
@@ -13,31 +13,33 @@ pub fn decode(bytes: &[u8], address: u64, big_endian: bool) -> Result<Instructio
     let op1 = (hw1 >> 11) & 0x3;
     let _op2 = (hw1 >> 4) & 0x7f;
 
- // 32-bit conditional branch: 11110 S cond imm6 10 J1 J2 imm11
+    // 32-bit conditional branch: 11110 S cond imm6 10 J1 J2 imm11
     if op1 == 0b10 && (hw1 & 0x1000) == 0 && (hw2 & 0x8000) == 0 {
         return decode_branch(hw1, hw2, address, raw);
     }
- // Load/store multiple / dual
+    // Load/store multiple / dual
     if op1 == 0b11 && (hw1 & 0x1200) == 0x0000 {
         return decode_load_store_dual(hw1, hw2, address, raw);
     }
- // Data processing (modified immediate)
+    // Data processing (modified immediate)
     if op1 == 0b11 && (hw1 & 0x1a00) == 0x0800 {
         return decode_dp_imm(hw1, hw2, address, raw);
     }
- // Data processing (register)
+    // Data processing (register)
     if op1 == 0b11 && (hw1 & 0x1e00) == 0x0a00 {
         return decode_dp_reg(hw1, hw2, address, raw);
     }
- // Load/store single
+    // Load/store single
     if op1 == 0b11 && (hw1 & 0x1200) == 0x1000 {
         return decode_load_store_single(hw1, hw2, address, raw);
     }
- // BL / BLX immediate: 11110.. 11 ..
+    // BL / BLX immediate: 11110.. 11 ..
     if (hw1 & 0xf800) == 0xf000 && (hw2 & 0xd001) == 0xd000 {
         return decode_bl(hw1, hw2, address, raw);
     }
- Err(Error::Decode(format!("unhandled T32 {hw1:#06x} {hw2:#06x}")))
+    Err(Error::Decode(format!(
+        "unhandled T32 {hw1:#06x} {hw2:#06x}"
+    )))
 }
 
 fn decode_branch(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> Result<Instruction> {
@@ -56,7 +58,7 @@ fn decode_branch(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> Result<Instr
     let offset = sign_extend(imm, 25);
     let target = (address as i64).wrapping_add(offset as i64) as u64;
     let suffix = super::util::cond_suffix(cond as u32);
- let mnemonic = format!("b{suffix}");
+    let mnemonic = format!("b{suffix}");
     Ok(Instruction::with_text(
         address,
         raw,
@@ -74,14 +76,15 @@ fn decode_bl(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> Result<Instructi
     let imm11 = hw2 & 0x7ff;
     let i1 = !(j1 ^ s);
     let i2 = !(j2 ^ s);
-    let mut imm = (imm10 as u32) << 12 | (i1 as u32) << 22 | (i2 as u32) << 21 | (imm11 as u32) << 1;
+    let mut imm =
+        (imm10 as u32) << 12 | (i1 as u32) << 22 | (i2 as u32) << 21 | (imm11 as u32) << 1;
     if s {
         imm |= 1 << 23;
     }
     let offset = sign_extend(imm, 25);
     let target = (address as i64).wrapping_add(offset as i64) as u64;
     let x = ((hw1 >> 12) & 1) != 0;
- let mnemonic = if x { "blx" } else { "bl" };
+    let mnemonic = if x { "blx" } else { "bl" };
     Ok(Instruction::with_text(
         address,
         raw,
@@ -99,11 +102,11 @@ fn decode_dp_imm(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> Result<Instr
     let imm = thumb32_imm12(hw1, hw2);
     let base = arm_dp_mnemonic(opcode as u32, s);
     let operands = if opcode == 0b1101 && rn == 15 {
- format!("{}, #{:#x}", gpr(rd as u32), imm)
+        format!("{}, #{:#x}", gpr(rd as u32), imm)
     } else if opcode == 0b1111 && rn == 15 {
- format!("{}, #{:#x}", gpr(rd as u32), imm)
+        format!("{}, #{:#x}", gpr(rd as u32), imm)
     } else {
- format!("{}, {}, #{:#x}", gpr(rd as u32), gpr(rn), imm)
+        format!("{}, {}, #{:#x}", gpr(rd as u32), gpr(rn), imm)
     };
     Ok(Instruction::with_text(address, raw, base, operands, 4))
 }
@@ -119,7 +122,7 @@ fn decode_dp_reg(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> Result<Instr
     let base = arm_dp_mnemonic(opcode as u32, s);
     let shift_str = fmt_shift_reg(shift_type as u32, shift_imm as u32);
     let operands = format!(
- "{}, {}, {}{}",
+        "{}, {}, {}{}",
         gpr(rd as u32),
         gpr(rn),
         gpr(rm as u32),
@@ -133,12 +136,12 @@ fn decode_load_store_single(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> R
     let rn = (hw1 & 0xf) as u32;
     let rt = (hw2 >> 12) & 0xf;
     let imm12 = ((hw1 & 0xff) as u32) << 4 | ((hw2 >> 4) & 0xf) as u32;
- let mnemonic = if l { "ldr" } else { "str" };
+    let mnemonic = if l { "ldr" } else { "str" };
     Ok(Instruction::with_text(
         address,
         raw,
         mnemonic,
- format!("{}, [{}, #{imm12}]", gpr(rt as u32), gpr(rn)),
+        format!("{}, [{}, #{imm12}]", gpr(rt as u32), gpr(rn)),
         4,
     ))
 }
@@ -148,12 +151,12 @@ fn decode_load_store_dual(hw1: u16, hw2: u16, address: u64, raw: Vec<u8>) -> Res
     let rn = (hw1 & 0xf) as u32;
     let rt = (hw2 >> 12) & 0xf;
     let rt2 = (hw2 >> 8) & 0xf;
- let mnemonic = if l { "ldrd" } else { "strd" };
+    let mnemonic = if l { "ldrd" } else { "strd" };
     Ok(Instruction::with_text(
         address,
         raw,
         mnemonic,
- format!("{}, {}, [{}]", gpr(rt as u32), gpr(rt2 as u32), gpr(rn)),
+        format!("{}, {}, [{}]", gpr(rt as u32), gpr(rt2 as u32), gpr(rn)),
         4,
     ))
 }

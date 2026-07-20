@@ -213,7 +213,11 @@ pub fn decode_gdecomp_pseudo_c(dump: &[u8]) -> Option<String> {
 }
 
 /// Extract raw code bytes for a VA region (host seed only).
-pub fn region_bytes(prog: &Program, va: u64, max_bytes: usize) -> ghidrust_core::Result<(Vec<u8>, u64)> {
+pub fn region_bytes(
+    prog: &Program,
+    va: u64,
+    max_bytes: usize,
+) -> ghidrust_core::Result<(Vec<u8>, u64)> {
     let data = prog
         .read_va(va, max_bytes)
         .ok_or_else(|| ghidrust_core::Error::Decode(format!("no bytes at {va:#x}")))?;
@@ -222,11 +226,7 @@ pub fn region_bytes(prog: &Program, va: u64, max_bytes: usize) -> ghidrust_core:
 
 /// Multipass decompile on the host mirroring GPU stages (same IR + emit).
 /// Correctness oracle for the GPU-resident process; also used when no adapter.
-pub fn multipass_cpu_decompile_from_code(
-    name: &str,
-    entry: u64,
-    code: &[u8],
-) -> DecompileResult {
+pub fn multipass_cpu_decompile_from_code(name: &str, entry: u64, code: &[u8]) -> DecompileResult {
     let ir = cpu_decode_walk(code);
     let (pseudo_c, _block_count, _edge_count) = multipass_emit_from_ir(name, entry, &ir);
     let insns = ir_to_instructions(entry, &ir);
@@ -534,8 +534,8 @@ fn ir_to_instructions(entry: u64, ir: &[GpuIrSlot]) -> Vec<ghidrust_core::Instru
         .filter(|s| s.valid != 0)
         .map(|s| {
             let operands = if s.has_imm != 0 {
-                let target = (entry as i64 + s.off as i64 + s.length as i64 + (s.imm as i32 as i64))
-                    as u64;
+                let target =
+                    (entry as i64 + s.off as i64 + s.length as i64 + (s.imm as i32 as i64)) as u64;
                 format!("{target:#x}")
             } else {
                 match s.opcode {
@@ -572,7 +572,8 @@ pub fn gpu_decompile_to_file(
         .find(|f| f.entry == entry)
         .map(|f| f.name.clone())
         .unwrap_or_else(|| format!("FUN_{entry:016x}"));
-    let (code, _) = region_bytes(prog, entry, max_bytes.min(MAX_CODE)).map_err(|e| e.to_string())?;
+    let (code, _) =
+        region_bytes(prog, entry, max_bytes.min(MAX_CODE)).map_err(|e| e.to_string())?;
     gpu_decompile_code_to_file(&name, entry, &code, dump_path)
 }
 
@@ -1114,7 +1115,11 @@ mod tests {
         // xor; je +4; xor; ret; pop; ret  → leaders 0,2,4
         let code = vec![0x31, 0xc0, 0x74, 0x04, 0x31, 0xc0, 0xc3, 0x5d, 0xc3];
         let d = multipass_cpu_decompile_from_code("br", 0x1000, &code);
-        assert!(d.blocks.len() >= 2, "expected multiple blocks: {}", d.blocks.len());
+        assert!(
+            d.blocks.len() >= 2,
+            "expected multiple blocks: {}",
+            d.blocks.len()
+        );
         assert!(
             d.pseudo_c.contains("if (/* jcc */)") && d.pseudo_c.contains("goto block_"),
             "branchy emit incomplete:\n{}",
@@ -1157,9 +1162,7 @@ mod tests {
         assert!(b.gpu_pcie_upload_ms >= 0.0);
         assert!(b.gpu_device_ms >= 0.0);
         assert!(b.gpu_pcie_download_ms >= 0.0);
-        assert!(
-            (b.gpu_pcie_ms - (b.gpu_pcie_upload_ms + b.gpu_pcie_download_ms)).abs() < 1e-6
-        );
+        assert!((b.gpu_pcie_ms - (b.gpu_pcie_upload_ms + b.gpu_pcie_download_ms)).abs() < 1e-6);
         assert_eq!(b.mid_pipeline_host_reads, 0);
         assert!(
             b.equal,
@@ -1193,13 +1196,18 @@ mod tests {
             rep.backend, rep.device
         );
         assert!(
-            rep.device.contains("NVIDIA") || rep.device.contains("Vulkan") || rep.device.contains("Gpu"),
+            rep.device.contains("NVIDIA")
+                || rep.device.contains("Vulkan")
+                || rep.device.contains("Gpu"),
             "device={}",
             rep.device
         );
         let bytes = std::fs::read(&out).unwrap();
         let from_file = decode_gdecomp_pseudo_c(&bytes).unwrap();
-        assert_eq!(normalize_pseudo(&from_file), normalize_pseudo(&rep.pseudo_c));
+        assert_eq!(
+            normalize_pseudo(&from_file),
+            normalize_pseudo(&rep.pseudo_c)
+        );
         let (code, entry) = region_bytes(&prog, rep.entry, 64).unwrap();
         let multi = multipass_cpu_decompile_from_code(&rep.name, entry, &code);
         assert_eq!(
@@ -1263,7 +1271,10 @@ mod tests {
         );
         let dump = std::fs::read(&out).unwrap();
         let from_file = decode_gdecomp_pseudo_c(&dump).unwrap();
-        assert_eq!(normalize_pseudo(&from_file), normalize_pseudo(&rep.pseudo_c));
+        assert_eq!(
+            normalize_pseudo(&from_file),
+            normalize_pseudo(&rep.pseudo_c)
+        );
         let _ = std::fs::remove_file(&out);
     }
 
@@ -1276,7 +1287,10 @@ mod tests {
         let r2 = gpu_decompile_to_file(&prog, None, &b, 64).unwrap();
         assert_eq!(r1.backend, "gpu_vram_multipass");
         assert_eq!(r2.backend, "gpu_vram_multipass");
-        assert_eq!(normalize_pseudo(&r1.pseudo_c), normalize_pseudo(&r2.pseudo_c));
+        assert_eq!(
+            normalize_pseudo(&r1.pseudo_c),
+            normalize_pseudo(&r2.pseudo_c)
+        );
         assert!(a.is_file() && b.is_file());
         let _ = std::fs::remove_file(&a);
         let _ = std::fs::remove_file(&b);

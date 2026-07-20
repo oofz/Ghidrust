@@ -114,11 +114,7 @@ fn disasm_raw_blob(prog: &Program, opts: &DecodeOpts, json: bool) -> ExitCode {
         }
     };
     let start = opts.addr.unwrap_or(0);
-    let bytes: Vec<u8> = prog
-        .blocks
-        .iter()
-        .flat_map(|b| b.bytes.clone())
-        .collect();
+    let bytes: Vec<u8> = prog.blocks.iter().flat_map(|b| b.bytes.clone()).collect();
     let offset = start.min(bytes.len() as u64) as usize;
     let slice = &bytes[offset..];
     match engine.disasm(slice, start, opts.count) {

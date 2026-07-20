@@ -25,10 +25,7 @@ fn matrix_lists_all_and_marks_have() {
     // Each A.xx row should be have
     for line in matrix.lines() {
         if line.trim_start().starts_with("| A.") && line.contains('|') {
-            assert!(
-                line.contains("**have**"),
-                "A-row not have: {line}"
-            );
+            assert!(line.contains("**have**"), "A-row not have: {line}");
         }
     }
 }
@@ -77,26 +74,62 @@ fn lab_run_all_analyzers_ok_with_structured_primary() {
 }
 
 fn primary_nonempty(o: &ghidrust_core::AnalyzerOutput) -> bool {
-    o.rtti.as_ref().map(|r| !r.classes.is_empty()).unwrap_or(false)
+    o.rtti
+        .as_ref()
+        .map(|r| !r.classes.is_empty())
+        .unwrap_or(false)
         || o.strings.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
         || o.functions.as_ref().map(|f| !f.is_empty()).unwrap_or(false)
-        || o.recovered_ranges.as_ref().map(|r| !r.is_empty()).unwrap_or(false)
-        || o.address_tables.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
-        || o.call_fixups.as_ref().map(|c| !c.is_empty()).unwrap_or(false)
+        || o.recovered_ranges
+            .as_ref()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
+        || o.address_tables
+            .as_ref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false)
+        || o.call_fixups
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
         || o.media.as_ref().map(|m| !m.is_empty()).unwrap_or(false)
-        || o.fid_matches.as_ref().map(|f| !f.is_empty()).unwrap_or(false)
+        || o.fid_matches
+            .as_ref()
+            .map(|f| !f.is_empty())
+            .unwrap_or(false)
         || o.resources.as_ref().map(|r| !r.is_empty()).unwrap_or(false)
         || o.switches.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
         || o.symbols.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-        || o.shared_returns.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-        || o.conventions.as_ref().map(|c| !c.is_empty()).unwrap_or(false)
-        || o.noreturn_entries.as_ref().map(|n| !n.is_empty()).unwrap_or(false)
-        || o.stack_frames.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-        || o.varargs_entries.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
-        || o.external_params.as_ref().map(|e| !e.is_empty()).unwrap_or(false)
+        || o.shared_returns
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        || o.conventions
+            .as_ref()
+            .map(|c| !c.is_empty())
+            .unwrap_or(false)
+        || o.noreturn_entries
+            .as_ref()
+            .map(|n| !n.is_empty())
+            .unwrap_or(false)
+        || o.stack_frames
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        || o.varargs_entries
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        || o.external_params
+            .as_ref()
+            .map(|e| !e.is_empty())
+            .unwrap_or(false)
 }
 
 #[test]
 fn docs_link_tech_plans() {
-    assert!(read_doc("ROADMAP.md").contains("ANALYZER_TECH_PLANS") || read_doc("ROADMAP.md").contains("FEATURE_MATRIX"));
+    assert!(
+        read_doc("ROADMAP.md").contains("ANALYZER_TECH_PLANS")
+            || read_doc("ROADMAP.md").contains("FEATURE_MATRIX")
+    );
 }

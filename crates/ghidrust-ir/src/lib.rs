@@ -234,7 +234,11 @@ pub struct AddressedOp {
 
 impl AddressedOp {
     pub fn new(address: u64, length: u8, op: PcodeOp) -> Self {
-        Self { address, length, op }
+        Self {
+            address,
+            length,
+            op,
+        }
     }
 }
 

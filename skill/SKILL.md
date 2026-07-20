@@ -2,13 +2,14 @@
 name: ghidrust
 description: >
   x86-64 Auto Analysis, projects, CLI/MCP, egui GUI, IL2CPP metadata, Unity player inventory,
- GPU analyzer kernels + multipass decompile) to reverse-engineer binaries without .
-  Exhaustive feature catalog with when-to-use guidance.
+  GPU analyzer kernels + multipass decompile, crypt-constants / recover-strings / decode bake /
+  crypto-capabilities. Exhaustive feature catalog with when-to-use guidance.
   Triggers: /ghidrust, reverse engineer, RE a PE/ELF, disassemble, decode-support, decode-query,
-  MCP ghidrust, strings/functions, GPU decompile, IL2CPP, global-metadata, unity-inventory,
-  GameAssembly, analyzer-bench, rtti-gpu-bench, bulk-bench.
+  MCP ghidrust, strings/functions, crypt-constants, recover-strings, decode bake, decode magic,
+  crypto-capabilities, GPU decompile, IL2CPP, global-metadata, unity-inventory, GameAssembly,
+  analyzer-bench, rtti-gpu-bench, bulk-bench.
 metadata:
-  short-description: "Ghidrust RE — multi-arch decode, CLI, MCP, IL2CPP, Unity, analyzers, GPU"
+  short-description: "Ghidrust RE — decode, crypto recover, CLI, MCP, IL2CPP, Unity, analyzers, GPU"
 ---
 
 # Ghidrust — agent skill
@@ -56,7 +57,7 @@ JSON shape:
 | `features.decode_diet` | `false` — full detail path (not diet build) |
 | `features.x86_reduce` | `false` — full x86 table (not x86 reduce build) |
 
-`server_info` also sets **`tool_surface: 5`** and lists `decode_support` / `decode_query` under `features.surface`.
+`server_info` also sets **`tool_surface: 6`** and lists decode + crypto tools under `features.surface` (`decode_support` / `decode_query` / `crypt_constants` / `recover_strings` / `decode_bake` / `decode_magic` / `list_crypto_capabilities`).
 
 ### CLI — `disasm`, `decode-support`, `decode-query`
 
@@ -117,7 +118,7 @@ Positional query name (without `--query`) is also accepted: `ghidrust decode-que
 
 ### MCP — `disassemble`, `decode_support`, `decode_query`
 
-Requires **`tool_surface >= 5`** (check `server_info` before assuming these tools/args exist).
+Requires **`tool_surface >= 5`** for decode tools; **`>= 6`** for crypto recover / bake tools (check `server_info` before assuming these tools/args exist).
 
 #### `decode_support`
 
@@ -247,7 +248,7 @@ Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
 
 ### Decode SOPs (required)
 
-- **`tool_surface` check**: Call `server_info` first. This skill requires **`tool_surface >= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode args. If below 5 or tools missing from `tools/list` → rebuild `ghidrust`, restart MCP. (Broader Ghidrust surface still requires **`>= 3`**, prefer **`>= 4`** for bounded disasm / `get_calls_from`.)
+- **`tool_surface` check**: Call `server_info` first. Require **`tool_surface >= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode args. Require **`>= 6`** for `crypt_constants`, `recover_strings`, `decode_bake`, `decode_magic`, `list_crypto_capabilities`. If below the needed minimum or tools missing from `tools/list` → rebuild `ghidrust`, restart MCP. (Broader surface still requires **`>= 3`**, prefer **`>= 4`** for bounded disasm / `get_calls_from`.)
 - **Decode mode decision tree**:
   - Need body of **unknown / wrong / suspect** bounds? → `disasm --linear --count N` first (ground truth) → `function create --addr` to heal → then `--flow` / `decompile` on healed range.
   - Need CFG inside a **known-good** function? → `--flow` (or default bounded).
@@ -262,7 +263,8 @@ Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
 
 ## Agent friction SOPs (required)
 
-- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer **`>= 4`** for bounded disasm / `get_calls_from`. Require **`>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags. If `server_info` is missing, `tool_surface` is below the needed minimum, or expected tools are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
+- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer **`>= 4`** for bounded disasm / `get_calls_from`. Require **`>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags. Require **`>= 6`** for crypt-constants / recover-strings / decode bake|magic / crypto-capabilities. If `server_info` is missing, `tool_surface` is below the needed minimum, or expected tools are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
+- **Crypto / obfuscated strings**: Prefer `crypt_constants` → `recover_strings` → `decode_bake`/`decode_magic` on leftover blobs; use `list_crypto_capabilities` to locate decrypt/encrypt API sites. Never invent plaintext — empty hits are honest.
 - **Artifacts**: When envelope `entry_count` > preview or the host truncates tool text, drain via `artifact_query` / `artifact get` until `next_offset` is null. Never assume truncated MCP text is complete.
 - **Program identity**: Prefer `load` with absolute `path`, or `project` + `file_id`. Facts always include `resolved_path` or honest null — resolve before analyze/decompile.
 - **Inventory / tree**: Use `inventory <dir>` (PE VERSIONINFO + exe/dll) before OS `dir`/`Get-Item`. Use `tree` / `list_tree` for non-PE sidecars (existence/size only; no unpack).
@@ -307,6 +309,15 @@ Need install layout without shell?
 Need GPU for selected analyzers (not just bench)?
   → analyze … --gpu   OR  GUI checkbox  OR  MCP analyze gpu:true
   → bulk mode for ASCII Strings + SIMT seed enrich per selected name
+
+Need crypto constants / obfuscated strings / peel a blob?
+  → crypt-constants PATH [--algo AES] --json
+  → recover-strings PATH [--only stack,tight,decoded] --json
+  → crypto-capabilities PATH [--tag decrypt] --json
+  → decode bake (-b64|-hex|-path+-addr) -op FromBase64|XOR|… [--annotate-va HEX with -path] --json
+  → decode magic (-b64|-hex|…) [-depth N] [--crib TEXT] --json
+  → MCP: crypt_constants / recover_strings / list_crypto_capabilities / decode_bake / decode_magic
+  → analyze --analyzer "Find Crypt" / "Obfuscated Strings" / "Crypto Capabilities"
 
 Need GPU decompile at a VA?
   → gpu-decompile <path> --addr HEX   (metrics JSON; .gdecomp opaque)
@@ -416,7 +427,7 @@ ghidrust project analyze PROJ_DIR --file ID \
 
 ### MCP (`ghidrust mcp`)
 
-Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_calls_from`; **`>= 5`** for decode tools). Check with `server_info` after connect.
+Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_calls_from`; **`>= 5`** for decode tools; **`>= 6`** for crypto recover / bake). Check with `server_info` after connect.
 
 | Tool | Args | Notes |
 |------|------|-------|
@@ -432,6 +443,11 @@ Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_ca
 | `list_analyzers` | — | Auto Analysis names |
 | `analyze` | `path`, optional `analyzers[]`, **`gpu`** | CPU + optional GPU enrich |
 | `list_strings` / `search_strings` | `path`, optional `encoding`, `filter`, **`match`**, `min`, **`limit`**, **`raw`** | Blob scan when `raw:true` |
+| `crypt_constants` / `list_crypt_constants` | `path`, optional `algo`, `limit` | Crypto constant tables (S-box, TEA delta, hash K, …) |
+| `recover_strings` | `path`, optional `only[]`, `no[]`, `functions[]`, `limit` | Stack / tight / decoded obfuscated strings |
+| `decode_bake` | `recipe`\|`ops`, plus `input_hex`\|`input_b64`\|`path`+`addr` (+ `count?`) | Recipe peel (FromBase64, XOR, AESDecrypt, …) |
+| `decode_magic` | `depth?`, plus same input fields as bake | Auto peel chain by printable ratio |
+| `list_crypto_capabilities` | `path`, optional `tag` | Encrypt/decrypt/encoding capability hits |
 | `get_xrefs_to` | `path`, `addr`, optional **`skip_stubs`**, **`classify`** | RIP/tables + data ptrs; IL2CPP stubs; `to_entry` |
 | `get_xrefs_from` | `path`, `addr`, optional `count` | Xrefs from VA; `from_entry` / `from_function` / `to_entry` |
 | `get_calls_from` | `path`, `addr` | Callee edges inside containing function (CLI: `xrefs --calls`) |
@@ -453,6 +469,129 @@ Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_ca
 | `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | pid / image / session / module / rva / max | Live Process Bridge (Windows; read-only; launch = CREATE_SUSPENDED) |
 
 MCP launch: `ghidrust mcp` / `target/release/ghidrust.exe mcp` (stdio; no host-specific paths).
+
+---
+
+## Crypto recover + decode bake (CLI + MCP) — `tool_surface >= 6`
+
+Hand-rolled in-tree scanners and recipe peels. **Never invent plaintext** — empty hits / failed bake are honest. Prefer this pipeline:
+
+1. **Find sites** — `crypt_constants` and/or `list_crypto_capabilities`
+2. **Recover in-binary strings** — `recover_strings` (and/or Auto Analysis `Obfuscated Strings`)
+3. **Peel leftover blobs** — `decode_bake` / `decode_magic` on hex, Base64 text, or VA ranges
+
+### Phase A — Find Crypt / `crypt-constants`
+
+Discovers cryptographic **constant tables** (AES S-box, TEA delta, MD5/SHA-256 K prefix, ChaCha sigma, Blowfish P, CRC32 tab, …). Labels `CRYPT_*` symbols when run via Auto Analysis.
+
+| Surface | Invocation |
+|---------|------------|
+| CLI | `ghidrust crypt-constants <path> [--algo AES\|TEA\|…] [--limit N] [--json]` |
+| Analyze | `ghidrust analyze <path> --analyzer "Find Crypt" --json` |
+| MCP | `crypt_constants` / `list_crypt_constants` `{ path, algo?, limit? }` |
+
+JSON hits: `{ va, algorithm, constant, size }`.
+
+```bash
+ghidrust crypt-constants fixtures/analysis_lab.pe --json
+ghidrust analyze fixtures/analysis_lab.pe --analyzer "Find Crypt" --json
+```
+
+### Phase B — Obfuscated Strings / `recover-strings`
+
+Recovers **stack**, **tight** (stack + nearby XOR), and **decoded** (single-byte XOR runs) strings from executable blocks.
+
+| Surface | Invocation |
+|---------|------------|
+| CLI | `ghidrust recover-strings <path> [--only stack,tight,decoded] [--no static] [--functions HEX[,HEX…]] [--limit N] [--json]` |
+| Analyze | `ghidrust analyze <path> --analyzer "Obfuscated Strings" --json` |
+| MCP | `recover_strings` `{ path, only?, no?, functions?, limit? }` |
+
+JSON hits: `{ va, value, kind, decoder_va?, call_site? }`.
+
+```bash
+ghidrust recover-strings PATH --only stack,tight,decoded --json
+```
+
+### Phase C — `decode bake` / `decode magic`
+
+Recipe engine over buffers (not an Auto Analysis scanner). Input is **recipe input bytes**:
+
+| Input flag / MCP field | Meaning |
+|------------------------|---------|
+| CLI `-hex HEX` / MCP `input_hex` | Hex bytes |
+| CLI `-b64 TEXT` | Base64 **text** as UTF-8 bytes (add `-op FromBase64` to peel) |
+| MCP `input_b64` | Base64-decoded input bytes |
+| CLI `-raw TEXT` | Raw UTF-8 bytes |
+| CLI `-in FILE` | File bytes |
+| CLI `-path PATH -addr HEX [-count N]` / MCP `path`+`addr`+`count?` | Bytes from mapped image |
+
+**Ops** (`-op NAME` or recipe JSON `[{op, args}]`): `FromBase64`, `FromHex`, `FromCharcode`, `UrlDecode`, `HtmlEntityDecode`, `XOR` (`key_hex`/`key`), `XORBrute`, `RC4`, `ChaCha20Decrypt` (`key_hex`, `nonce_hex`, `counter`), `AESDecrypt`, `DESDecrypt`, `TripleDESDecrypt`, `BlowfishDecrypt`, `Gunzip`, `Inflate`, `ROT13`, `Reverse`, `DecodeUTF16LE`. CLI operation arguments accept `-key`, `-key-hex`, `-iv`, `-iv-hex`, `-nonce`, `-nonce-hex`, `-counter`, `-mode`, and `-encoding`.
+
+| Surface | Invocation |
+|---------|------------|
+| CLI bake | `ghidrust decode bake (-hex\|-b64\|-raw\|-in\|-path+-addr) [-recipe JSON \| -op NAME [-key\|-key-hex\|-iv\|-iv-hex\|-nonce\|-nonce-hex\|-counter\|-mode\|-encoding VALUE]…] [--annotate-va HEX with -path] [--json]` |
+| CLI magic | `ghidrust decode magic (…) [-depth N] [--crib TEXT] [--json]` |
+| MCP bake | `decode_bake` `{ recipe\|ops, input_hex\|input_b64\|path+addr, count?, annotate_va? }` |
+| MCP magic | `decode_magic` `{ depth?, crib?, input_hex\|input_b64\|path+addr, count? }` |
+
+```bash
+# Base64 → plaintext
+ghidrust decode bake -b64 SGVsbG8= -op FromBase64 --json
+
+# XOR with key
+ghidrust decode bake -hex 09040d0d0e -op XOR -key-hex 41 --json
+
+# Auto peel
+ghidrust decode magic -b64 SGVsbG8= -depth 3 --json
+
+# Bytes at VA
+ghidrust decode bake -path PATH -addr 0x140002000 -count 64 -op XORBrute --json
+
+# Require a known plaintext fragment; annotate is in-memory only for a plain path load
+ghidrust decode magic -hex 48656c6c6f -crib Hello --json
+ghidrust decode bake -path PATH -addr 0x140002000 -op Gunzip --annotate-va 0x140002000 --json
+```
+
+MCP examples:
+
+```json
+{ "name": "decode_bake", "arguments": {
+  "input_hex": "534756736247383d",
+  "recipe": [{ "op": "FromBase64", "args": {} }]
+}}
+```
+
+```json
+{ "name": "decode_magic", "arguments": { "input_b64": "SGVsbG8=", "depth": 3 } }
+```
+
+Bake JSON: `{ result: { ok, output_hex, output_utf8?, message, recipe_applied[] }, iocs[], annotation? }`. `annotation` records whether an EOL comment was applied; plain path loads have no project save target, so such comments are explicitly reported as in-memory only. `crib` boosts a matching magic candidate.
+
+### Phase D — Crypto Capabilities / `crypto-capabilities`
+
+Matches encrypt/decrypt/encoding **capabilities** (WinCrypt/BCrypt/DPAPI-style imports, AES-NI opcodes, prior constant hits, stackstring presence). Tags: `decrypt` \| `encrypt` \| `encoding` \| `hashing`.
+
+| Surface | Invocation |
+|---------|------------|
+| CLI | `ghidrust crypto-capabilities <path> [--tag decrypt\|encrypt\|encoding] [--json]` |
+| Analyze | `ghidrust analyze <path> --analyzer "Crypto Capabilities" --json` |
+| MCP | `list_crypto_capabilities` `{ path, tag? }` |
+
+JSON hits: `{ function_va?, capability, tag, evidence, attack?, mbc? }`.
+
+```bash
+ghidrust crypto-capabilities PATH --tag decrypt --json
+```
+
+### Agent SOP (crypto)
+
+1. `server_info` → confirm `tool_surface >= 6`.
+2. `crypt_constants` + `list_crypto_capabilities` to locate algorithms / API decrypt sites.
+3. `recover_strings` (or `analyze` with `Obfuscated Strings`) for hidden IOCs.
+4. On opaque blobs / resources / VA ranges → `decode_magic` first; if key/IV known → `decode_bake` with explicit ops.
+5. Chain: constants/capabilities → seed `recover_strings` `--functions` → bake remnants.
+6. Do **not** claim decrypted plaintext without a successful bake/`ok: true` or recovered string hit.
 
 ---
 
@@ -652,13 +791,16 @@ Output column names the field on `AnalyzerOutput` you get in `--json`
 | 3 | `Call Convention ID` | Tags each function with Win64/cdecl/stdcall/thiscall. | `conventions: [[va, name], …]` (+ `functions[*].calling_convention`) | `identified N calling convention(s)` |
 | 4 | `Call-Fixup Installer` | Security-cookie / thunk stub detection. | `call_fixups: [{fixup_name, call_va}]` | `installed N call fixup(s)` |
 | 5 | `Create Address Tables` | Contiguous VA tables in `.rdata` / data. | `address_tables: [{base, count, entries: [va, …]}]` | `found N address table(s)` |
+| 5b | `Crypto Capabilities` | Encrypt/decrypt/encoding capability matches (imports, AES-NI, constant seeds). | `crypto_capabilities: [{function_va?, capability, tag, evidence, attack?, mbc?}]` | `matched N crypto/encoding capability hit(s)` |
 | 6 | `Decompiler Parameter ID` | `mov [rbp+…], rcx/rdx` spill detection → `arg0:rcx` / `arg1:rdx`. No inventions on bare bodies. | `functions: [{entry, parameters: [str,…]}]` | `recovered parameters for N function(s)` |
 | 7 | `Decompiler Switch Analysis` | Address tables → switch cases. | `switches: [{jump_va, cases: [[val, target], …]}]` | `recovered N switch table(s)` |
 | 8 | `Demangler Microsoft` | MSVC `?…@@` demangler; `demangled` alongside raw. | `symbols: [{name, va, demangled?}]` | `demangled N symbol(s)` |
 | 9 | `Embedded Media` | PNG / JPG / GIF / WAV / … magic scan. | `media: [{kind, va}]` | `found N media signature(s)` |
+| 9b | `Find Crypt` | Cryptographic constant tables (S-box, TEA delta, hash K, stream sigma, …). | `crypt_constants: [{va, algorithm, constant, size}]` | `found N cryptographic constant hit(s)` |
 | 10 | `Function ID` | Prologue-window hash → shipped `fid_*` catalog match. | `fid_matches: [{entry, matched_name}]` | `matched N FID signature(s)` |
 | 11 | `Function Start Search` | Entry + symbols + exact `55 48 89 e5` + orphan `sub rsp, imm8`; grows to `ret`/`int3`; drops mid-body seeds. | `functions: [{entry, end, name}]` | `identified N function start(s)` |
 | 12 | `Non-Returning Functions - Discovered` | `int3`-terminated bodies + known no-return imports. | `noreturn_entries: [va, …]` (+ `functions[*].noreturn`) | `marked N noreturn function(s)` |
+| 12b | `Obfuscated Strings` | Stack / tight / decoded string recovery from executable blocks. | `obfuscated_strings: [{va, value, kind, decoder_va?, call_site?}]` | `recovered N obfuscated string(s)` |
 | 13 | `PDB MSDIA` | MSF7 reader with MSDIA-shaped filtering. | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (msdia→universal)` |
 | 14 | `PDB Universal` | MSF7 reader, unfiltered stream symbols (`MSF7` marker included). | `symbols: [{name, va}]` | `parsed N PDB symbol(s) (universal)` |
 | 15 | `Shared Return Calls` | Callers reusing one epilogue (tail-call). | `shared_returns: [va, …]` | `marked N shared return site(s)` |
@@ -668,7 +810,7 @@ Output column names the field on `AnalyzerOutput` you get in `--json`
 | 19 | `Windows x86 Propagate External Parameters` | Known Win32 API prototypes attached to import call sites. | `external_params: [[va, prototype], …]` | `applied N external parameter prototype(s)` |
 | 20 | `WindowsResourceReference` | `.rsrc` records (`VERSION`, `RT_ICON`, …). | `resources: [{name, va}]` | `parsed N resource record(s)` |
 
-**Defaults** (empty selection): `ASCII Strings`, `Unicode Strings`, `WindowsPE x86 PE RTTI Analyzer`, `Function Start Search`, `Create Address Tables`, `Embedded Media`, `Demangler Microsoft`.
+**Defaults** (empty selection): `ASCII Strings`, `Unicode Strings`, `WindowsPE x86 PE RTTI Analyzer`, `Function Start Search`, `Create Address Tables`, `Embedded Media`, `Demangler Microsoft`, `Find Crypt`.
 
 With `--gpu`: same CPU output plus a `| gpu_enrich hits_merged=… backend=…` suffix on the human message. Not a replacement for `gpu-decompile`.
 

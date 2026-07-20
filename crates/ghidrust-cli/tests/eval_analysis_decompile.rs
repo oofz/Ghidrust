@@ -658,7 +658,10 @@ fn eval_one_analyzer(check: &AnalyzerCheck) -> EvalRow {
         Some(v) => v,
         None => {
             row.error = Some("stdout is not JSON".into());
-            row.evidence = format!("stdout head: {}", stdout.chars.take(200).collect::<String>());
+            row.evidence = format!(
+                "stdout head: {}",
+                stdout.chars.take(200).collect::<String>()
+            );
             return row;
         }
     };
@@ -1233,7 +1236,10 @@ fn eval_analysis_decompile() {
         let row = eval_one_analyzer(&check);
         eprintln!(
             "[analyzer] {:<45} fixture={:<20} status={:<4} — {}",
-            row.name(), row.fixture, row.status, row.evidence
+            row.name(),
+            row.fixture,
+            row.status,
+            row.evidence
         );
         rows.push(row);
     }
@@ -1244,32 +1250,47 @@ fn eval_analysis_decompile() {
         let r = eval_decompile_stage0(fx);
         eprintln!(
             "[decomp ] {:<45} fixture={:<20} status={:<4} — {}",
-            r.name(), r.fixture, r.status, r.evidence
+            r.name(),
+            r.fixture,
+            r.status,
+            r.evidence
         );
         rows.push(r);
         let r = eval_decompile_stage05(fx);
         eprintln!(
             "[decomp ] {:<45} fixture={:<20} status={:<4} — {}",
-            r.name(), r.fixture, r.status, r.evidence
+            r.name(),
+            r.fixture,
+            r.status,
+            r.evidence
         );
         rows.push(r);
     }
     let r = eval_decompile_bench("analysis_lab.pe");
     eprintln!(
         "[decomp ] {:<45} fixture={:<20} status={:<4} — {}",
-        r.name(), r.fixture, r.status, r.evidence
+        r.name(),
+        r.fixture,
+        r.status,
+        r.evidence
     );
     rows.push(r);
     let r = eval_re_bench("analysis_lab.pe");
     eprintln!(
         "[decomp ] {:<45} fixture={:<20} status={:<4} — {}",
-        r.name(), r.fixture, r.status, r.evidence
+        r.name(),
+        r.fixture,
+        r.status,
+        r.evidence
     );
     rows.push(r);
     let r = eval_gpu_decompile("tiny_x64.pe");
     eprintln!(
         "[decomp ] {:<45} fixture={:<20} status={:<4} — {}",
-        r.name(), r.fixture, r.status, r.evidence
+        r.name(),
+        r.fixture,
+        r.status,
+        r.evidence
     );
     rows.push(r);
 

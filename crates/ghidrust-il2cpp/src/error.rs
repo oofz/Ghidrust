@@ -32,9 +32,10 @@ impl Error {
     /// Structured JSON for this error when it is encrypt/obfuscate; otherwise null.
     pub fn to_structured_json(&self) -> Option<Value> {
         match self {
-            Error::EncryptedOrObfuscated { magic, version_field } => {
-                Some(Self::encrypted_json(*magic, *version_field))
-            }
+            Error::EncryptedOrObfuscated {
+                magic,
+                version_field,
+            } => Some(Self::encrypted_json(*magic, *version_field)),
             _ => None,
         }
     }
@@ -72,7 +73,11 @@ mod tests {
         assert_eq!(v["magic"], "0xdeadbeef");
         let steps = v["next_steps"].as_array().expect("next_steps");
         assert!(steps.len() >= 3);
-        assert!(steps.iter().any(|s| s.as_str().unwrap_or("").contains("il2cpp icalls")));
-        assert!(steps.iter().any(|s| s.as_str().unwrap_or("").contains("touch-map")));
+        assert!(steps
+            .iter()
+            .any(|s| s.as_str().unwrap_or("").contains("il2cpp icalls")));
+        assert!(steps
+            .iter()
+            .any(|s| s.as_str().unwrap_or("").contains("touch-map")));
     }
 }

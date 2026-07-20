@@ -13,15 +13,15 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
- fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
- Error::Decode(m) => write!(f, "decode: {m}"),
- Error::Arch(m) => write!(f, "arch: {m}"),
- Error::Mode(m) => write!(f, "mode: {m}"),
- Error::Option(m) => write!(f, "option: {m}"),
- Error::Handle(m) => write!(f, "handle: {m}"),
- Error::Mem(m) => write!(f, "mem: {m}"),
- Error::Detail(m) => write!(f, "detail: {m}"),
+            Error::Decode(m) => write!(f, "decode: {m}"),
+            Error::Arch(m) => write!(f, "arch: {m}"),
+            Error::Mode(m) => write!(f, "mode: {m}"),
+            Error::Option(m) => write!(f, "option: {m}"),
+            Error::Handle(m) => write!(f, "handle: {m}"),
+            Error::Mem(m) => write!(f, "mem: {m}"),
+            Error::Detail(m) => write!(f, "detail: {m}"),
         }
     }
 }

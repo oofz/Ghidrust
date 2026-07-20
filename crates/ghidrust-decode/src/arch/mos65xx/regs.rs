@@ -2,11 +2,11 @@ use crate::reg::RegId;
 
 pub fn reg_name(reg: RegId) -> Option<&'static str> {
     match reg.index() {
- 1 => Some("a"),
- 2 => Some("x"),
- 3 => Some("y"),
- 4 => Some("p"),
- 5 => Some("sp"),
+        1 => Some("a"),
+        2 => Some("x"),
+        3 => Some("y"),
+        4 => Some("p"),
+        5 => Some("sp"),
         _ => None,
     }
 }

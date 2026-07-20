@@ -1,6 +1,6 @@
 //! Listing toolbar: syntax, detail, skipdata, walk mode, apply.
 
-use super::model::{syntax_label, syntax_storage, DecodeUiOpts, SYNTAX_VARIANTS, WalkMode};
+use super::model::{syntax_label, syntax_storage, DecodeUiOpts, WalkMode, SYNTAX_VARIANTS};
 use ghidrust_core::Syntax;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,11 +17,9 @@ pub fn ui_toolbar(
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
     ui.horizontal(|ui| {
- ui.label("Syntax:");
-        let cur_syntax = opts
-            .resolved_syntax()
-            .unwrap_or(Syntax::Default);
- egui::ComboBox::from_id_salt("listing_syntax")
+        ui.label("Syntax:");
+        let cur_syntax = opts.resolved_syntax().unwrap_or(Syntax::Default);
+        egui::ComboBox::from_id_salt("listing_syntax")
             .selected_text(syntax_label(cur_syntax))
             .show_ui(ui, |ui| {
                 for s in SYNTAX_VARIANTS {
@@ -33,21 +31,21 @@ pub fn ui_toolbar(
             });
 
         ui.separator();
- ui.checkbox(&mut opts.detail, "Detail");
- ui.checkbox(&mut opts.skipdata, "Skipdata");
+        ui.checkbox(&mut opts.detail, "Detail");
+        ui.checkbox(&mut opts.skipdata, "Skipdata");
 
         ui.separator();
- ui.label("Walk:");
+        ui.label("Walk:");
         for mode in WalkMode::ALL {
             ui.selectable_value(&mut opts.walk_mode, mode, mode.label());
         }
 
         ui.separator();
- if ui.button("Options…").clicked() {
- *open_options = true;
+        if ui.button("Options…").clicked() {
+            *open_options = true;
             action = ToolbarAction::OpenOptions;
         }
- if ui.button("Apply").clicked() {
+        if ui.button("Apply").clicked() {
             action = ToolbarAction::Apply;
         }
     });

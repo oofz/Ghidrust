@@ -178,6 +178,12 @@ pub struct AnalysisState {
     pub recovered_code: Vec<DiscoveredRange>,
     pub shared_returns: Vec<u64>,
     pub pdb_symbols: Vec<SymbolInfo>,
+    #[serde(default)]
+    pub crypt_constants: Vec<crate::analyzers::crypt_constants::CryptConstantHit>,
+    #[serde(default)]
+    pub obfuscated_strings: Vec<crate::analyzers::obfuscated_strings::ObfuscatedStringHit>,
+    #[serde(default)]
+    pub crypto_capabilities: Vec<crate::analyzers::crypto_capabilities::CryptoCapabilityHit>,
 }
 
 /// Loaded program model shared by disasm, RTTI, CLI, MCP, GUI.
@@ -268,7 +274,10 @@ impl Program {
     }
 
     pub fn function_at_mut(&mut self, entry: u64) -> Option<&mut FunctionInfo> {
-        self.analysis.functions.iter_mut().find(|f| f.entry == entry)
+        self.analysis
+            .functions
+            .iter_mut()
+            .find(|f| f.entry == entry)
     }
 
     /// Tightest analyzed function whose `[entry, end)` contains `va`.

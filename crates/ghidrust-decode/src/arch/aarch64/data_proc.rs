@@ -31,26 +31,32 @@ fn decode_add_sub_imm(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> 
     let imm = (imm12 as u64) << shift;
     let reg_d = if sf != 0 { x(rd) } else { w(rd) };
     let reg_n = if rn == 31 {
- "sp".into()
+        "sp".into()
     } else if sf != 0 {
         x(rn)
     } else {
         w(rn)
     };
     let mnemonic = match (op, s, rn == 31) {
- (0, 0, true) => "mov",
- (0, 0, false) => "add",
- (0, 1, _) => "adds",
- (1, 0, _) => "sub",
- (1, 1, _) => "subs",
- _ => "add",
+        (0, 0, true) => "mov",
+        (0, 0, false) => "add",
+        (0, 1, _) => "adds",
+        (1, 0, _) => "sub",
+        (1, 1, _) => "subs",
+        _ => "add",
     };
- let operands = if mnemonic == "mov" {
- format!("{}, #{imm:#x}", reg_d)
+    let operands = if mnemonic == "mov" {
+        format!("{}, #{imm:#x}", reg_d)
     } else {
- format!("{}, {}, #{imm:#x}", reg_d, reg_n)
+        format!("{}, {}, #{imm:#x}", reg_d, reg_n)
     };
-    Ok(Instruction::with_text(address, raw.to_vec(), mnemonic, operands, 4))
+    Ok(Instruction::with_text(
+        address,
+        raw.to_vec(),
+        mnemonic,
+        operands,
+        4,
+    ))
 }
 
 fn decode_logical_imm(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
@@ -62,18 +68,24 @@ fn decode_logical_imm(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> 
     let reg_d = if sf != 0 { x(rd) } else { w(rd) };
     let reg_n = if sf != 0 { x(rn) } else { w(rn) };
     let mnemonic = match opc {
- 0b00 => "and",
- 0b01 => "orr",
- 0b10 => "eor",
- 0b11 => "ands",
- _ => "and",
+        0b00 => "and",
+        0b01 => "orr",
+        0b10 => "eor",
+        0b11 => "ands",
+        _ => "and",
     };
     let operands = if rn == 31 && opc == 0b01 {
- format!("{}, #{imm:#x}", reg_d)
+        format!("{}, #{imm:#x}", reg_d)
     } else {
- format!("{}, {}, #{imm:#x}", reg_d, reg_n)
+        format!("{}, {}, #{imm:#x}", reg_d, reg_n)
     };
-    Ok(Instruction::with_text(address, raw.to_vec(), mnemonic, operands, 4))
+    Ok(Instruction::with_text(
+        address,
+        raw.to_vec(),
+        mnemonic,
+        operands,
+        4,
+    ))
 }
 
 fn decode_logical_reg(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> {
@@ -88,23 +100,23 @@ fn decode_logical_reg(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> 
     let reg_n = if sf != 0 { x(rn) } else { w(rn) };
     let reg_m = if sf != 0 { x(rm) } else { w(rm) };
     let shift_kind = match shift {
- 0b00 => "lsl",
- 0b01 => "lsr",
- 0b10 => "asr",
- _ => "ror",
+        0b00 => "lsl",
+        0b01 => "lsr",
+        0b10 => "asr",
+        _ => "ror",
     };
     let mnemonic = match opc {
- 0b00 => "and",
- 0b01 => "orr",
- 0b10 => "eor",
- 0b11 => "ands",
- _ => "and",
+        0b00 => "and",
+        0b01 => "orr",
+        0b10 => "eor",
+        0b11 => "ands",
+        _ => "and",
     };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
         mnemonic,
- format!("{}, {}, {}, {shift_kind} #{imm6}", reg_d, reg_n, reg_m),
+        format!("{}, {}, {}, {shift_kind} #{imm6}", reg_d, reg_n, reg_m),
         4,
     ))
 }
@@ -117,19 +129,19 @@ fn decode_add_sub_reg(wd: u32, address: u64, raw: &[u8]) -> Result<Instruction> 
     let rd = bit(wd, 0, 4);
     let reg_d = if sf != 0 { x(rd) } else { w(rd) };
     let reg_n = if rn == 31 {
- "sp".into()
+        "sp".into()
     } else if sf != 0 {
         x(rn)
     } else {
         w(rn)
     };
     let reg_m = if sf != 0 { x(rm) } else { w(rm) };
- let mnemonic = if op != 0 { "sub" } else { "add" };
+    let mnemonic = if op != 0 { "sub" } else { "add" };
     Ok(Instruction::with_text(
         address,
         raw.to_vec(),
         mnemonic,
- format!("{}, {}, {}", reg_d, reg_n, reg_m),
+        format!("{}, {}, {}", reg_d, reg_n, reg_m),
         4,
     ))
 }

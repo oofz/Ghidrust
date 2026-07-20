@@ -63,7 +63,10 @@ pub fn fingerprint_body(prog: &Program, va: u64) -> BodyFingerprint {
         };
     }
 
-    let prologue_hash = format!("{:04x}", crc16_ccitt(&bytes[..bytes.len().min(PROLOGUE_BYTES)]));
+    let prologue_hash = format!(
+        "{:04x}",
+        crc16_ccitt(&bytes[..bytes.len().min(PROLOGUE_BYTES)])
+    );
 
     // Resolve-stub with empty slot → runtime_unresolved (separate from thin thunk).
     if let Some(stub) = classify_at(prog, va) {
@@ -123,7 +126,13 @@ pub fn semantics_mismatch(name: &str, body_class: BodyClass) -> bool {
         || leaf_l.starts_with("set_")
         || leaf_l.starts_with("is")
         || leaf_l.starts_with("has")
-        || leaf_l.starts_with("get") && leaf.len() > 3 && leaf.as_bytes().get(3).map(|c| c.is_ascii_uppercase()).unwrap_or(false);
+        || leaf_l.starts_with("get")
+            && leaf.len() > 3
+            && leaf
+                .as_bytes()
+                .get(3)
+                .map(|c| c.is_ascii_uppercase())
+                .unwrap_or(false);
 
     if !looks_accessor {
         return false;
@@ -142,7 +151,9 @@ pub fn semantics_mismatch(name: &str, body_class: BodyClass) -> bool {
 ///
 /// Updates `entries` in place: when ≥2 methods share the same tiny prologue
 /// (or the same VA), promote `body_class` to `shared_stub` and set alias counts.
-pub fn collapse_shared_stubs(entries: &mut [crate::binary::MethodMapEntry]) -> Vec<SharedStubSummary> {
+pub fn collapse_shared_stubs(
+    entries: &mut [crate::binary::MethodMapEntry],
+) -> Vec<SharedStubSummary> {
     // Group by (prologue_hash) for tiny bodies, and by VA for identical pointers.
     let mut by_hash: HashMap<String, Vec<usize>> = HashMap::new();
     let mut by_va: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -150,7 +161,9 @@ pub fn collapse_shared_stubs(entries: &mut [crate::binary::MethodMapEntry]) -> V
     for (i, e) in entries.iter().enumerate() {
         let Some(va) = e.va else { continue };
         by_va.entry(va).or_default().push(i);
-        let Some(hash) = e.prologue_hash.as_ref() else { continue };
+        let Some(hash) = e.prologue_hash.as_ref() else {
+            continue;
+        };
         if hash.is_empty() {
             continue;
         }
@@ -189,16 +202,16 @@ pub fn collapse_shared_stubs(entries: &mut [crate::binary::MethodMapEntry]) -> V
             continue;
         }
         let alias_count = idxs.len();
-        let hash = entries[idxs[0]]
-            .prologue_hash
-            .clone()
-            .unwrap_or_default();
+        let hash = entries[idxs[0]].prologue_hash.clone().unwrap_or_default();
         let sample: Vec<String> = idxs
             .iter()
             .take(4)
             .map(|&i| entries[i].full_name.clone())
             .collect();
-        let promote = entries[idxs[0]].body_class.map(is_collapsible).unwrap_or(false);
+        let promote = entries[idxs[0]]
+            .body_class
+            .map(is_collapsible)
+            .unwrap_or(false);
         for &i in idxs {
             entries[i].alias_count = Some(alias_count);
             if promote {
@@ -258,7 +271,11 @@ pub fn collapse_shared_stubs(entries: &mut [crate::binary::MethodMapEntry]) -> V
         }
     }
 
-    summaries.sort_by(|a, b| b.alias_count.cmp(&a.alias_count).then(a.target.cmp(&b.target)));
+    summaries.sort_by(|a, b| {
+        b.alias_count
+            .cmp(&a.alias_count)
+            .then(a.target.cmp(&b.target))
+    });
     summaries
 }
 
@@ -280,7 +297,11 @@ fn is_empty_xor_ret(bytes: &[u8]) -> bool {
         let a = bytes[0];
         let b = bytes[1];
         let c = bytes[2];
-        if c == 0xc3 && matches!((a, b), (0x30, 0xc0) | (0x31, 0xc0) | (0x33, 0xc0) | (0x31, 0xd2) | (0x33, 0xd2))
+        if c == 0xc3
+            && matches!(
+                (a, b),
+                (0x30, 0xc0) | (0x31, 0xc0) | (0x33, 0xc0) | (0x31, 0xd2) | (0x33, 0xd2)
+            )
         {
             return true;
         }
@@ -288,7 +309,10 @@ fn is_empty_xor_ret(bytes: &[u8]) -> bool {
     if bytes.len() >= 4 && bytes[0] == 0x48 && bytes[3] == 0xc3 {
         let b = bytes[1];
         let c = bytes[2];
-        if matches!((b, c), (0x31, 0xc0) | (0x33, 0xc0) | (0x31, 0xd2) | (0x33, 0xd2)) {
+        if matches!(
+            (b, c),
+            (0x31, 0xc0) | (0x33, 0xc0) | (0x31, 0xd2) | (0x33, 0xd2)
+        ) {
             return true;
         }
     }
@@ -361,9 +385,25 @@ fn is_reg_only(ops: &str) -> bool {
     let o = ops.trim();
     matches!(
         o,
-        "rax" | "rcx" | "rdx" | "rbx" | "rsp" | "rbp" | "rsi" | "rdi"
-            | "r8" | "r9" | "r10" | "r11" | "r12" | "r13" | "r14" | "r15"
-            | "eax" | "ecx" | "edx"
+        "rax"
+            | "rcx"
+            | "rdx"
+            | "rbx"
+            | "rsp"
+            | "rbp"
+            | "rsi"
+            | "rdi"
+            | "r8"
+            | "r9"
+            | "r10"
+            | "r11"
+            | "r12"
+            | "r13"
+            | "r14"
+            | "r15"
+            | "eax"
+            | "ecx"
+            | "edx"
     )
 }
 
@@ -493,7 +533,10 @@ mod tests {
 
     #[test]
     fn semantics_mismatch_getter_empty() {
-        assert!(semantics_mismatch("Foo::get_main", BodyClass::EmptyXorAlRet));
+        assert!(semantics_mismatch(
+            "Foo::get_main",
+            BodyClass::EmptyXorAlRet
+        ));
         assert!(semantics_mismatch("isReady", BodyClass::ThinThunk));
         assert!(semantics_mismatch("hasFlag", BodyClass::SharedStub));
         assert!(!semantics_mismatch("Update", BodyClass::EmptyXorAlRet));

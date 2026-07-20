@@ -1,7 +1,8 @@
 //! Decode listing row model and UI options.
 
 use ghidrust_core::{
-    arch_mode_for_program, default_arch_mode, ghidrust_decode::{group_name, reg_name},
+    arch_mode_for_program, default_arch_mode,
+    ghidrust_decode::{group_name, reg_name},
     Arch, DisasmEngineOpts, DisasmMode, InsnId, Instruction, Mode, Program, Syntax,
 };
 use serde::{Deserialize, Serialize};
@@ -19,11 +20,11 @@ pub enum WalkMode {
 impl WalkMode {
     pub const ALL: [WalkMode; 3] = [WalkMode::Bounded, WalkMode::Flow, WalkMode::Linear];
 
- pub const fn label(self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
- WalkMode::Bounded => "Bounded",
- WalkMode::Flow => "Flow",
- WalkMode::Linear => "Linear",
+            WalkMode::Bounded => "Bounded",
+            WalkMode::Flow => "Flow",
+            WalkMode::Linear => "Linear",
         }
     }
 
@@ -39,11 +40,11 @@ impl WalkMode {
 /// decode options surfaced in the Listing toolbar / options dialog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecodeUiOpts {
- #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
- #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
- #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syntax: Option<String>,
     #[serde(default)]
     pub detail: bool,
@@ -57,15 +58,15 @@ pub struct DecodeUiOpts {
     pub unsigned_imm: bool,
     #[serde(default)]
     pub only_offset_branch: bool,
- #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub litbase: Option<u32>,
- #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mnem_overrides: Vec<(u32, String)>,
     #[serde(default)]
     pub walk_mode: WalkMode,
- #[serde(default = "default_skip_bad")]
+    #[serde(default = "default_skip_bad")]
     pub skip_bad: bool,
- #[serde(default = "default_max_insns")]
+    #[serde(default = "default_max_insns")]
     pub max_insns: usize,
 }
 
@@ -86,7 +87,7 @@ impl Default for DecodeUiOpts {
             detail: true,
             detail_real: false,
             skipdata: false,
- skipdata_mnemonic: ".byte".into(),
+            skipdata_mnemonic: ".byte".into(),
             unsigned_imm: false,
             only_offset_branch: false,
             litbase: None,
@@ -99,7 +100,7 @@ impl Default for DecodeUiOpts {
 }
 
 impl DecodeUiOpts {
- /// Seed arch/mode from the loaded image when unset.
+    /// Seed arch/mode from the loaded image when unset.
     pub fn sync_machine_from_program(&mut self, prog: &Program) {
         if self.arch.is_none() || self.mode.is_none() {
             let (arch, mode) = arch_mode_for_program(prog).unwrap_or_else(default_arch_mode);
@@ -174,29 +175,17 @@ pub struct ListingRow {
 }
 
 impl ListingRow {
-    pub fn from_insn(
-        idx: usize,
-        insn: &Instruction,
-        prog: Option<&Program>,
-        arch: Arch,
-    ) -> Self {
+    pub fn from_insn(idx: usize, insn: &Instruction, prog: Option<&Program>, arch: Arch) -> Self {
         let bytes_hex: String = insn
             .bytes
             .iter()
             .take(6)
- .map(|b| format!("{b:02x}"))
+            .map(|b| format!("{b:02x}"))
             .collect::<Vec<_>>()
- .join(" ");
+            .join(" ");
         let (groups_summary, regs_rw) = detail_summaries(insn, arch);
-        let (
-            applied_type,
-            comment_eol,
-            comment_plate,
-            comment_pre,
-            comment_post,
-            comment_repeat,
-        ) = prog
-            .map(|p| {
+        let (applied_type, comment_eol, comment_plate, comment_pre, comment_post, comment_repeat) =
+            prog.map(|p| {
                 use ghidrust_core::CommentKind;
                 (
                     p.edits.applied_type_at(insn.address).map(String::from),
@@ -219,10 +208,10 @@ impl ListingRow {
             })
             .unwrap_or((None, None, None, None, None, None));
         let mnem = insn.mnemonic.clone();
- let is_ret = matches!(mnem.as_str(), "ret" | "retn" | "retf" | "retq");
- let is_uncond = matches!(mnem.as_str(), "jmp" | "jmpq");
- let is_cond = mnem.starts_with('j') && !is_uncond && mnem != "jmp";
- let is_call = matches!(mnem.as_str(), "call" | "callq");
+        let is_ret = matches!(mnem.as_str(), "ret" | "retn" | "retf" | "retq");
+        let is_uncond = matches!(mnem.as_str(), "jmp" | "jmpq");
+        let is_cond = mnem.starts_with('j') && !is_uncond && mnem != "jmp";
+        let is_call = matches!(mnem.as_str(), "call" | "callq");
         Self {
             idx,
             va: insn.address,
@@ -274,9 +263,9 @@ pub fn detail_summaries(insn: &Instruction, arch: Arch) -> (String, String) {
     let regs_rw = if read.is_empty() && write.is_empty() {
         String::new()
     } else {
- format!("R:[{}] W:[{}]", read.join(","), write.join(","))
+        format!("R:[{}] W:[{}]", read.join(","), write.join(","))
     };
- (groups.join(","), regs_rw)
+    (groups.join(","), regs_rw)
 }
 
 pub fn parse_arch_name(s: &str) -> Option<Arch> {
@@ -287,17 +276,17 @@ pub fn parse_arch_name(s: &str) -> Option<Arch> {
 
 pub fn parse_syntax_name(s: &str) -> Option<Syntax> {
     match s.trim().to_ascii_lowercase().as_str() {
- "default" => Some(Syntax::Default),
- "intel" => Some(Syntax::Intel),
- "att" => Some(Syntax::Att),
- "noregname" | "no_reg_name" => Some(Syntax::NoRegName),
- "masm" => Some(Syntax::Masm),
- "motorola" => Some(Syntax::Motorola),
- "cs_reg_alias" | "reg_alias" => Some(Syntax::CsRegAlias),
- "percent" => Some(Syntax::Percent),
- "no_dollar" | "nodollar" => Some(Syntax::NoDollar),
- "no_alias_text" => Some(Syntax::NoAliasText),
- "no_alias_text_compressed" => Some(Syntax::NoAliasTextCompressed),
+        "default" => Some(Syntax::Default),
+        "intel" => Some(Syntax::Intel),
+        "att" => Some(Syntax::Att),
+        "noregname" | "no_reg_name" => Some(Syntax::NoRegName),
+        "masm" => Some(Syntax::Masm),
+        "motorola" => Some(Syntax::Motorola),
+        "cs_reg_alias" | "reg_alias" => Some(Syntax::CsRegAlias),
+        "percent" => Some(Syntax::Percent),
+        "no_dollar" | "nodollar" => Some(Syntax::NoDollar),
+        "no_alias_text" => Some(Syntax::NoAliasText),
+        "no_alias_text_compressed" => Some(Syntax::NoAliasTextCompressed),
         _ => None,
     }
 }
@@ -308,17 +297,17 @@ pub fn syntax_storage(s: Syntax) -> String {
 
 pub fn syntax_label(s: Syntax) -> &'static str {
     match s {
- Syntax::Default => "Default",
- Syntax::Intel => "Intel",
- Syntax::Att => "ATT",
- Syntax::NoRegName => "NoRegName",
- Syntax::Masm => "MASM",
- Syntax::Motorola => "Motorola",
- Syntax::CsRegAlias => "CsRegAlias",
- Syntax::Percent => "Percent",
- Syntax::NoDollar => "NoDollar",
- Syntax::NoAliasText => "NoAliasText",
- Syntax::NoAliasTextCompressed => "NoAliasTextCompressed",
+        Syntax::Default => "Default",
+        Syntax::Intel => "Intel",
+        Syntax::Att => "ATT",
+        Syntax::NoRegName => "NoRegName",
+        Syntax::Masm => "MASM",
+        Syntax::Motorola => "Motorola",
+        Syntax::CsRegAlias => "CsRegAlias",
+        Syntax::Percent => "Percent",
+        Syntax::NoDollar => "NoDollar",
+        Syntax::NoAliasText => "NoAliasText",
+        Syntax::NoAliasTextCompressed => "NoAliasTextCompressed",
     }
 }
 

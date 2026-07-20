@@ -331,11 +331,7 @@ impl TerminalGrid {
     /// Extract visible text from an inclusive cell range (row-major).
     ///
     /// Skips wide-glyph continuations; trims trailing spaces per line.
-    pub fn text_in_range(
-        &self,
-        start: (usize, usize),
-        end: (usize, usize),
-    ) -> String {
+    pub fn text_in_range(&self, start: (usize, usize), end: (usize, usize)) -> String {
         let cols = self.cols();
         let rows = self.rows();
         if cols == 0 || rows == 0 {
@@ -344,9 +340,19 @@ impl TerminalGrid {
         let (c0, r0) = start;
         let (c1, r1) = end;
         let (sc, sr, ec, er) = if (r0, c0) <= (r1, c1) {
-            (c0.min(cols - 1), r0.min(rows - 1), c1.min(cols - 1), r1.min(rows - 1))
+            (
+                c0.min(cols - 1),
+                r0.min(rows - 1),
+                c1.min(cols - 1),
+                r1.min(rows - 1),
+            )
         } else {
-            (c1.min(cols - 1), r1.min(rows - 1), c0.min(cols - 1), r0.min(rows - 1))
+            (
+                c1.min(cols - 1),
+                r1.min(rows - 1),
+                c0.min(cols - 1),
+                r0.min(rows - 1),
+            )
         };
 
         let mut out = String::new();
@@ -754,8 +760,7 @@ impl TerminalGrid {
         let ccol = self.cursor_col;
         match mode {
             0 => {
-                self.active_mut()
-                    .clear_line_range(crow, ccol, cols, attr);
+                self.active_mut().clear_line_range(crow, ccol, cols, attr);
                 for r in (crow + 1)..rows {
                     self.active_mut().clear_line_range(r, 0, cols, attr);
                 }

@@ -74,7 +74,11 @@ pub fn parse_markdown(input: &str) -> Vec<MarkdownBlock> {
         let s = stripped.trim_start();
         if s.starts_with("```") {
             if in_code {
-                push_code(&mut out, std::mem::take(&mut code_lang), std::mem::take(&mut code_buf));
+                push_code(
+                    &mut out,
+                    std::mem::take(&mut code_lang),
+                    std::mem::take(&mut code_buf),
+                );
                 in_code = false;
             } else {
                 push_prose(&mut out, std::mem::take(&mut prose_buf));

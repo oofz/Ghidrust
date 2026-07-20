@@ -76,11 +76,7 @@ pub fn parse_pe_imports(data: &[u8], image_base: u64) -> Result<Vec<ImportEntry>
             if raw == 0 {
                 break;
             }
-            let ordinal_flag = if is_pe32plus {
-                1u64 << 63
-            } else {
-                1u64 << 31
-            };
+            let ordinal_flag = if is_pe32plus { 1u64 << 63 } else { 1u64 << 31 };
             let (name, ordinal) = if raw & ordinal_flag != 0 {
                 (None, Some((raw & 0xffff) as u16))
             } else {

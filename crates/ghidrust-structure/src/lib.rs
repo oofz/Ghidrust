@@ -102,10 +102,7 @@ pub enum Region {
         else_branch: Box<Region>,
     },
     /// `while (cond) { body }` — CBranch is at the loop header.
-    While {
-        header: u32,
-        body: Box<Region>,
-    },
+    While { header: u32, body: Box<Region> },
     /// `do { body } while (cond)` — CBranch is at the latch.
     DoWhile {
         header: u32,
@@ -113,10 +110,7 @@ pub enum Region {
         latch: u32,
     },
     /// `for (;;) { body }` — infinite loop with no explicit exit.
-    Loop {
-        header: u32,
-        body: Box<Region>,
-    },
+    Loop { header: u32, body: Box<Region> },
     /// `return;` — a block whose terminator is [`OpCode::Return`].
     Return(u32),
     /// `break;` — an edge from inside a natural loop to the loop's
@@ -271,7 +265,10 @@ impl Region {
             }
             Region::Break | Region::Continue => {}
             Region::Seq(rs) => rs.iter().for_each(|r| r.collect_blocks(set)),
-            Region::IfThen { header, then_branch } => {
+            Region::IfThen {
+                header,
+                then_branch,
+            } => {
                 set.insert(*header);
                 then_branch.collect_blocks(set);
             }
@@ -297,7 +294,11 @@ impl Region {
                 set.insert(*latch);
                 body.collect_blocks(set);
             }
-            Region::Switch { header, cases, default } => {
+            Region::Switch {
+                header,
+                cases,
+                default,
+            } => {
                 set.insert(*header);
                 for c in cases {
                     set.insert(c.target);
@@ -398,10 +399,15 @@ pub fn structure_function_with_hints(
 /// patterns common in real binaries.
 pub fn promote_early_returns(r: Region, ssa: &SsaFunction) -> Region {
     match r {
-        Region::Seq(rs) => {
-            Region::Seq(rs.into_iter().map(|c| promote_early_returns(c, ssa)).collect())
-        }
-        Region::IfThen { header, then_branch } => Region::IfThen {
+        Region::Seq(rs) => Region::Seq(
+            rs.into_iter()
+                .map(|c| promote_early_returns(c, ssa))
+                .collect(),
+        ),
+        Region::IfThen {
+            header,
+            then_branch,
+        } => Region::IfThen {
             header,
             then_branch: Box::new(promote_goto_to_return(
                 promote_early_returns(*then_branch, ssa),
@@ -427,7 +433,11 @@ pub fn promote_early_returns(r: Region, ssa: &SsaFunction) -> Region {
             header,
             body: Box::new(promote_early_returns(*body, ssa)),
         },
-        Region::DoWhile { header, body, latch } => Region::DoWhile {
+        Region::DoWhile {
+            header,
+            body,
+            latch,
+        } => Region::DoWhile {
             header,
             body: Box::new(promote_early_returns(*body, ssa)),
             latch,
@@ -651,9 +661,12 @@ impl<'a> StructCtx<'a> {
 
             // Switch handling (Decompiler Switch Analysis hint).
             if let Some(sw) = self.switches.get(&b).cloned() {
-                let stop = sw
-                    .default
-                    .or_else(|| self.pdom.get(b as usize).copied().filter(|p| *p != u32::MAX && *p != b));
+                let stop = sw.default.or_else(|| {
+                    self.pdom
+                        .get(b as usize)
+                        .copied()
+                        .filter(|p| *p != u32::MAX && *p != b)
+                });
                 let cases: Vec<SwitchCase> = sw
                     .cases
                     .iter()
@@ -712,7 +725,11 @@ impl<'a> StructCtx<'a> {
                     if else_id == join {
                         None
                     } else {
-                        Some(Box::new(self.build_region_from(else_id, Some(join), visited)))
+                        Some(Box::new(self.build_region_from(
+                            else_id,
+                            Some(join),
+                            visited,
+                        )))
                     }
                 } else {
                     // No shared join — emit both branches with unbounded expansion.
@@ -944,17 +961,11 @@ impl<'a> StructCtx<'a> {
 }
 
 fn is_return_block(b: &SsaBlock) -> bool {
-    matches!(
-        b.ops.last().map(|o| o.opcode),
-        Some(OpCode::Return)
-    )
+    matches!(b.ops.last().map(|o| o.opcode), Some(OpCode::Return))
 }
 
 fn ends_in_cbranch(b: &SsaBlock) -> bool {
-    matches!(
-        b.ops.last().map(|o| o.opcode),
-        Some(OpCode::CBranch)
-    )
+    matches!(b.ops.last().map(|o| o.opcode), Some(OpCode::CBranch))
 }
 
 fn collapse_seq(mut seq: Vec<Region>) -> Region {
@@ -1180,7 +1191,11 @@ fn render(r: &Region, indent: usize, out: &mut String) {
             render(body, indent + 1, out);
             out.push_str(&format!("{pad}}}\n"));
         }
-        Region::DoWhile { header: _, body, latch } => {
+        Region::DoWhile {
+            header: _,
+            body,
+            latch,
+        } => {
             out.push_str(&format!("{pad}do {{\n"));
             render(body, indent + 1, out);
             out.push_str(&format!("{pad}}} while (cond_of_{latch});\n"));
@@ -1190,10 +1205,17 @@ fn render(r: &Region, indent: usize, out: &mut String) {
             render(body, indent + 1, out);
             out.push_str(&format!("{pad}}}\n"));
         }
-        Region::Switch { header, cases, default } => {
+        Region::Switch {
+            header,
+            cases,
+            default,
+        } => {
             out.push_str(&format!("{pad}switch (cond_of_{header}) {{\n"));
             for c in cases {
-                out.push_str(&format!("{pad}  case {}: // → block_{}\n", c.selector, c.target));
+                out.push_str(&format!(
+                    "{pad}  case {}: // → block_{}\n",
+                    c.selector, c.target
+                ));
                 render(&c.body, indent + 2, out);
                 out.push_str(&format!("{pad}    break;\n"));
             }
@@ -1249,8 +1271,15 @@ fn render(r: &Region, indent: usize, out: &mut String) {
 /// preserved verbatim.
 pub fn flatten_short_circuit(r: Region, ssa: &SsaFunction) -> Region {
     match r {
-        Region::Seq(rs) => Region::Seq(rs.into_iter().map(|c| flatten_short_circuit(c, ssa)).collect()),
-        Region::IfThen { header, then_branch } => flatten_and(header, *then_branch, ssa),
+        Region::Seq(rs) => Region::Seq(
+            rs.into_iter()
+                .map(|c| flatten_short_circuit(c, ssa))
+                .collect(),
+        ),
+        Region::IfThen {
+            header,
+            then_branch,
+        } => flatten_and(header, *then_branch, ssa),
         Region::IfThenElse {
             header,
             then_branch,
@@ -1260,7 +1289,11 @@ pub fn flatten_short_circuit(r: Region, ssa: &SsaFunction) -> Region {
             header,
             body: Box::new(flatten_short_circuit(*body, ssa)),
         },
-        Region::DoWhile { header, body, latch } => Region::DoWhile {
+        Region::DoWhile {
+            header,
+            body,
+            latch,
+        } => Region::DoWhile {
             header,
             body: Box::new(flatten_short_circuit(*body, ssa)),
             latch,
@@ -1354,7 +1387,11 @@ fn flatten_and(header: u32, inner: Region, ssa: &SsaFunction) -> Region {
             mut parts,
             then_branch,
             else_branch,
-        } if parts.first().map(|p| is_pure_predicate_block(ssa, p.header)).unwrap_or(false) => {
+        } if parts
+            .first()
+            .map(|p| is_pure_predicate_block(ssa, p.header))
+            .unwrap_or(false) =>
+        {
             parts.insert(
                 0,
                 ShortCircuitClause {
@@ -1385,7 +1422,8 @@ fn flatten_or(header: u32, then_branch: Region, else_branch: Region, ssa: &SsaFu
         then_branch: else_then,
     } = &else_branch
     {
-        if is_pure_predicate_block(ssa, *else_h) && region_bodies_equivalent(&then_branch, else_then)
+        if is_pure_predicate_block(ssa, *else_h)
+            && region_bodies_equivalent(&then_branch, else_then)
         {
             return Region::ShortCircuit {
                 parts: vec![
@@ -1443,9 +1481,9 @@ pub fn goto_count(region: &Region) -> usize {
             else_branch,
             ..
         } => goto_count(then_branch) + goto_count(else_branch),
-        Region::While { body, .. }
-        | Region::DoWhile { body, .. }
-        | Region::Loop { body, .. } => goto_count(body),
+        Region::While { body, .. } | Region::DoWhile { body, .. } | Region::Loop { body, .. } => {
+            goto_count(body)
+        }
         Region::Switch { cases, default, .. } => {
             cases.iter().map(|c| goto_count(&c.body)).sum::<usize>()
                 + default.as_ref().map(|d| goto_count(d)).unwrap_or(0)
@@ -1454,10 +1492,7 @@ pub fn goto_count(region: &Region) -> usize {
             then_branch,
             else_branch,
             ..
-        } => {
-            goto_count(then_branch)
-                + else_branch.as_ref().map(|e| goto_count(e)).unwrap_or(0)
-        }
+        } => goto_count(then_branch) + else_branch.as_ref().map(|e| goto_count(e)).unwrap_or(0),
         _ => 0,
     }
 }
@@ -1479,11 +1514,14 @@ pub fn region_leaf_count(region: &Region) -> usize {
             else_branch,
             ..
         } => 1 + region_leaf_count(then_branch) + region_leaf_count(else_branch),
-        Region::While { body, .. }
-        | Region::DoWhile { body, .. }
-        | Region::Loop { body, .. } => 1 + region_leaf_count(body),
+        Region::While { body, .. } | Region::DoWhile { body, .. } | Region::Loop { body, .. } => {
+            1 + region_leaf_count(body)
+        }
         Region::Switch { cases, default, .. } => {
-            1 + cases.iter().map(|c| region_leaf_count(&c.body)).sum::<usize>()
+            1 + cases
+                .iter()
+                .map(|c| region_leaf_count(&c.body))
+                .sum::<usize>()
                 + default.as_ref().map(|d| region_leaf_count(d)).unwrap_or(0)
         }
         Region::ShortCircuit {
@@ -1492,7 +1530,10 @@ pub fn region_leaf_count(region: &Region) -> usize {
             ..
         } => {
             1 + region_leaf_count(then_branch)
-                + else_branch.as_ref().map(|e| region_leaf_count(e)).unwrap_or(0)
+                + else_branch
+                    .as_ref()
+                    .map(|e| region_leaf_count(e))
+                    .unwrap_or(0)
         }
     }
 }
@@ -1529,7 +1570,11 @@ fn walk(r: &Region, map: &mut BTreeMap<u32, Region>) {
         Region::DoWhile { header, .. } => {
             map.insert(*header, r.clone());
         }
-        Region::Switch { header, cases, default } => {
+        Region::Switch {
+            header,
+            cases,
+            default,
+        } => {
             map.insert(*header, r.clone());
             for c in cases {
                 walk(&c.body, map);
@@ -1581,7 +1626,10 @@ mod tests {
         let rep = structure_bytes(&bytes, 0x1000);
         assert!(rep.loops.is_empty());
         let text = dump_region(&rep.region);
-        assert!(text.contains("return"), "linear region should emit return: {text}");
+        assert!(
+            text.contains("return"),
+            "linear region should emit return: {text}"
+        );
     }
 
     #[test]
@@ -1682,10 +1730,7 @@ mod tests {
         }]);
         let rep = structure_function_with_hints(&cfg, &ssa, &hints);
         let text = dump_region(&rep.region);
-        assert!(
-            text.contains("switch"),
-            "expected switch region:\n{text}"
-        );
+        assert!(text.contains("switch"), "expected switch region:\n{text}");
         assert!(text.contains("case 0"));
         assert!(text.contains("case 1"));
     }
