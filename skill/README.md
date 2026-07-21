@@ -33,7 +33,7 @@ cargo run -p ghidrust-gui --release
 
 Windows: `.\target\release\ghidrust.exe` / `.\target\release\ghidrust-gui.exe`. Friction surfaces (`inventory`, `tree`, `artifact`, `process`, `rtti --filter`) match MCP tool names in `tool_defs()` — see [`SKILL.md`](SKILL.md).
 
-Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Agents need MCP `tool_surface >= 3` (touch-map / body_class / function_create); prefer `>= 4` for bounded disasm / `get_calls_from`; `>= 5` for decode tools; **`>= 6`** for `crypt_constants` / `recover_strings` / `decode_bake` / `decode_magic` / `list_crypto_capabilities` (current is `6`). Restart MCP after rebuild if those or `process_*` are missing.
+Check build identity: `ghidrust --version` (same package version as MCP `server_info` and egui About). Agents need MCP `tool_surface >= 3` (touch-map / body_class / function_create); prefer `>= 4` for bounded disasm / `get_calls_from`; `>= 5` for decode tools; **`>= 6`** for crypto recover/bake; **`>= 7`** for live process debug (break/step/regs/stack/scan/watch; current is `7`). Restart MCP after rebuild if those or `process_*` are missing.
 
 Smoke crypto surfaces:
 

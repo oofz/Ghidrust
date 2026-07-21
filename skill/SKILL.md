@@ -274,7 +274,7 @@ Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
 - **Address→function**: Always pass `addr` to `decompile` / `disassemble` / `gpu_decompile`; trust `resolved_entry` / `resolve` meta. Mid-body hits resolve to containing entry; unmapped → create/synthesize or honest `no_containing_function` (no invented 1-insn fn).
 - **RTTI catalog**: Prefer `rtti_query` (`--filter`/`--exact`) before mangled `.?AV` string archaeology. Multi-vtable types report `vtable_vas[]` honestly.
 - **UTF-16 xrefs**: If `search_strings` returns `utf16le`, query `get_string_xrefs` with `encoding=all` (or `utf16le`) before concluding “no refs”.
-- **Live process (Windows)**: Multi-step live work **must** use MCP (or one long-lived process) — `process_list` → `process_attach` **or** `process_launch` (CREATE_SUSPENDED) → `process_modules` → `process_resolve` (`static_to_live`) → `process_read` → optional `process_resume` / `process_regions` / `process_detach`. Launch is suspended spawn + read session, **not** debug break-at-entry. Never chain separate CLI `ghidrust process` spawns expecting the same `session_id` (sessions are in-process). Bytes ≠ types. No write/breakpoints in MVP.
+- **Live process (Windows, `tool_surface >= 7`)**: Multi-step live work **must** use MCP (or one long-lived process). Default attach is **observe** (read-only). Pass `mode: "debug"` for break/step/registers/stack. Loop: `process_list` → `process_attach|process_launch` → `process_modules` → `process_resolve` → optional `process_break_set` / `process_scan` / `process_watch_expr` → `process_continue`/`process_wait` → regs/stack/`process_read` → `process_export_snapshot` → `process_detach`. Observe launch still uses CREATE_SUSPENDED + `process_resume`. Debug launch uses Windows debug APIs (initial break). Never chain separate CLI `ghidrust process` spawns expecting the same `session_id`. Bytes ≠ types. Hardware BP / instrument mode not enabled.
 - **IL2CPP offline → live**: (1) `il2cpp_touch_map` / `il2cpp_meta` / `il2cpp_map` for names + method RVAs (null = unknown offline; encrypted → `next_steps` with meta-sections/touch-map). (2) Require `body_class` not `shared_stub` / `semantics_mismatch` before treating a name as a hook target. (3) `decompile` + `follow_stub` for resolve stubs with mapped slots. (4) On `runtime_unresolved` / `trampoline_or_invoker` → live attach → `process_resolve(module, rva)` → `process_read`. (5) Multi-build work: `il2cpp map --baseline PREV.json` → inspect `build_skew` (stale **map catalog**, not only stale MCP binary).
 - **Skill bootstrap**: GUI project open / Start writes `.grok/skills/ghidrust/SKILL.md` (disk or embedded fallback) and shows a fail-loud checklist (mcp/skill/agents/context + hash).
 - **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only); hook shared stubs as unique gameplay methods.
@@ -427,7 +427,7 @@ ghidrust project analyze PROJ_DIR --file ID \
 
 ### MCP (`ghidrust mcp`)
 
-Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_calls_from`; **`>= 5`** for decode tools; **`>= 6`** for crypto recover / bake). Check with `server_info` after connect.
+Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_calls_from`; **`>= 5`** for decode tools; **`>= 6`** for crypto recover / bake; **`>= 7`** for live debug break/step/scan/watch). Check with `server_info` after connect.
 
 | Tool | Args | Notes |
 |------|------|-------|
@@ -466,7 +466,9 @@ Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_ca
 | `list_gpu_strategies` | — | Strategy matrix |
 | `gpu_decompile` | `path`, optional `addr`, `out` | VA resolve; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI |
-| `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | pid / image / session / module / rva / max | Live Process Bridge (Windows; read-only; launch = CREATE_SUSPENDED) |
+| `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | pid / image / session / `mode` / module / rva / max | Live Process Bridge (Windows; default observe) |
+| `process_break_set` / `_clear` / `_list` / `process_continue` / `process_pause` / `process_wait` / `process_step_into` / `_over` / `process_threads` / `process_thread_context_get` / `_set` / `process_stack` | session / addr / thread_id / timeout_ms | Debug mode (`tool_surface >= 7`) |
+| `process_scan` / `process_watch_expr` / `process_vtable_probe` / `process_export_snapshot` | session / aob / expr / addr | Live data discovery (`tool_surface >= 7`) |
 
 MCP launch: `ghidrust mcp` / `target/release/ghidrust.exe mcp` (stdio; no host-specific paths).
 
@@ -610,7 +612,7 @@ Canonical detail: [`docs/IL2CPP.md`](../docs/IL2CPP.md).
 | Raw bytes at VA | `ghidrust bytes PATH --addr HEX --count N --json` | `read_bytes` `{path, addr, count?}` |
 | Xrefs (incl. data ptrs / skip stubs) | `ghidrust xrefs PATH --to HEX [--skip-stubs] [--classify]` | `get_xrefs_to` `{…, skip_stubs, classify}` |
 | Decompile through stub | `ghidrust decompile GA.dll --addr HEX --follow-stub --json` | `decompile` `{…, follow_stub: true}` |
-| Live resolve + read (runtime slots) | `ghidrust process …` (single spawn only) | MCP: attach → resolve → read (keep session) |
+| Live resolve + read / debug | `ghidrust process … -mode observe\|debug` (single spawn only) | MCP: attach/launch → resolve → break/wait/stack/watch → detach |
 | Strings on metadata blob | `ghidrust strings META.dat --raw --match token --limit N` | `list_strings` `{path, raw:true, match, limit}` |
 
 Wrong metadata magic → encrypted/obfuscated JSON with `next_steps` (fail closed). Never invent method or icall RVAs when pairing/map leaves them null. Empty/runtime stub slots → `runtime_unresolved` + live `next_steps`; do not heap-scan as a substitute.
@@ -648,7 +650,7 @@ Add `--json` for structured stdout.
 | Inventory | `ghidrust inventory <dir> [--max-depth N] [--hash]` |
 | Tree | `ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB]` |
 | Artifact | `ghidrust artifact get\|query\|list …` |
-| Process (Windows) | `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions …` |
+| Process (Windows) | `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions\|break\|continue\|wait\|step\|threads\|regs\|stack\|scan\|watch\|vtable\|snapshot …` |
 | IL2CPP | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls …` (`--baseline` / `--meta-sections`; see `docs/IL2CPP.md`) |
 | Unity inventory | `ghidrust unity-inventory <game-dir>` |
 | RTTI catalog | `ghidrust rtti <path> [--filter\|--name\|--exact] [--match MODE]` |
@@ -703,15 +705,20 @@ ghidrust artifact list --json
 ghidrust artifact query ARTIFACT_ID --offset 0 --limit 64 --json
 ghidrust artifact get ARTIFACT_ID
 
-# Live process (Windows; read-only)
+# Live process (Windows; observe default, debug opt-in)
 ghidrust process list --json
-ghidrust process attach PID
-ghidrust process launch PATH.exe --args "…" --cwd DIR --json
-ghidrust process resume SESSION
+ghidrust process attach PID -mode observe
+ghidrust process attach PID -mode debug
+ghidrust process launch PATH.exe -mode debug -break-at-entry --json
 ghidrust process modules SESSION --json
 ghidrust process resolve SESSION --module app.exe --rva 0x1234 --json
+ghidrust process break set SESSION -addr LIVE_VA
+ghidrust process continue SESSION
+ghidrust process wait SESSION -timeout 5000
+ghidrust process stack SESSION TID
+ghidrust process scan SESSION -aob "48 8b ?? 90"
+ghidrust process watch SESSION "module.exe+0x1234->*+0x10"
 ghidrust process read SESSION --addr LIVE_VA --size 64 --json
-ghidrust process regions SESSION --json
 ghidrust process detach SESSION
 
 # Unity / IL2CPP

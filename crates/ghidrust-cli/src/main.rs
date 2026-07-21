@@ -12,13 +12,18 @@ use ghidrust_core::{
     analyze_path, analyzer_catalog, artifact_get, artifact_query, assess_decompile_bounds,
     calls_callees, collect_callsite_hints, collect_strings_bytes, collect_strings_opts,
     create_function, disassemble_range_opts, filter_imports, inventory_pe_dir, list_artifacts,
-    list_tree, load_path, load_path_opts, process_attach, process_detach, process_launch,
-    process_list, process_modules, process_read, process_regions, process_resolve, process_resume,
-    recover_rtti, resolve_function, rtti_query, run_analyzers, scan_ascii_strings_bulk,
-    scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel, scan_printable_runs_seq,
-    time_bulk_printable, write_json_no_bom, xrefs_from, xrefs_to, xrefs_to_import,
-    xrefs_to_string_filter_opts, AnalysisBundle, BulkScanMode, LaunchRequest, Program, Project,
-    RttiMatchMode, StringCollectOpts, StringMatchMode, TreeListOpts, ANALYZER_NAMES,
+    list_tree, live_process_info_json, load_path, load_path_opts, process_attach_opts,
+    process_break_clear, process_break_list, process_break_set,
+    process_continue, process_detach, process_export_snapshot, process_launch, process_list,
+    process_modules, process_pause, process_read, process_regions, process_resolve, process_resume,
+    process_scan_mem, process_stack, process_step_into, process_step_over,
+    process_thread_context_get, process_thread_context_set, process_threads, process_vtable_probe,
+    process_wait, process_watch_expr, recover_rtti, resolve_function, rtti_query, run_analyzers,
+    scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel,
+    scan_printable_runs_seq, time_bulk_printable, write_json_no_bom, xrefs_from, xrefs_to,
+    xrefs_to_import, xrefs_to_string_filter_opts, AnalysisBundle, AttachOpts, BreakKind,
+    BulkScanMode, LaunchRequest, Program, Project, RegisterSet, RttiMatchMode, ScanOpts,
+    SessionMode, StringCollectOpts, StringMatchMode, TreeListOpts, ANALYZER_NAMES,
     DEFAULT_PREVIEW_LIMIT,
 };
 use ghidrust_decomp::decompile_entry;
@@ -46,7 +51,8 @@ const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `4` = bound-aware disasm + xref attribution + get_calls_from (+ surface 3).
 /// `5` = decode engine surface (decode_support, decode_query, extended disassemble).
 /// `6` = crypt_constants, recover_strings, decode_bake/magic, crypto_capabilities.
-const TOOL_SURFACE_VERSION: u32 = 6;
+/// `7` = live process debug bridge (break/step/regs/stack/scan/watch).
+const TOOL_SURFACE_VERSION: u32 = 7;
 
 fn package_version() -> &'static str {
     PACKAGE_VERSION
@@ -83,21 +89,7 @@ fn server_info_json() -> Value {
     "decode_diet": decode_block["features"]["decode_diet"],
     "x86_reduce": decode_block["features"]["x86_reduce"],
            },
-    "live_process": {
-    "tools": [
-    "process_list",
-    "process_attach",
-    "process_launch",
-    "process_resume",
-    "process_detach",
-    "process_modules",
-    "process_read",
-    "process_resolve",
-    "process_regions"
-               ],
-    "session_model": "in_process_mcp",
-    "note": "Attach/launch sessions live in the long-lived MCP (or GUI) process. CLI one-shot `ghidrust process` cannot reuse session_id across separate spawns. Launch uses CREATE_SUSPENDED (not debug break-at-entry); call process_resume to run."
-           }
+    "live_process": live_process_info_json(),
        })
 }
 
@@ -105,11 +97,13 @@ fn server_info_json() -> Value {
 fn live_process_next_steps() -> Value {
     json!([
         "process_list",
-        "process_attach",
+        "process_attach (mode=observe|debug) or process_launch",
         "process_modules",
         "process_resolve (module + method RVA from il2cpp_map)",
-        "process_read",
-        "optional process_regions / process_detach"
+        "optional process_break_set / process_scan / process_watch_expr (debug for break)",
+        "process_read / process_wait on hit",
+        "optional process_export_snapshot → artifact_query",
+        "process_detach"
     ])
 }
 
@@ -306,7 +300,9 @@ fn print_help() {
            ghidrust inventory <dir> [--max-depth N] [--hash] [--out FILE] [--json]\n\
            ghidrust tree <path> [--max-depth N] [--ext LIST] [--name GLOB] [--json]\n\
            ghidrust artifact get|query|list <id> [--offset N] [--limit N] [--json]\n\
-           ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions … [--json]\n\
+           ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions|\n\
+                    break|continue|pause|wait|step|threads|regs|stack|scan|watch|vtable|snapshot … [--json]\n\
+             # attach/launch: -mode observe|debug; launch debug: -break-at-entry\n\
            ghidrust rtti <path> [--filter|--name|--exact] [--match MODE] [--json]\n\
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
@@ -3316,29 +3312,34 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
  name: "process_attach",
- description: "Attach read-only to a process by pid; returns session_id",
+ description: "Attach to pid; mode=observe (default, read-only) or debug (break/step/regs). Returns session_id + capabilities.",
             input_schema: json!({
  "type": "object",
- "properties": { "pid": { "type": "integer" } },
+ "properties": {
+ "pid": { "type": "integer" },
+ "mode": { "type": "string", "enum": ["observe", "debug"], "description": "Default observe" }
+                },
  "required": ["pid"]
             }),
         },
         ToolDef {
  name: "process_launch",
- description: "CreateProcess CREATE_SUSPENDED + live session (Windows). Not a debug break-at-entry — call process_resume to run. Fails if a session is already open.",
+ description: "Launch process under Live Process Bridge. mode=observe: CREATE_SUSPENDED. mode=debug: DEBUG_ONLY_THIS_PROCESS + initial break. Fails if a session is already open.",
             input_schema: json!({
  "type": "object",
  "properties": {
  "image": { "type": "string", "description": "Path to .exe" },
  "args": { "type": "string", "description": "Optional args after the image" },
- "cwd": { "type": "string", "description": "Optional working directory" }
+ "cwd": { "type": "string", "description": "Optional working directory" },
+ "mode": { "type": "string", "enum": ["observe", "debug"] },
+ "break_at_entry": { "type": "boolean", "description": "Debug: prefer stop at initial breakpoint" }
                 },
  "required": ["image"]
             }),
         },
         ToolDef {
  name: "process_resume",
- description: "Resume the primary thread of a process_launch session (CREATE_SUSPENDED)",
+ description: "Resume observe CREATE_SUSPENDED primary thread, or continue a debug session",
             input_schema: json!({
  "type": "object",
  "properties": { "session_id": { "type": "string" } },
@@ -3347,7 +3348,7 @@ fn tool_defs() -> Vec<ToolDef> {
         },
         ToolDef {
  name: "process_detach",
- description: "Detach a live-process session by session_id",
+ description: "Detach a live-process session by session_id (restores software BPs)",
             input_schema: json!({
  "type": "object",
  "properties": { "session_id": { "type": "string" } },
@@ -3397,6 +3398,199 @@ fn tool_defs() -> Vec<ToolDef> {
  "properties": {
  "session_id": { "type": "string" },
  "max": { "type": "integer", "description": "Max regions (default 256)" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_break_set",
+ description: "Set software breakpoint (debug mode). Hardware BP not enabled yet.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "addr": { "type": "string" },
+ "kind": { "type": "string", "enum": ["software", "hardware"] },
+ "oneshot": { "type": "boolean" }
+                },
+ "required": ["session_id", "addr"]
+            }),
+        },
+        ToolDef {
+ name: "process_break_clear",
+ description: "Clear breakpoint by id or addr (debug mode)",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "id": { "type": "integer" },
+ "addr": { "type": "string" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_break_list",
+ description: "List breakpoints for a debug session",
+            input_schema: json!({
+ "type": "object",
+ "properties": { "session_id": { "type": "string" } },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_continue",
+ description: "Continue a stopped debug session",
+            input_schema: json!({
+ "type": "object",
+ "properties": { "session_id": { "type": "string" } },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_pause",
+ description: "DebugBreakProcess / interrupt (debug mode)",
+            input_schema: json!({
+ "type": "object",
+ "properties": { "session_id": { "type": "string" } },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_wait",
+ description: "Wait for stop event (breakpoint/step/exception/exit). timeout_ms default 5000.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "timeout_ms": { "type": "integer" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_step_into",
+ description: "Single-step into (TF). Uses last stop thread if thread_id omitted.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "thread_id": { "type": "integer" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_step_over",
+ description: "Single-step over (TF MVP). Uses last stop thread if thread_id omitted.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "thread_id": { "type": "integer" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_threads",
+ description: "List threads in the target (debug mode)",
+            input_schema: json!({
+ "type": "object",
+ "properties": { "session_id": { "type": "string" } },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_thread_context_get",
+ description: "Get x64 registers for a thread (debug mode)",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "thread_id": { "type": "integer" }
+                },
+ "required": ["session_id", "thread_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_thread_context_set",
+ description: "Set x64 registers for a thread (debug mode)",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "thread_id": { "type": "integer" },
+ "registers": { "type": "object" }
+                },
+ "required": ["session_id", "thread_id", "registers"]
+            }),
+        },
+        ToolDef {
+ name: "process_stack",
+ description: "Unwind call stack for a thread (debug mode; RBP chain + optional pdata)",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "thread_id": { "type": "integer" },
+ "max_frames": { "type": "integer" }
+                },
+ "required": ["session_id", "thread_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_scan",
+ description: "Pattern scan live memory (AOB/string). Bytes ≠ types. Optional diff_wait_ms.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "aob": { "type": "string", "description": "Hex pattern with ?? wildcards" },
+ "string": { "type": "string" },
+ "utf16": { "type": "boolean" },
+ "module": { "type": "string" },
+ "max_hits": { "type": "integer" },
+ "diff_wait_ms": { "type": "integer" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+ name: "process_watch_expr",
+ description: "Pointer-chase DSL: module+rva, u64@va, va->*+0x10. Heuristic float4x4 flagged when requested.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "expr": { "type": "string" },
+ "matrix_heuristic": { "type": "boolean" }
+                },
+ "required": ["session_id", "expr"]
+            }),
+        },
+        ToolDef {
+ name: "process_vtable_probe",
+ description: "Validate object* vtable in module image; list slot targets as live VAs",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "addr": { "type": "string", "description": "object* live VA" },
+ "max_slots": { "type": "integer" }
+                },
+ "required": ["session_id", "addr"]
+            }),
+        },
+        ToolDef {
+ name: "process_export_snapshot",
+ description: "Dump regs/stack/watches/nearby reads to JSON for agent handoff",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "watches": { "type": "array", "items": { "type": "string" } },
+ "nearby": { "type": "array", "items": { "type": "string" } }
                 },
  "required": ["session_id"]
             }),
@@ -4129,7 +4323,13 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("pid")
                 .and_then(|p| p.as_u64())
                 .ok_or_else(|| "missing arguments.pid".to_string())? as u32;
-            let s = process_attach(pid)?;
+            let mode = args
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .unwrap_or("observe")
+                .parse::<SessionMode>()
+                .map_err(|e| e.to_string())?;
+            let s = process_attach_opts(pid, &AttachOpts { mode })?;
             Ok(serde_json::to_string_pretty(&s).unwrap())
         }
         "process_launch" => {
@@ -4145,10 +4345,22 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .get("cwd")
                 .and_then(|c| c.as_str())
                 .map(std::path::PathBuf::from);
+            let mode = args
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .unwrap_or("observe")
+                .parse::<ghidrust_core::SessionMode>()
+                .map_err(|e| e.to_string())?;
+            let break_at_entry = args
+                .get("break_at_entry")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
             let r = process_launch(&LaunchRequest {
                 image: std::path::PathBuf::from(image),
                 args: launch_args,
                 cwd,
+                mode,
+                break_at_entry,
             })?;
             Ok(serde_json::to_string_pretty(&r).unwrap())
         }
@@ -4214,6 +4426,242 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .ok_or_else(|| "missing arguments.session_id".to_string())?;
             let max = args.get("max").and_then(|m| m.as_u64()).unwrap_or(256) as usize;
             let r = process_regions(sid, max)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_break_set" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let addr = parse_u64(
+                args.get("addr")
+                    .and_then(|a| a.as_str())
+                    .ok_or_else(|| "missing arguments.addr".to_string())?,
+            )?;
+            let kind = args
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .unwrap_or("software")
+                .parse::<BreakKind>()
+                .map_err(|e| e.to_string())?;
+            let oneshot = args
+                .get("oneshot")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let r = process_break_set(sid, addr, kind, oneshot)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_break_clear" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let id = args.get("id").and_then(|i| i.as_u64());
+            let addr = args
+                .get("addr")
+                .and_then(|a| a.as_str())
+                .map(parse_u64)
+                .transpose()?;
+            process_break_clear(sid, id, addr)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_break_list" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let r = process_break_list(sid)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_continue" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            process_continue(sid)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_pause" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            process_pause(sid)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_wait" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(5000);
+            let r = process_wait(sid, timeout_ms)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_step_into" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
+            process_step_into(sid, tid)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_step_over" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
+            process_step_over(sid, tid)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_threads" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let r = process_threads(sid)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_thread_context_get" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let tid = args
+                .get("thread_id")
+                .and_then(|t| t.as_u64())
+                .ok_or_else(|| "missing arguments.thread_id".to_string())?
+                as u32;
+            let r = process_thread_context_get(sid, tid)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_thread_context_set" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let tid = args
+                .get("thread_id")
+                .and_then(|t| t.as_u64())
+                .ok_or_else(|| "missing arguments.thread_id".to_string())?
+                as u32;
+            let regs: RegisterSet = serde_json::from_value(
+                args.get("registers")
+                    .cloned()
+                    .ok_or_else(|| "missing arguments.registers".to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            process_thread_context_set(sid, tid, &regs)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_stack" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let tid = args
+                .get("thread_id")
+                .and_then(|t| t.as_u64())
+                .ok_or_else(|| "missing arguments.thread_id".to_string())?
+                as u32;
+            let max = args
+                .get("max_frames")
+                .and_then(|m| m.as_u64())
+                .unwrap_or(32) as usize;
+            let r = process_stack(sid, tid, max)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_scan" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let opts = ScanOpts {
+                aob: args
+                    .get("aob")
+                    .and_then(|a| a.as_str())
+                    .map(|s| s.to_string()),
+                string: args
+                    .get("string")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string()),
+                utf16: args.get("utf16").and_then(|b| b.as_bool()).unwrap_or(false),
+                module_only: args
+                    .get("module")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string()),
+                max_hits: args
+                    .get("max_hits")
+                    .and_then(|m| m.as_u64())
+                    .unwrap_or(256) as usize,
+                diff_wait_ms: args.get("diff_wait_ms").and_then(|d| d.as_u64()),
+                ..ScanOpts::default()
+            };
+            let r = process_scan_mem(sid, &opts)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_watch_expr" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let expr = args
+                .get("expr")
+                .and_then(|e| e.as_str())
+                .ok_or_else(|| "missing arguments.expr".to_string())?;
+            let heur = args
+                .get("matrix_heuristic")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let r = process_watch_expr(sid, expr, heur)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_vtable_probe" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let addr = parse_u64(
+                args.get("addr")
+                    .and_then(|a| a.as_str())
+                    .ok_or_else(|| "missing arguments.addr".to_string())?,
+            )?;
+            let max_slots = args
+                .get("max_slots")
+                .and_then(|m| m.as_u64())
+                .unwrap_or(32) as usize;
+            let r = process_vtable_probe(sid, addr, max_slots)?;
+            Ok(serde_json::to_string_pretty(&r).unwrap())
+        }
+        "process_export_snapshot" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let watches: Vec<String> = args
+                .get("watches")
+                .and_then(|w| w.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let nearby: Vec<u64> = args
+                .get("nearby")
+                .and_then(|n| n.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().and_then(|s| parse_u64(s).ok()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let r = process_export_snapshot(sid, &watches, &nearby)?;
             Ok(serde_json::to_string_pretty(&r).unwrap())
         }
         "list_strings" | "search_strings" => {

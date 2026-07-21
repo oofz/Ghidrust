@@ -92,10 +92,17 @@ pub use pe_functions::{
     parse_export_code_vas, parse_runtime_functions, runtime_function_containing, RuntimeFunction,
 };
 pub use process::{
-    launch_command_line, process_attach, process_detach, process_is_suspended, process_launch,
-    process_list, process_modules, process_read, process_regions, process_resolve, process_resume,
-    static_to_live, LaunchRequest, LaunchResult, ModuleInfo, ProcessInfo, ProcessSession,
-    ReadResult, RegionInfo, ResolveLive,
+    launch_command_line, live_process_info_json, process_attach, process_attach_opts,
+    process_break_clear, process_break_list, process_break_set, process_continue, process_detach,
+    process_export_snapshot, process_is_suspended, process_launch, process_list, process_modules,
+    process_pause, process_read, process_regions, process_resolve, process_resume, process_scan_mem,
+    process_stack, process_step_into, process_step_over, process_thread_context_get,
+    process_thread_context_set, process_threads, process_vtable_probe, process_wait,
+    process_watch_expr, static_to_live, AcAdvisory, AttachOpts, BreakKind, BreakpointInfo,
+    ExportSnapshot, LaunchRequest, LaunchResult, ModuleInfo, ProcessError, ProcessErrorCode,
+    ProcessInfo, ProcessSession, ReadResult, RegionInfo, RegisterSet, ResolveLive, RunState,
+    ScanHit, ScanOpts, ScanResult, SessionMode, StackFrame, StopEvent, ThreadInfo, VtableProbeResult,
+    WaitResult, WatchResult,
 };
 pub use program::{
     AddressTableInfo, AddressTableRole, AnalysisState, CallFixupInfo, DiscoveredRange, FidMatch,

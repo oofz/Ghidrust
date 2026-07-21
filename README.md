@@ -194,7 +194,7 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 | `ghidrust inventory <dir>` | Generic PE install inventory (exe/dll + VERSIONINFO; artifact if large) | `--max-depth`, `--hash`, `--json` |
 | `ghidrust tree <path>` | Bounded file tree index (existence/size; no unpack) | `--max-depth`, `--ext`, `--name`, `--json` |
 | `ghidrust artifact get\|query\|list` | Drain spilled analysis artifacts (`next_offset`) | `--offset`, `--limit`, `--json` |
-| `ghidrust process list\|attach\|launch\|resume\|detach\|modules\|read\|resolve\|regions` | Live Process Bridge (Windows; read-only MVP; launch = CREATE_SUSPENDED) | session_id / `--args` / `--cwd` / `--addr` / `--module` / `--rva` / `--max` |
+| `ghidrust process list\|attach\|launch\|…\|break\|wait\|scan\|watch` | Live Process Bridge (Windows; observe default, `mode=debug` for BP/step; `tool_surface` 7) | session_id / `-mode` / `--args` / `--cwd` / `--addr` / `--module` / `--rva` |
 | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls` | IL2CPP metadata + touch-map + method map (body proof / baseline) + stubs + icalls | See [docs/IL2CPP.md](docs/IL2CPP.md) |
 | `ghidrust unity-inventory <dir>` | Unity player layout (reuses PE VERSIONINFO helpers) | `--json`, `--out FILE` |
 | `ghidrust disasm <path>` | Capstone-class listing; bounded by function end by default; `decode_gaps` when `--skip-bad`; JSON `stop_reason` | `--addr HEX`, `--count N` (default 16), `--skip-bad`, `--linear`/`--flow`, `--arch`, `--mode`, `--syntax`, `--detail`/`--no-detail`, `--detail-real`, `--skipdata`, `--skipdata-mnemonic`, `--skipdata-size`, `--unsigned-imm`, `--only-offset-branch`, `--litbase`, `--mnem-override ID:MNEMONIC`, `--out`, `--json` |
@@ -316,15 +316,20 @@ ghidrust rtti /path/to/app.exe --filter Widget --json
 ghidrust artifact list --json
 ghidrust artifact query <id> --offset 0 --limit 64 --json
 
-# Live process (Windows; read-only)
+# Live process (Windows; observe default, debug opt-in; tool_surface >= 7)
 ghidrust process list --json
-ghidrust process attach <pid>
-ghidrust process launch C:\path\to\app.exe --args "--flag" --cwd C:\path\to --json
-ghidrust process resume <session_id>
+ghidrust process attach <pid> -mode observe
+ghidrust process attach <pid> -mode debug
+ghidrust process launch C:\path\to\app.exe -mode debug -break-at-entry --json
 ghidrust process modules <session_id> --json
 ghidrust process resolve <session_id> --module app.exe --rva 0x1234 --json
+ghidrust process break set <session_id> -addr 0x7ff…
+ghidrust process continue <session_id>
+ghidrust process wait <session_id> -timeout 5000
+ghidrust process stack <session_id> <tid>
+ghidrust process scan <session_id> -aob "48 8b ?? 90"
+ghidrust process watch <session_id> "app.exe+0x1234->*+0x10"
 ghidrust process read <session_id> --addr 0x7ff… --size 64 --json
-ghidrust process regions <session_id> --json
 ghidrust process detach <session_id>
 
 # Unity player inventory + IL2CPP touch-map / metadata / stubs / method map
@@ -539,13 +544,25 @@ On Linux/macOS:
 | `list_gpu_strategies` | — | Per-analyzer GPU strategy matrix |
 | `gpu_decompile` | `path`, optional `addr`, `out` | GPU decompile at VA; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI with PCIe/device split |
-| `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | session / pid / image / module / rva / max | Live Process Bridge (Windows; no write in MVP) |
+| `process_list` / `process_attach` / `process_launch` / … / `process_break_*` / `process_wait` / `process_scan` / `process_watch_expr` | session / pid / mode / image / module / rva / max | Live Process Bridge (Windows; observe default; debug opt-in; `tool_surface` ≥ 7) |
 
 #### Live process (Windows)
 
-Attach read-only (`PROCESS_VM_READ`): `process list` → `attach <pid>` → `modules` → `resolve --module NAME --rva HEX` (`static_to_live`) → `read --addr LIVE --size N` → optional `regions` / `detach`. **Launch** creates a process with `CREATE_SUSPENDED`, opens a live session, then `process resume` lets it run — not a Ghidra/CE debug break-at-entry. Multi-step work **must** use the long-lived MCP (or GUI) process — CLI `ghidrust process` cannot reuse `session_id` across separate spawns. Short reads and access denied are explicit errors. Bytes ≠ recovered types — do not invent structs from live reads. GUI: one **Debugger** window; Attach/Launch auto-populate modules, regions, and Memory Bytes.
+Default **observe** = read-only (`PROCESS_VM_READ`): `process list` → `attach <pid> [-mode observe]` → `modules` → `resolve --module NAME --rva HEX` → `read` / `scan` / `watch` → `detach`.
 
-Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface`: **minimum `3`** (touch-map / body_class / function_create); **prefer `>= 4`** for bounded disasm / `get_calls_from`; **require `>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags; **current is `5`**. `server_info.decode` mirrors `decode-support` (version, arches, options, syntax_values).
+**Debug** (`-mode debug`, requires `tool_surface >= 7`): attach or launch with debug rights → `break set` → `continue` / `wait` → registers (`regs`) + `stack` → optional `scan` / `watch` → `snapshot` → `detach`. Observe **launch** still uses `CREATE_SUSPENDED` + `resume`. Debug launch uses Windows debug APIs (initial break). Multi-step work **must** stay in one MCP/GUI process — CLI one-shot cannot reuse `session_id`. Bytes ≠ types. Anti-cheat: advisory only; access denied is explicit.
+
+**GUI Debugger walkthrough**
+
+1. **Debugger → Attach…** (or **Launch…**)
+2. **Targets:** set **Mode = debug**, Attach PID (or Launch with **Break at entry**)
+3. **Modules:** static map `module + RVA` → live VA
+4. **Breakpoints:** paste live VA → **Add**
+5. **Continue (F5)** / **Wait stop** → Registers + Stack update
+6. **Watches:** add `module+rva->*+0x10` → **Refresh**; optional AOB **Scan**
+7. **Console → Export snapshot** → **Detach**
+
+Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface`: **minimum `3`** (touch-map / body_class / function_create); **prefer `>= 4`** for bounded disasm / `get_calls_from`; **require `>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags; **`>= 6`** for crypto recover/bake; **`>= 7`** for live debug break/step/scan/watch; **current is `7`**. `server_info.decode` mirrors `decode-support`; `server_info.live_process` lists modes + capabilities.
 
 #### Analysis artifacts
 
@@ -561,7 +578,7 @@ Large MCP/CLI dumps spill to `%TEMP%/ghidrust-artifacts/`. Tool envelopes includ
 | Artifact spill | **Analysis Artifacts** |
 | GPU decompile | Analysis → **GPU Decompile…** |
 | Encoding / xrefs / RTTI / notes | Defined Strings, Symbol References, Symbol Tree Classes, Memory Map |
-| Live process | **Debugger** (tabbed): Targets / Modules / Memory Bytes / Regions |
+| Live process | **Debugger** (tabbed): Targets / Modules / Memory Bytes / Regions / Breakpoints / Threads / Registers / Stack / Watches (live APIs under mode=debug) |
 
 IL2CPP version matrix and Unity inventory schema: [docs/IL2CPP.md](docs/IL2CPP.md).
 

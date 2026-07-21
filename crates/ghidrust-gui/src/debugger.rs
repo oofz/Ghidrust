@@ -1,16 +1,18 @@
 //! Ghidrust GUI · Debugger tool (tabbed host).
 //!
-//! ships a separate `Debugger` tool with a distinct catalog of
-//! `ComponentProvider`s. Ghidrust hosts them in **one** window with a tab
-//! strip. Live Process Bridge panes (Targets / Modules / Memory Bytes /
-//! Regions) talk to `ghidrust_core::process_*`; Threads / Registers / Stack /
-//! Breakpoints / Watches / Console remain honest stubs until a live debug agent lands.
+//! One window with a tab strip. All panes call `ghidrust_core::process_*`
+//! (same APIs as MCP/CLI). Mode **observe** (default) = read-only; **debug**
+//! enables break/step/registers/stack.
 
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_core::process::{
-    process_attach, process_detach, process_launch, process_list, process_modules, process_read,
-    process_regions, process_resume, static_to_live, LaunchRequest, ModuleInfo, ProcessInfo,
-    ProcessSession, ReadResult, RegionInfo,
+    process_attach_opts, process_break_clear, process_break_list, process_break_set,
+    process_continue, process_detach, process_export_snapshot, process_launch, process_list,
+    process_modules, process_pause, process_read, process_regions, process_resume, process_scan_mem,
+    process_stack, process_step_into, process_step_over, process_thread_context_get, process_threads,
+    process_wait, process_watch_expr, static_to_live, AttachOpts, BreakKind, BreakpointInfo,
+    LaunchRequest, ModuleInfo, ProcessInfo, ProcessSession, ReadResult, RegionInfo, RegisterSet,
+    ScanHit, ScanOpts, SessionMode, StackFrame, StopEvent, ThreadInfo, WatchResult,
 };
 use std::path::{Path, PathBuf};
 
@@ -115,6 +117,7 @@ impl DebuggerPane {
     }
 
     /// Columns rendered in the empty-state table (layout).
+    #[allow(dead_code)]
     pub const fn columns(self) -> &'static [&'static str] {
         match self {
             DebuggerPane::Targets => &["Name", "Type", "State"],
@@ -131,28 +134,37 @@ impl DebuggerPane {
     }
 
     /// Copy pointing at the pending backend for this pane.
+    #[allow(dead_code)]
     pub const fn backend_message(self) -> &'static str {
         match self {
             DebuggerPane::Targets => {
  "Live Process Bridge (Windows) — ghidrust_core::process_list/attach."
             }
- DebuggerPane::Threads => "Backend pending — target-agent thread model.",
+            DebuggerPane::Threads => {
+                "Live Process Bridge — process_threads (debug mode)."
+            }
             DebuggerPane::Modules => {
- "Live Process Bridge (Windows) — ghidrust_core::process_modules + static_to_live."
+                "Live Process Bridge (Windows) — ghidrust_core::process_modules + static_to_live."
             }
             DebuggerPane::Regions => {
- "Live Process Bridge (Windows) — ghidrust_core::process_regions (VirtualQueryEx)."
+                "Live Process Bridge (Windows) — ghidrust_core::process_regions (VirtualQueryEx)."
             }
             DebuggerPane::Registers => {
- "Backend pending — live register values (Register Manager renders the static register lattice)."
+                "Live Process Bridge — process_thread_context_get (debug mode, x64 CONTEXT)."
             }
- DebuggerPane::Stack => "Backend pending — target-agent stack unwinder.",
- DebuggerPane::Breakpoints => "Backend pending — breakpoint model + agent set/clear.",
+            DebuggerPane::Stack => {
+                "Live Process Bridge — process_stack (debug mode, RBP/pdata unwind)."
+            }
+            DebuggerPane::Breakpoints => {
+                "Live Process Bridge — process_break_set/clear/list (software INT3, debug mode)."
+            }
             DebuggerPane::MemoryBytes => {
- "Live Process Bridge (Windows) — ghidrust_core::process_read (ReadProcessMemory)."
+                "Live Process Bridge (Windows) — ghidrust_core::process_read (ReadProcessMemory)."
             }
- DebuggerPane::Watches => "Backend pending — expression evaluator + refresh.",
- DebuggerPane::DebuggerConsole => "Backend pending — target-agent stdio.",
+            DebuggerPane::Watches => {
+                "Live Process Bridge — process_watch_expr (pointer-chase DSL)."
+            }
+            DebuggerPane::DebuggerConsole => "Debugger console (session events / stop reasons).",
         }
     }
 }
@@ -204,54 +216,54 @@ impl DebuggerAction {
 /// Persistent state for the debugger tool mode.
 #[derive(Debug, Clone)]
 pub struct DebuggerState {
-    /// User-set breakpoint VAs (session-only until backend lands).
+    /// Local VA list (also mirrored from live `process_break_list` when debug).
     pub breakpoints: Vec<u64>,
-    /// User-set watch expressions.
+    /// Watch expression strings.
     pub watches: Vec<String>,
-    /// Whether the debugger tool mode is active.
     pub enabled: bool,
-    /// Host window open (single tabbed Debugger).
     pub host_open: bool,
-    /// Active tab inside the host.
     pub active_tab: DebuggerPane,
-    /// New-breakpoint input.
     pub bp_input: String,
-    /// New-watch input.
+    pub bp_oneshot: bool,
     pub watch_input: String,
-    // ── Live Process Bridge (Windows) — `ghidrust_core::process_*` ──────
-    /// Attached session; `None` = no live target.
+    pub watch_matrix_heuristic: bool,
+    // ── Live Process Bridge ────────────────────────────────────────────
     pub session: Option<ProcessSession>,
-    /// Display name of the attached process (from process list).
     pub process_display_name: Option<String>,
-    /// Cached process list (Targets pane).
     pub process_list_cache: Vec<ProcessInfo>,
-    /// Targets pane process-name filter.
     pub targets_filter: String,
-    /// Targets pane manual PID input.
     pub attach_pid_input: String,
-    /// Cached module list for the attached session.
+    /// Attach/launch mode (default observe).
+    pub attach_mode: SessionMode,
     pub modules_cache: Vec<ModuleInfo>,
-    /// Modules pane name/path filter.
     pub modules_filter: String,
-    /// Cached region list for the attached session.
     pub regions_cache: Vec<RegionInfo>,
-    /// Modules pane · Static Mappings mini-tool.
     pub static_map_module_input: String,
     pub static_map_rva_input: String,
     pub static_map_result: Option<String>,
-    /// Memory Bytes pane inputs + last read.
     pub mem_bytes_va_input: String,
     pub mem_bytes_size_input: String,
     pub mem_bytes_last: Option<ReadResult>,
-    /// Last error from any Live Process Bridge call (fail-loud, not silent).
+    pub follow_pc: bool,
     pub live_error: Option<String>,
-    /// True when session was launched with CREATE_SUSPENDED and not yet resumed.
     pub suspended: bool,
-    /// Launch… dialog open.
     pub show_launch_dialog: bool,
     pub launch_image: String,
     pub launch_args: String,
     pub launch_cwd: String,
+    pub launch_break_at_entry: bool,
+    // Debug caches
+    pub live_breakpoints: Vec<BreakpointInfo>,
+    pub threads_cache: Vec<ThreadInfo>,
+    pub active_thread_id: Option<u32>,
+    pub registers_cache: Option<RegisterSet>,
+    pub stack_cache: Vec<StackFrame>,
+    pub watch_results: Vec<WatchResult>,
+    pub last_stop: Option<StopEvent>,
+    pub console_log: Vec<String>,
+    pub scan_aob: String,
+    pub scan_string: String,
+    pub scan_hits: Vec<ScanHit>,
 }
 
 impl Default for DebuggerState {
@@ -263,12 +275,15 @@ impl Default for DebuggerState {
             host_open: false,
             active_tab: DebuggerPane::Targets,
             bp_input: String::new(),
+            bp_oneshot: false,
             watch_input: String::new(),
+            watch_matrix_heuristic: false,
             session: None,
             process_display_name: None,
             process_list_cache: Vec::new(),
             targets_filter: String::new(),
             attach_pid_input: String::new(),
+            attach_mode: SessionMode::Observe,
             modules_cache: Vec::new(),
             modules_filter: String::new(),
             regions_cache: Vec::new(),
@@ -278,12 +293,25 @@ impl Default for DebuggerState {
             mem_bytes_va_input: String::new(),
             mem_bytes_size_input: String::new(),
             mem_bytes_last: None,
+            follow_pc: true,
             live_error: None,
             suspended: false,
             show_launch_dialog: false,
             launch_image: String::new(),
             launch_args: String::new(),
             launch_cwd: String::new(),
+            launch_break_at_entry: true,
+            live_breakpoints: Vec::new(),
+            threads_cache: Vec::new(),
+            active_thread_id: None,
+            registers_cache: None,
+            stack_cache: Vec::new(),
+            watch_results: Vec::new(),
+            last_stop: None,
+            console_log: Vec::new(),
+            scan_aob: String::new(),
+            scan_string: String::new(),
+            scan_hits: Vec::new(),
         }
     }
 }
@@ -373,10 +401,34 @@ impl DebuggerState {
         self.static_map_result = None;
         self.process_display_name = None;
         self.suspended = false;
+        self.live_breakpoints.clear();
+        self.threads_cache.clear();
+        self.active_thread_id = None;
+        self.registers_cache = None;
+        self.stack_cache.clear();
+        self.watch_results.clear();
+        self.last_stop = None;
+        self.scan_hits.clear();
+    }
+
+    pub fn log(&mut self, line: impl Into<String>) {
+        self.console_log.push(line.into());
+        if self.console_log.len() > 500 {
+            let n = self.console_log.len() - 400;
+            self.console_log.drain(0..n);
+        }
+    }
+
+    pub fn is_debug_mode(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.mode == SessionMode::Debug)
+            .unwrap_or(false)
     }
 
     pub fn detach_session(&mut self) {
         if let Some(sess) = self.session.take() {
+            self.log(format!("detach {}", sess.session_id));
             let _ = process_detach(&sess.session_id);
         }
         self.clear_live_caches();
@@ -384,14 +436,14 @@ impl DebuggerState {
         self.active_tab = DebuggerPane::Targets;
     }
 
-    /// Attach and auto-populate modules / regions / Memory Bytes (CE-style).
+    /// Attach with current `attach_mode` and auto-populate.
     pub fn attach_and_populate(&mut self, pid: u32) {
         if pid == 0 {
             self.live_error = Some("invalid PID".into());
             return;
         }
         self.live_error = None;
-        match process_attach(pid) {
+        match process_attach_opts(pid, &AttachOpts { mode: self.attach_mode }) {
             Ok(sess) => {
                 let name = self
                     .process_list_cache
@@ -399,9 +451,22 @@ impl DebuggerState {
                     .find(|p| p.pid == pid)
                     .map(|p| p.name.clone());
                 self.process_display_name = name;
+                self.log(format!(
+                    "attach pid={pid} mode={} session={}",
+                    sess.mode.as_str(),
+                    sess.session_id
+                ));
+                if let Some(a) = &sess.advisory {
+                    if a.suspected_protection {
+                        self.log(format!("advisory: {}", a.message));
+                    }
+                }
                 self.session = Some(sess);
                 self.suspended = false;
                 self.refresh_after_attach();
+                if self.is_debug_mode() {
+                    self.poll_stop(500);
+                }
             }
             Err(e) => {
                 self.session = None;
@@ -411,7 +476,7 @@ impl DebuggerState {
         }
     }
 
-    /// Launch CREATE_SUSPENDED + auto-populate (not a debug break-at-entry).
+    /// Launch with current attach_mode (+ break_at_entry when debug).
     pub fn launch_and_populate(&mut self) {
         let image = self.launch_image.trim();
         if image.is_empty() {
@@ -436,6 +501,8 @@ impl DebuggerState {
                     Some(PathBuf::from(c))
                 }
             },
+            mode: self.attach_mode,
+            break_at_entry: self.attach_mode == SessionMode::Debug && self.launch_break_at_entry,
         };
         self.live_error = None;
         match process_launch(&req) {
@@ -445,14 +512,155 @@ impl DebuggerState {
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| r.image.clone());
                 self.process_display_name = Some(name);
+                self.log(format!(
+                    "launch mode={} session={} suspended={}",
+                    r.session.mode.as_str(),
+                    r.session.session_id,
+                    r.suspended
+                ));
                 self.session = Some(r.session);
                 self.suspended = r.suspended;
                 self.show_launch_dialog = false;
                 self.refresh_after_attach();
+                if self.is_debug_mode() {
+                    self.poll_stop(2000);
+                }
             }
             Err(e) => {
                 self.live_error = Some(e);
             }
+        }
+    }
+
+    pub fn poll_stop(&mut self, timeout_ms: u64) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        if sess.mode != SessionMode::Debug {
+            return;
+        }
+        match process_wait(&sess.session_id, timeout_ms) {
+            Ok(wr) => {
+                if let Some(ev) = wr.event {
+                    self.log(format!(
+                        "stop reason={} tid={} rip={:#x}",
+                        ev.reason, ev.thread_id, ev.rip
+                    ));
+                    self.active_thread_id = Some(ev.thread_id);
+                    if let Some(regs) = &ev.registers {
+                        self.registers_cache = Some(regs.clone());
+                    }
+                    if self.follow_pc {
+                        self.mem_bytes_va_input = format!("{:#x}", ev.rip);
+                    }
+                    self.last_stop = Some(ev);
+                    self.refresh_debug_views();
+                } else if !wr.ok {
+                    if wr.code.as_deref() != Some("wait_timeout") {
+                        self.live_error = wr.message.or(wr.code);
+                    }
+                }
+            }
+            Err(e) => self.live_error = Some(e),
+        }
+    }
+
+    pub fn refresh_debug_views(&mut self) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        if sess.mode != SessionMode::Debug {
+            return;
+        }
+        if let Ok(bps) = process_break_list(&sess.session_id) {
+            self.live_breakpoints = bps;
+            self.breakpoints = self.live_breakpoints.iter().map(|b| b.addr).collect();
+        }
+        if let Ok(ths) = process_threads(&sess.session_id) {
+            self.threads_cache = ths;
+            if self.active_thread_id.is_none() {
+                self.active_thread_id = self.threads_cache.first().map(|t| t.thread_id);
+            }
+        }
+        if let Some(tid) = self.active_thread_id {
+            if let Ok(regs) = process_thread_context_get(&sess.session_id, tid) {
+                self.registers_cache = Some(regs);
+            }
+            if let Ok(frames) = process_stack(&sess.session_id, tid, 32) {
+                self.stack_cache = frames;
+            }
+        }
+        self.refresh_watches();
+    }
+
+    pub fn refresh_watches(&mut self) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        let mut out = Vec::new();
+        for e in &self.watches {
+            match process_watch_expr(&sess.session_id, e, self.watch_matrix_heuristic) {
+                Ok(w) => out.push(w),
+                Err(err) => out.push(WatchResult {
+                    expr: e.clone(),
+                    steps: vec![],
+                    final_va: None,
+                    value_hex: None,
+                    as_u64: None,
+                    as_f32: None,
+                    as_f64: None,
+                    heuristic_float4x4: None,
+                    heuristic: false,
+                    error: Some(err),
+                }),
+            }
+        }
+        self.watch_results = out;
+    }
+
+    pub fn debug_continue(&mut self) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        match process_continue(&sess.session_id) {
+            Ok(()) => {
+                self.log("continue");
+                self.live_error = None;
+                self.poll_stop(100);
+            }
+            Err(e) => self.live_error = Some(e),
+        }
+    }
+
+    pub fn debug_pause(&mut self) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        match process_pause(&sess.session_id) {
+            Ok(()) => {
+                self.log("pause");
+                self.poll_stop(2000);
+            }
+            Err(e) => self.live_error = Some(e),
+        }
+    }
+
+    pub fn debug_step(&mut self, over: bool) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        let tid = self.active_thread_id;
+        let r = if over {
+            process_step_over(&sess.session_id, tid)
+        } else {
+            process_step_into(&sess.session_id, tid)
+        };
+        match r {
+            Ok(()) => {
+                self.log(if over { "step over" } else { "step into" });
+                self.poll_stop(2000);
+            }
+            Err(e) => self.live_error = Some(e),
         }
     }
 
@@ -528,19 +736,26 @@ impl DebuggerState {
         match &self.session {
             Some(sess) => {
                 let name = self.process_display_name.as_deref().unwrap_or("(unknown)");
+                let mode = sess.mode.as_str();
+                let rs = sess.run_state.as_str();
                 if self.suspended {
                     format!(
-                        "Suspended · {} · pid={} · session={} — Resume to run",
-                        name, sess.pid, sess.session_id
+                        "{mode}/{rs} · {name} · pid={} · session={} — Resume to run",
+                        sess.pid, sess.session_id
+                    )
+                } else if let Some(stop) = &self.last_stop {
+                    format!(
+                        "{mode}/{rs} · {name} · pid={} · stop={} rip={:#x}",
+                        sess.pid, stop.reason, stop.rip
                     )
                 } else {
                     format!(
-                        "Attached · {} · pid={} · session={}",
-                        name, sess.pid, sess.session_id
+                        "{mode}/{rs} · {name} · pid={} · session={}",
+                        sess.pid, sess.session_id
                     )
                 }
             }
-            None => "Detached — Attach a PID or Launch an image".into(),
+            None => "Detached — Attach a PID or Launch an image (Mode: observe|debug)".into(),
         }
     }
 
@@ -709,17 +924,30 @@ pub fn draw_launch_dialog(ctx: &egui::Context, state: &mut DebuggerState, muted:
                 );
             });
             ui.horizontal(|ui| {
- ui.label("Cwd:");
+                ui.label("Cwd:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.launch_cwd)
                         .desired_width(360.0)
- .hint_text("optional working directory"),
+                        .hint_text("optional working directory"),
                 );
- if ui.button("Browse…").clicked() {
+                if ui.button("Browse…").clicked() {
                     if let Some(path) = rfd::FileDialog::new().pick_folder() {
                         state.launch_cwd = path.display().to_string();
                     }
                 }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Mode:");
+                egui::ComboBox::from_id_salt("dbg_launch_mode")
+                    .selected_text(state.attach_mode.as_str())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut state.attach_mode, SessionMode::Observe, "observe");
+                        ui.selectable_value(&mut state.attach_mode, SessionMode::Debug, "debug");
+                    });
+                ui.add_enabled(
+                    state.attach_mode == SessionMode::Debug,
+                    egui::Checkbox::new(&mut state.launch_break_at_entry, "Break at entry"),
+                );
             });
             if let Some(e) = state.live_error.clone() {
                 err_row(ui, &e);
@@ -729,7 +957,7 @@ pub fn draw_launch_dialog(ctx: &egui::Context, state: &mut DebuggerState, muted:
                 if ui
                     .add_enabled(
                         !state.launch_image.trim().is_empty() && state.session.is_none(),
- egui::Button::new("Launch"),
+                        egui::Button::new("Launch"),
                     )
                     .clicked()
                 {
@@ -758,7 +986,7 @@ fn render_host_body(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         if state.session.is_some() && state.suspended {
             if ui
                 .small_button("Resume")
-                .on_hover_text("ResumeThread on the primary CREATE_SUSPENDED thread")
+                .on_hover_text("ResumeThread / continue debug session")
                 .clicked()
             {
                 state.resume_session();
@@ -769,6 +997,56 @@ fn render_host_body(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
                 state.detach_session();
             }
         }
+    });
+    // Debug toolbar
+    let dbg = state.is_debug_mode();
+    ui.horizontal(|ui| {
+        let cont = ui
+            .add_enabled(dbg, egui::Button::new("Continue (F5)").small())
+            .on_hover_text(if dbg {
+                "process_continue"
+            } else {
+                "Requires mode=debug"
+            });
+        if cont.clicked() {
+            state.debug_continue();
+        }
+        let pause = ui
+            .add_enabled(dbg, egui::Button::new("Interrupt").small())
+            .on_hover_text(if dbg {
+                "process_pause"
+            } else {
+                "Requires mode=debug"
+            });
+        if pause.clicked() {
+            state.debug_pause();
+        }
+        if ui
+            .add_enabled(dbg, egui::Button::new("Step Into (F7)").small())
+            .clicked()
+        {
+            state.debug_step(false);
+        }
+        if ui
+            .add_enabled(dbg, egui::Button::new("Step Over (F8)").small())
+            .clicked()
+        {
+            state.debug_step(true);
+        }
+        if ui
+            .add_enabled(dbg, egui::Button::new("Wait stop").small())
+            .on_hover_text("process_wait 5s")
+            .clicked()
+        {
+            state.poll_stop(5000);
+        }
+        if ui
+            .add_enabled(dbg, egui::Button::new("Refresh debug").small())
+            .clicked()
+        {
+            state.refresh_debug_views();
+        }
+        ui.checkbox(&mut state.follow_pc, "Follow PC");
     });
     if let Some(e) = state.live_error.clone() {
         err_row(ui, &e);
@@ -811,7 +1089,10 @@ pub fn render_pane_body(
         DebuggerPane::Modules => render_modules(state, ui, muted),
         DebuggerPane::Regions => render_regions(state, ui, muted),
         DebuggerPane::MemoryBytes => render_memory_bytes(state, ui, muted),
-        _ => render_empty_table(pane, ui, muted),
+        DebuggerPane::Threads => render_threads(state, ui, muted),
+        DebuggerPane::Registers => render_registers(state, ui, muted),
+        DebuggerPane::Stack => render_stack(state, ui, muted),
+        DebuggerPane::DebuggerConsole => render_console(state, ui, muted),
     }
 }
 
@@ -822,7 +1103,7 @@ fn err_row(ui: &mut Ui, err: &str) {
 fn render_targets(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
     ui.small(
         RichText::new(
- "Attach: existing PID. Launch… (Debugger menu): CREATE_SUSPENDED new image, then Resume.",
+            "Mode observe = read-only. Mode debug = break/step/regs/stack (same as MCP process_attach mode).",
         )
         .color(muted),
     );
@@ -833,10 +1114,17 @@ fn render_targets(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         if ui.button("Launch…").clicked() {
             state.show_launch_dialog = true;
         }
+        ui.label("Mode:");
+        egui::ComboBox::from_id_salt("dbg_attach_mode")
+            .selected_text(state.attach_mode.as_str())
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut state.attach_mode, SessionMode::Observe, "observe");
+                ui.selectable_value(&mut state.attach_mode, SessionMode::Debug, "debug");
+            });
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut state.targets_filter)
-                .desired_width(200.0)
+                .desired_width(160.0)
                 .hint_text("process name…"),
         );
     });
@@ -1191,91 +1479,191 @@ fn render_memory_bytes(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         });
 }
 
-fn render_empty_table(pane: DebuggerPane, ui: &mut Ui, muted: Color32) {
-    ui.horizontal(|ui| {
-        for col in pane.columns() {
-            ui.strong(*col);
-            ui.separator();
-        }
-    });
-    ui.separator();
-    ui.add_space(6.0);
-    ui.label(RichText::new(pane.backend_message()).color(muted).italics());
-    ui.add_space(4.0);
-    ui.small(
-        RichText::new(
-            "Pane is present for the Debugger catalog. Live content lands with a target agent.",
-        )
-        .color(muted),
-    );
-}
-
 fn render_breakpoints(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
-    ui.small(
-        RichText::new(
-            "Session-only breakpoint list (replaced by target-agent state when available).",
-        )
-        .color(muted),
-    );
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target — attach with mode=debug to set software breakpoints.");
+        return;
+    };
+    if sess.mode != SessionMode::Debug {
+        ui.weak("Breakpoints require mode=debug. Re-attach/launch with Mode=debug on Targets.");
+        return;
+    }
+    ui.small(RichText::new("process_break_set / clear / list (software INT3)").color(muted));
     ui.horizontal(|ui| {
         ui.label("Address:");
         ui.add(
             egui::TextEdit::singleline(&mut state.bp_input)
                 .desired_width(160.0)
-                .hint_text("0x140001000"),
+                .hint_text("0x7ff…"),
         );
-        if ui.button("Add Breakpoint").clicked() {
+        ui.checkbox(&mut state.bp_oneshot, "oneshot");
+        if ui.button("Add").clicked() {
             if let Some(va) = parse_hex(&state.bp_input) {
-                state.toggle_breakpoint(va);
-                state.bp_input.clear();
+                match process_break_set(&sess.session_id, va, BreakKind::Software, state.bp_oneshot)
+                {
+                    Ok(bp) => {
+                        state.log(format!("bp set id={} addr={:#x}", bp.id, bp.addr));
+                        state.live_error = None;
+                        state.bp_input.clear();
+                        state.refresh_debug_views();
+                    }
+                    Err(e) => state.live_error = Some(e),
+                }
             }
+        }
+        if ui.button("Refresh").clicked() {
+            state.refresh_debug_views();
         }
     });
     ui.separator();
-    if state.breakpoints.is_empty() {
-        ui.weak("No breakpoints set.");
+    if state.live_breakpoints.is_empty() {
+        ui.weak("No live breakpoints.");
         return;
     }
-    let mut delete: Option<usize> = None;
+    let mut clear_id: Option<u64> = None;
+    let mut goto: Option<u64> = None;
     egui::Grid::new("dbg_bp_grid")
-        .num_columns(3)
+        .num_columns(5)
         .striped(true)
         .show(ui, |ui| {
-            ui.strong("Enabled");
+            ui.strong("Id");
             ui.strong("Address");
+            ui.strong("Kind");
+            ui.strong("Oneshot");
             ui.strong("");
             ui.end_row();
-            for (i, va) in state.breakpoints.iter().enumerate() {
-                ui.monospace("*");
-                ui.monospace(format!("{va:#x}"));
-                if ui.small_button("Delete").clicked() {
-                    delete = Some(i);
+            for bp in &state.live_breakpoints {
+                ui.monospace(format!("{}", bp.id));
+                if ui.link(format!("{:#x}", bp.addr)).clicked() {
+                    goto = Some(bp.addr);
+                }
+                ui.label(format!("{:?}", bp.kind).to_ascii_lowercase());
+                ui.label(if bp.oneshot { "yes" } else { "no" });
+                if ui.small_button("Clear").clicked() {
+                    clear_id = Some(bp.id);
                 }
                 ui.end_row();
             }
         });
-    if let Some(i) = delete {
-        state.breakpoints.remove(i);
+    if let Some(id) = clear_id {
+        match process_break_clear(&sess.session_id, Some(id), None) {
+            Ok(()) => {
+                state.log(format!("bp clear id={id}"));
+                state.refresh_debug_views();
+            }
+            Err(e) => state.live_error = Some(e),
+        }
+    }
+    if let Some(va) = goto {
+        state.mem_bytes_va_input = format!("{va:#x}");
+        state.active_tab = DebuggerPane::MemoryBytes;
     }
 }
 
 fn render_watches(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target — attach first, then add pointer-chase expressions.");
+        return;
+    };
     ui.small(
-        RichText::new("Session-only watch list (evaluator pending a target agent).").color(muted),
+        RichText::new("process_watch_expr · DSL: module+rva, u64@va, va->*+0x10 (bytes ≠ types)")
+            .color(muted),
     );
     ui.horizontal(|ui| {
-        ui.label("Expression:");
+        ui.label("Expr:");
         ui.add(
             egui::TextEdit::singleline(&mut state.watch_input)
                 .desired_width(280.0)
-                .hint_text("*(int*)rsp"),
+                .hint_text("game.exe+0x1234->*+0x10"),
         );
-        if ui.button("Add Watch").clicked() {
+        ui.checkbox(&mut state.watch_matrix_heuristic, "matrix heuristic");
+        if ui.button("Add").clicked() {
             let e = state.watch_input.clone();
             state.add_watch(e);
             state.watch_input.clear();
+            state.refresh_watches();
+        }
+        if ui.button("Refresh all").clicked() {
+            state.refresh_watches();
         }
     });
+    ui.separator();
+    // Scan mini-tool
+    ui.label(RichText::new("Scan (process_scan)").strong());
+    ui.horizontal(|ui| {
+        ui.label("AOB:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.scan_aob)
+                .desired_width(200.0)
+                .hint_text("48 8b ?? 90"),
+        );
+        ui.label("String:");
+        ui.add(
+            egui::TextEdit::singleline(&mut state.scan_string)
+                .desired_width(120.0)
+                .hint_text("Camera"),
+        );
+        if ui.button("Scan").clicked() {
+            let opts = ScanOpts {
+                aob: {
+                    let a = state.scan_aob.trim();
+                    if a.is_empty() {
+                        None
+                    } else {
+                        Some(a.to_string())
+                    }
+                },
+                string: {
+                    let s = state.scan_string.trim();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    }
+                },
+                ..ScanOpts::default()
+            };
+            match process_scan_mem(&sess.session_id, &opts) {
+                Ok(r) => {
+                    state.scan_hits = r.hits;
+                    state.log(format!(
+                        "scan hits={} truncated={} bytes={}",
+                        state.scan_hits.len(),
+                        r.truncated,
+                        r.bytes_scanned
+                    ));
+                    state.live_error = None;
+                }
+                Err(e) => state.live_error = Some(e),
+            }
+        }
+    });
+    if !state.scan_hits.is_empty() {
+        ui.small(format!("{} scan hit(s)", state.scan_hits.len()));
+        let mut goto = None;
+        egui::ScrollArea::vertical()
+            .id_salt("dbg_scan_hits")
+            .max_height(100.0)
+            .show(ui, |ui| {
+                for h in state.scan_hits.iter().take(64) {
+                    if ui
+                        .link(format!(
+                            "{:#x} {} {:?}",
+                            h.va,
+                            h.module.as_deref().unwrap_or("?"),
+                            h.preview_hex.as_deref().unwrap_or("")
+                        ))
+                        .clicked()
+                    {
+                        goto = Some(h.va);
+                    }
+                }
+            });
+        if let Some(va) = goto {
+            state.mem_bytes_va_input = format!("{va:#x}");
+            state.active_tab = DebuggerPane::MemoryBytes;
+        }
+    }
     ui.separator();
     if state.watches.is_empty() {
         ui.weak("No watches.");
@@ -1283,16 +1671,39 @@ fn render_watches(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
     }
     let mut delete: Option<usize> = None;
     egui::Grid::new("dbg_watch_grid")
-        .num_columns(3)
+        .num_columns(4)
         .striped(true)
         .show(ui, |ui| {
             ui.strong("Expression");
+            ui.strong("VA");
             ui.strong("Value");
             ui.strong("");
             ui.end_row();
             for (i, w) in state.watches.iter().enumerate() {
                 ui.monospace(w);
-                ui.small(RichText::new("<no target>").color(muted));
+                let res = state.watch_results.get(i);
+                if let Some(r) = res {
+                    ui.monospace(
+                        r.final_va
+                            .map(|v| format!("{v:#x}"))
+                            .unwrap_or_else(|| "—".into()),
+                    );
+                    let val = r
+                        .error
+                        .clone()
+                        .or_else(|| r.as_u64.map(|u| format!("{u:#x}")))
+                        .or_else(|| r.value_hex.clone())
+                        .unwrap_or_else(|| "—".into());
+                    let t = if r.heuristic {
+                        format!("{val} (heuristic)")
+                    } else {
+                        val
+                    };
+                    ui.small(t);
+                } else {
+                    ui.small("—");
+                    ui.small(RichText::new("Refresh").color(muted));
+                }
                 if ui.small_button("Delete").clicked() {
                     delete = Some(i);
                 }
@@ -1301,7 +1712,216 @@ fn render_watches(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         });
     if let Some(i) = delete {
         state.remove_watch(i);
+        state.refresh_watches();
     }
+}
+
+fn render_threads(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target.");
+        return;
+    };
+    if sess.mode != SessionMode::Debug {
+        ui.weak("Threads pane uses process_threads (debug mode).");
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.small(RichText::new("process_threads").color(muted));
+        if ui.button("Refresh").clicked() {
+            state.refresh_debug_views();
+        }
+    });
+    if state.threads_cache.is_empty() {
+        ui.weak("No threads — Refresh or wait for a stop.");
+        return;
+    }
+    egui::Grid::new("dbg_threads_grid")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong("TID");
+            ui.strong("Active");
+            ui.end_row();
+            for t in state.threads_cache.clone() {
+                let selected = state.active_thread_id == Some(t.thread_id);
+                if ui.selectable_label(selected, format!("{}", t.thread_id)).clicked() {
+                    state.active_thread_id = Some(t.thread_id);
+                    state.refresh_debug_views();
+                }
+                ui.label(if selected { "●" } else { "" });
+                ui.end_row();
+            }
+        });
+}
+
+fn render_registers(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target.");
+        return;
+    };
+    if sess.mode != SessionMode::Debug {
+        ui.weak("Registers require mode=debug (process_thread_context_get).");
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.small(
+            RichText::new(format!(
+                "tid={}",
+                state
+                    .active_thread_id
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "—".into())
+            ))
+            .color(muted),
+        );
+        if ui.button("Refresh").clicked() {
+            state.refresh_debug_views();
+        }
+    });
+    if let Some(stop) = &state.last_stop {
+        ui.small(format!(
+            "last stop: {} rip={:#x}",
+            stop.reason, stop.rip
+        ));
+    }
+    let Some(regs) = state.registers_cache.clone() else {
+        ui.weak("No register cache — stop on a BP or Refresh after selecting a thread.");
+        return;
+    };
+    let pairs = [
+        ("rax", regs.rax),
+        ("rbx", regs.rbx),
+        ("rcx", regs.rcx),
+        ("rdx", regs.rdx),
+        ("rsi", regs.rsi),
+        ("rdi", regs.rdi),
+        ("rbp", regs.rbp),
+        ("rsp", regs.rsp),
+        ("r8", regs.r8),
+        ("r9", regs.r9),
+        ("r10", regs.r10),
+        ("r11", regs.r11),
+        ("r12", regs.r12),
+        ("r13", regs.r13),
+        ("r14", regs.r14),
+        ("r15", regs.r15),
+        ("rip", regs.rip),
+        ("rflags", regs.rflags),
+    ];
+    egui::ScrollArea::vertical()
+        .id_salt("dbg_regs")
+        .show(ui, |ui| {
+            egui::Grid::new("dbg_regs_grid")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Register");
+                    ui.strong("Value");
+                    ui.end_row();
+                    for (n, v) in pairs {
+                        ui.monospace(n);
+                        ui.monospace(format!("{v:#018x}"));
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn render_stack(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    let Some(sess) = state.session.clone() else {
+        ui.weak("No live target.");
+        return;
+    };
+    if sess.mode != SessionMode::Debug {
+        ui.weak("Stack requires mode=debug (process_stack).");
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.small(RichText::new("process_stack · RBP unwind").color(muted));
+        if ui.button("Refresh").clicked() {
+            state.refresh_debug_views();
+        }
+    });
+    if state.stack_cache.is_empty() {
+        ui.weak("No frames — stop on a BP then Refresh.");
+        return;
+    }
+    let mut goto = None;
+    egui::ScrollArea::vertical()
+        .id_salt("dbg_stack")
+        .show(ui, |ui| {
+            egui::Grid::new("dbg_stack_grid")
+                .num_columns(5)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("#");
+                    ui.strong("SP");
+                    ui.strong("PC");
+                    ui.strong("Module");
+                    ui.strong("RVA");
+                    ui.end_row();
+                    for f in &state.stack_cache {
+                        ui.monospace(format!("{}", f.level));
+                        ui.monospace(format!("{:#x}", f.sp));
+                        if ui.link(format!("{:#x}", f.rip)).clicked() {
+                            goto = Some(f.rip);
+                        }
+                        ui.small(f.module.as_deref().unwrap_or("—"));
+                        ui.monospace(
+                            f.rva
+                                .map(|r| format!("{r:#x}"))
+                                .unwrap_or_else(|| "—".into()),
+                        );
+                        ui.end_row();
+                    }
+                });
+        });
+    if let Some(va) = goto {
+        state.mem_bytes_va_input = format!("{va:#x}");
+        state.active_tab = DebuggerPane::MemoryBytes;
+    }
+}
+
+fn render_console(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
+    ui.horizontal(|ui| {
+        ui.small(RichText::new("Session events / stop reasons").color(muted));
+        if ui.button("Clear log").clicked() {
+            state.console_log.clear();
+        }
+        if ui
+            .add_enabled(state.session.is_some(), egui::Button::new("Export snapshot"))
+            .on_hover_text("process_export_snapshot")
+            .clicked()
+        {
+            if let Some(sess) = state.session.clone() {
+                match process_export_snapshot(&sess.session_id, &state.watches, &[]) {
+                    Ok(snap) => {
+                        if let Ok(j) = serde_json::to_string_pretty(&snap) {
+                            state.log(format!("snapshot ok bytes={}", j.len()));
+                            // Keep a short head in the log for the user.
+                            for line in j.lines().take(12) {
+                                state.log(line.to_string());
+                            }
+                            state.live_error = None;
+                        }
+                    }
+                    Err(e) => state.live_error = Some(e),
+                }
+            }
+        }
+    });
+    ui.separator();
+    egui::ScrollArea::vertical()
+        .id_salt("dbg_console")
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            if state.console_log.is_empty() {
+                ui.weak("No events yet.");
+            }
+            for line in &state.console_log {
+                ui.monospace(line);
+            }
+        });
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
@@ -1329,7 +1949,7 @@ mod tests {
 
     #[test]
     fn debugger_catalog_covers_debugger_windows() {
-        let names: Vec<&'static str> = DebuggerPane::ALL.iter().map(|p| p.title).collect();
+        let names: Vec<&'static str> = DebuggerPane::ALL.iter().map(|p| p.title()).collect();
         for expected in [
             "Debugger Targets",
             "Debugger Threads",
@@ -1403,7 +2023,7 @@ mod tests {
             modinfo("game.exe", 0x140000000, 0x10000, Some(r"C:\game\game.exe")),
         ];
         let m = pick_main_module(&mods, Some("game.exe")).unwrap();
-        assert_eq!(m.name(), "game.exe");
+        assert_eq!(m.name, "game.exe");
         assert_eq!(m.base, 0x140000000);
     }
 
@@ -1414,7 +2034,7 @@ mod tests {
             modinfo("b.dll", 0x2000, 0x100, Some(r"C:\b.dll")),
         ];
         let m = pick_main_module(&mods, Some("missing.exe")).unwrap();
-        assert_eq!(m.name(), "b.dll");
+        assert_eq!(m.name, "b.dll");
     }
 
     #[test]
@@ -1456,7 +2076,7 @@ mod tests {
         let mut s = DebuggerState::default();
         s.modules_cache = vec![modinfo("game.exe", 0x140000000, 0x1000, None)];
         let m = s.module_for_va(0x140000100).unwrap();
-        assert_eq!(m.name(), "game.exe");
+        assert_eq!(m.name, "game.exe");
         assert!(s.module_for_va(0x150000000).is_none());
     }
 
@@ -1536,10 +2156,12 @@ mod tests {
     fn simulated_post_attach_focus_modules() {
         // Mimic refresh_after_attach's final focus without calling Win32.
         let mut s = DebuggerState::default();
-        s.session = Some(ProcessSession {
-            session_id: "ps-test".into(),
-            pid: 1,
-        });
+        s.session = Some(ProcessSession::new(
+            "ps-test".into(),
+            1,
+            ghidrust_core::SessionMode::Observe,
+            ghidrust_core::RunState::Attached,
+        ));
         s.process_display_name = Some("game.exe".into());
         s.modules_cache = vec![modinfo(
             "game.exe",

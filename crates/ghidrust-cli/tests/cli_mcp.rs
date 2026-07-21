@@ -358,6 +358,10 @@ fn mcp_server_info_and_live_tools() {
         || s.contains("\"tool_surface\":4")
         || s.contains("\"toolSurface\":5")
         || s.contains("\"tool_surface\": 5")
-        || s.contains("\"tool_surface\":5");
+        || s.contains("\"tool_surface\":5")
+        || s.contains("\"tool_surface\": 6")
+        || s.contains("\"tool_surface\":6")
+        || s.contains("\"tool_surface\": 7")
+        || s.contains("\"tool_surface\":7");
     assert!(surface_ok, "expected tool_surface >= 3 in {s}");
 }

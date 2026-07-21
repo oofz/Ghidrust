@@ -2,10 +2,14 @@
 
 use ghidrust_core::{
     artifact_get, artifact_query, envelope_or_spill, inventory_pe_dir, list_artifacts, list_tree,
-    load_path, process_attach, process_detach, process_launch, process_list, process_modules,
-    process_read, process_regions, process_resolve, process_resume, resolve_function,
-    resolve_result_json, rtti_query, section_notes_for, spill_artifact, write_json_no_bom,
-    LaunchRequest, Project, RttiMatchMode, TreeListOpts, DEFAULT_PREVIEW_LIMIT,
+    load_path, process_attach_opts, process_break_clear, process_break_list, process_break_set,
+    process_continue, process_detach, process_export_snapshot, process_launch, process_list,
+    process_modules, process_pause, process_read, process_regions, process_resolve, process_resume,
+    process_scan_mem, process_stack, process_step_into, process_step_over,
+    process_thread_context_get, process_threads, process_vtable_probe, process_wait,
+    process_watch_expr, resolve_function, resolve_result_json, rtti_query, section_notes_for,
+    spill_artifact, write_json_no_bom, AttachOpts, BreakKind, LaunchRequest, Project,
+    RttiMatchMode, ScanOpts, SessionMode, TreeListOpts, DEFAULT_PREVIEW_LIMIT,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -356,7 +360,7 @@ pub fn cmd_tree(args: &[String], json: bool) -> ExitCode {
 pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
     if args.is_empty() {
         eprintln!(
- "usage: ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions … [-json]"
+ "usage: ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions|break|continue|pause|wait|step|threads|regs|stack|scan|watch|vtable|snapshot … [-json]"
         );
         return ExitCode::from(2);
     }
@@ -386,11 +390,22 @@ pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
             let pid: u32 = match args.get(1).and_then(|s| s.parse().ok()) {
                 Some(p) => p,
                 None => {
-                    eprintln!("usage: ghidrust process attach <pid>");
+                    eprintln!("usage: ghidrust process attach <pid> [-mode observe|debug]");
                     return ExitCode::from(2);
                 }
             };
-            match process_attach(pid) {
+            let mut mode = SessionMode::Observe;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-mode" if i + 1 < args.len() => {
+                        mode = args[i + 1].parse().unwrap_or(SessionMode::Observe);
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            match process_attach_opts(pid, &AttachOpts { mode }) {
                 Ok(s) => {
                     println!("{}", serde_json::to_string_pretty(&s).unwrap());
                     ExitCode::SUCCESS
@@ -406,13 +421,15 @@ pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
                 Some(p) => PathBuf::from(p),
                 None => {
                     eprintln!(
- "usage: ghidrust process launch <image.exe> [-args \"…\"] [-cwd DIR] [-json]"
+ "usage: ghidrust process launch <image.exe> [-args \"…\"] [-cwd DIR] [-mode observe|debug] [-break-at-entry] [-json]"
                     );
                     return ExitCode::from(2);
                 }
             };
             let mut launch_args: Option<String> = None;
             let mut cwd: Option<PathBuf> = None;
+            let mut mode = SessionMode::Observe;
+            let mut break_at_entry = false;
             let mut i = 2;
             while i < args.len() {
                 match args[i].as_str() {
@@ -424,6 +441,14 @@ pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
                         cwd = Some(PathBuf::from(&args[i + 1]));
                         i += 2;
                     }
+                    "-mode" if i + 1 < args.len() => {
+                        mode = args[i + 1].parse().unwrap_or(SessionMode::Observe);
+                        i += 2;
+                    }
+                    "-break-at-entry" => {
+                        break_at_entry = true;
+                        i += 1;
+                    }
                     "-json" => i += 1,
                     _ => i += 1,
                 }
@@ -432,6 +457,8 @@ pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
                 image,
                 args: launch_args,
                 cwd,
+                mode,
+                break_at_entry,
             }) {
                 Ok(r) => {
                     println!("{}", serde_json::to_string_pretty(&r).unwrap());
@@ -597,6 +624,299 @@ pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
                 }
             }
             match process_regions(sid, max) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "break" => {
+            // break set|clear|list
+            match args.get(1).map(|s| s.as_str()) {
+                Some("set") => {
+                    let sid = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                    let mut addr = None;
+                    let mut oneshot = false;
+                    let mut i = 3;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "-addr" if i + 1 < args.len() => {
+                                addr = parse_u64(&args[i + 1]).ok();
+                                i += 2;
+                            }
+                            "-oneshot" => {
+                                oneshot = true;
+                                i += 1;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    let Some(va) = addr else {
+                        eprintln!("usage: process break set <sid> -addr HEX [-oneshot]");
+                        return ExitCode::from(2);
+                    };
+                    match process_break_set(sid, va, BreakKind::Software, oneshot) {
+                        Ok(r) => {
+                            println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Some("clear") => {
+                    let sid = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                    let mut id = None;
+                    let mut addr = None;
+                    let mut i = 3;
+                    while i < args.len() {
+                        match args[i].as_str() {
+                            "-id" if i + 1 < args.len() => {
+                                id = args[i + 1].parse().ok();
+                                i += 2;
+                            }
+                            "-addr" if i + 1 < args.len() => {
+                                addr = parse_u64(&args[i + 1]).ok();
+                                i += 2;
+                            }
+                            _ => i += 1,
+                        }
+                    }
+                    match process_break_clear(sid, id, addr) {
+                        Ok(()) => {
+                            println!("{{\"ok\":true}}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                Some("list") => {
+                    let sid = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                    match process_break_list(sid) {
+                        Ok(r) => {
+                            println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            ExitCode::FAILURE
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("usage: process break set|clear|list …");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        "continue" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match process_continue(sid) {
+                Ok(()) => {
+                    println!("{{\"ok\":true}}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "pause" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match process_pause(sid) {
+                Ok(()) => {
+                    println!("{{\"ok\":true}}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "wait" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let mut timeout = 5000u64;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "-timeout" && i + 1 < args.len() {
+                    timeout = args[i + 1].parse().unwrap_or(5000);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            match process_wait(sid, timeout) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "step" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let over = args.iter().any(|a| a == "-over");
+            let r = if over {
+                process_step_over(sid, None)
+            } else {
+                process_step_into(sid, None)
+            };
+            match r {
+                Ok(()) => {
+                    println!("{{\"ok\":true}}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "threads" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match process_threads(sid) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "regs" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let tid: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if tid == 0 {
+                eprintln!("usage: process regs <sid> <tid>");
+                return ExitCode::from(2);
+            }
+            match process_thread_context_get(sid, tid) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "stack" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let tid: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+            if tid == 0 {
+                eprintln!("usage: process stack <sid> <tid>");
+                return ExitCode::from(2);
+            }
+            match process_stack(sid, tid, 32) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "scan" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let mut aob = None;
+            let mut string = None;
+            let mut i = 2;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "-aob" if i + 1 < args.len() => {
+                        aob = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    "-string" if i + 1 < args.len() => {
+                        string = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let opts = ScanOpts {
+                aob,
+                string,
+                ..ScanOpts::default()
+            };
+            match process_scan_mem(sid, &opts) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "watch" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let expr = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            if expr.is_empty() {
+                eprintln!("usage: process watch <sid> <expr>");
+                return ExitCode::from(2);
+            }
+            match process_watch_expr(sid, expr, false) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "vtable" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let mut addr = None;
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "-addr" && i + 1 < args.len() {
+                    addr = parse_u64(&args[i + 1]).ok();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            let Some(va) = addr else {
+                eprintln!("usage: process vtable <sid> -addr HEX");
+                return ExitCode::from(2);
+            };
+            match process_vtable_probe(sid, va, 32) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r).unwrap());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "snapshot" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match process_export_snapshot(sid, &[], &[]) {
                 Ok(r) => {
                     println!("{}", serde_json::to_string_pretty(&r).unwrap());
                     ExitCode::SUCCESS
