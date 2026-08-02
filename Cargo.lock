@@ -1429,6 +1429,7 @@ dependencies = [
  "ghidrust-decomp",
  "ghidrust-il2cpp",
  "ghidrust-types",
+ "image",
  "libc",
  "rfd",
  "serde",

@@ -2,6 +2,7 @@
 //! Icons: Google Material 3 geometry (see `icons.rs`); no emoji in the UI.
 
 mod agent_pane;
+mod branding;
 mod debugger;
 mod decomp_tokens;
 mod decrypt_ui;
@@ -192,7 +193,8 @@ fn main() -> eframe::Result<()> {
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_title(&title),
+            .with_title(&title)
+            .with_icon(branding::window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -316,6 +318,8 @@ pub struct GhidrustApp {
     /// First-run: pick/open a project before the empty shell.
     show_startup_picker: bool,
     recent_projects: Vec<String>,
+    /// Splash / startup mark under the Ghidrust heading.
+    logo_texture: Option<egui::TextureHandle>,
     nyi_note: Option<String>,
     // ── selection / search / navigation. ──────
     listing_selection: ListingSelection,
@@ -769,6 +773,7 @@ impl GhidrustApp {
         let mut app = Self::headless();
         app.recent_projects = load_recent_projects();
         app.show_startup_picker = true;
+        app.logo_texture = branding::load_logo_texture(&cc.egui_ctx);
         app.status = "Select a project to begin".into();
         app.apply_theme(&cc.egui_ctx);
         app
@@ -820,6 +825,7 @@ impl GhidrustApp {
             fn_filter: String::new(),
             show_startup_picker: false,
             recent_projects: Vec::new(),
+            logo_texture: None,
             nyi_note: None,
             listing_selection: ListingSelection::default(),
             undo_stack: Vec::new(),
@@ -3488,6 +3494,16 @@ impl GhidrustApp {
             ui.vertical_centered(|ui| {
                 ui.add_space(32.0);
                 ui.heading(egui::RichText::new("Ghidrust").size(26.0).color(primary));
+                if let Some(tex) = self.logo_texture.as_ref() {
+                    ui.add_space(10.0);
+                    let logo_h = 112.0_f32;
+                    let size = tex.size_vec2();
+                    let logo_w = (logo_h * size.x / size.y).clamp(64.0, 160.0);
+                    ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(logo_w, logo_h)));
+                    ui.add_space(8.0);
+                } else {
+                    ui.add_space(8.0);
+                }
                 ui.label(
                     egui::RichText::new("Open a project to reverse engineer")
                         .color(muted)

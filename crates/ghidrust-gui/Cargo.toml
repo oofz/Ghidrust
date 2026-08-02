@@ -25,6 +25,8 @@ ghidrust-il2cpp = { workspace = true }
 ghidrust-agent = { workspace = true }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
+# Decode bundled splash / window logo (`assets/ghidrust.png`).
+image = { version = "0.25", default-features = false, features = ["png"] }
 # Pin: egui 0.31 ↔ egui_dock 0.16 (do not bump egui just for newer egui_dock).
 egui_dock = { version = "0.16", features = ["serde"] }
 rfd = "0.15"
