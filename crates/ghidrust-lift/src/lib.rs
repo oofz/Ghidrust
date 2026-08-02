@@ -1765,13 +1765,7 @@ mod tests {
         // decode may not support c1 in current tables — if empty, skip: the test then
         // verifies lift_shift directly via a synthetic instruction.
         let insn = if insns.is_empty() {
-            Instruction {
-                address: 0x7000,
-                bytes: vec![0xc1, 0xe0, 0x03],
-                mnemonic: "shl".into(),
-                operands: "eax, 0x3".into(),
-                length: 3,
-            }
+            Instruction::with_text(0x7000, vec![0xc1, 0xe0, 0x03], "shl", "eax, 0x3", 3)
         } else {
             insns[0].clone()
         };
@@ -1781,13 +1775,7 @@ mod tests {
 
     #[test]
     fn lift_jcc_and_pop() {
-        let je = Instruction {
-            address: 0x2000,
-            bytes: vec![0x74, 0x00],
-            mnemonic: "je".into(),
-            operands: "0x2010".into(),
-            length: 2,
-        };
+        let je = Instruction::with_text(0x2000, vec![0x74, 0x00], "je", "0x2010", 2);
         let pop = decode_one(&[0x58], 0x2002).unwrap();
         let mut seq = IrSequence::new();
         let mut ctx = LiftCtx::default();
@@ -1804,13 +1792,7 @@ mod tests {
 
     #[test]
     fn unhandled_becomes_unimplemented_and_coverage_reflects() {
-        let insn = Instruction {
-            address: 0,
-            bytes: vec![0xff],
-            mnemonic: "wibble".into(),
-            operands: String::new(),
-            length: 1,
-        };
+        let insn = Instruction::with_text(0, vec![0xff], "wibble", "", 1);
         let ops = lift_instruction(&insn);
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].opcode, OpCode::Unimplemented);

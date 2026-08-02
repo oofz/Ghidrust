@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace libraries
+        run: cargo test --workspace --exclude ghidrust-gui --lib
+
+      - name: Build CLI release
+        run: cargo build --release -p ghidrust-cli
+
+  windows:
+    name: Test + build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test workspace libraries
+        run: cargo test --workspace --lib
+
+      - name: Integration smoke (crypto fixtures)
+        run: cargo test -p ghidrust-cli --test eval_crypto_fixtures
+
+      - name: Build release binaries
+        run: cargo build --release -p ghidrust-cli -p ghidrust-gui

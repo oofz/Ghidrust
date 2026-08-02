@@ -1041,13 +1041,7 @@ mod tests {
         // hand-building the instruction sequence, then wrap in a Stage-0
         // decomp. We call emit_stage1 through the front door.
         use ghidrust_decode::Instruction;
-        let mnem = |m: &str, o: &str, l: u8| Instruction {
-            address: 0,
-            bytes: vec![0; l as usize],
-            mnemonic: m.into(),
-            operands: o.into(),
-            length: l,
-        };
+        let mnem = |m: &str, o: &str, l: u8| Instruction::with_text(0, vec![0; l as usize], m, o, l);
         // jmp 0x2; test eax,eax; je 0x8; jmp 0x2; ret
         let mut insns = vec![
             mnem("jmp", "0x2", 2),
@@ -1100,12 +1094,8 @@ mod tests {
         // cases land at four different `ret` blocks. The lifter only turns
         // this into a BranchInd + Returns; the hint tells the structurer
         // which case targets correspond to which selector.
-        let mnem = |addr, m: &str, o: &str, l: u8| Instruction {
-            address: addr,
-            bytes: vec![0; l as usize],
-            mnemonic: m.into(),
-            operands: o.into(),
-            length: l,
+        let mnem = |addr, m: &str, o: &str, l: u8| {
+            Instruction::with_text(addr, vec![0; l as usize], m, o, l)
         };
         // 0x0: jmp rax
         // 0x2: ret     (case 0)
@@ -1257,13 +1247,7 @@ mod tests {
         use ghidrust_decode::Instruction;
         // `hlt` now lifts to a `Trap` op — Stage-1 preserves that as a
         // trap comment so the output stays honest without fabricating C.
-        let insn = Instruction {
-            address: 0x4000,
-            bytes: vec![0xf4],
-            mnemonic: "hlt".into(),
-            operands: String::new(),
-            length: 1,
-        };
+        let insn = Instruction::with_text(0x4000, vec![0xf4], "hlt", "", 1);
         let d = decompile_instructions("halted", 0x4000, &[insn.clone()]);
         let rep = emit_stage1(&d.name, d.entry, &d.blocks, &[insn], CallConv::SystemV);
         assert!(
@@ -1275,13 +1259,7 @@ mod tests {
 
         // A genuinely-unlifted mnemonic still surfaces via
         // `OpCode::Unimplemented` so we never invent C.
-        let unknown = Instruction {
-            address: 0x4010,
-            bytes: vec![0xff, 0xff],
-            mnemonic: "wibble".into(),
-            operands: String::new(),
-            length: 2,
-        };
+        let unknown = Instruction::with_text(0x4010, vec![0xff, 0xff], "wibble", "", 2);
         let d2 = decompile_instructions("wibbler", 0x4010, &[unknown.clone()]);
         let rep2 = emit_stage1(
             &d2.name,
@@ -1303,20 +1281,14 @@ mod tests {
         use ghidrust_decode::Instruction;
         use std::collections::BTreeMap;
         // call 0x401000 — named via EmitHints
-        let call = Instruction {
-            address: 0x1000,
-            bytes: vec![0xe8, 0x00, 0x00, 0x00, 0x00],
-            mnemonic: "call".into(),
-            operands: "0x401000".into(),
-            length: 5,
-        };
-        let ret = Instruction {
-            address: 0x1005,
-            bytes: vec![0xc3],
-            mnemonic: "ret".into(),
-            operands: String::new(),
-            length: 1,
-        };
+        let call = Instruction::with_text(
+            0x1000,
+            vec![0xe8, 0x00, 0x00, 0x00, 0x00],
+            "call",
+            "0x401000",
+            5,
+        );
+        let ret = Instruction::with_text(0x1005, vec![0xc3], "ret", "", 1);
         let d = decompile_instructions("caller", 0x1000, &[call.clone(), ret.clone()]);
         let mut hints = EmitHints::default();
         hints.call_names = BTreeMap::from([(0x401000u64, "CreateFileW".into())]);

@@ -903,6 +903,7 @@ pub fn process_export_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn launch_command_line_quotes_paths_with_spaces() {

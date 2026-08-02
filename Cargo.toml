@@ -21,7 +21,7 @@ default-members = ["crates/ghidrust-cli"]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/example/ghidrust"
+repository = "https://github.com/oofz/Ghidrust"
 
 [workspace.dependencies]
 ghidrust-ir = { path = "crates/ghidrust-ir" }

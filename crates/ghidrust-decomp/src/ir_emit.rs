@@ -454,13 +454,7 @@ mod tests {
         // `hlt` is a lifted `Trap` op — Stage-0.5 emits an honest trap
         // comment rather than fabricating a C statement. A truly unlifted
         // opcode falls back to Stage-0 scaffolding (`/* mnemonic operands */;`).
-        let insn = Instruction {
-            address: 0x3000,
-            bytes: vec![0xf4],
-            mnemonic: "hlt".into(),
-            operands: String::new(),
-            length: 1,
-        };
+        let insn = Instruction::with_text(0x3000, vec![0xf4], "hlt", "", 1);
         let d = decompile_instructions("halted", 0x3000, &[insn.clone()]);
         let seq = lift_instructions(&[insn]);
         let text = emit_ir_pseudo_c(&d.name, d.entry, &d.blocks, &seq);
@@ -471,13 +465,7 @@ mod tests {
 
         // A truly unhandled mnemonic (never lifted, never decoded) still
         // survives via the Stage-0 fallback branch of emit_ir_pseudo_c.
-        let unknown = Instruction {
-            address: 0x3010,
-            bytes: vec![0xff, 0xff],
-            mnemonic: "wibble".into(),
-            operands: "42".into(),
-            length: 2,
-        };
+        let unknown = Instruction::with_text(0x3010, vec![0xff, 0xff], "wibble", "42", 2);
         let d2 = decompile_instructions("wibbler", 0x3010, &[unknown.clone()]);
         let seq2 = lift_instructions(&[unknown]);
         let text2 = emit_ir_pseudo_c(&d2.name, d2.entry, &d2.blocks, &seq2);

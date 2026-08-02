@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Resolve release version
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test workspace libraries
+        run: cargo test --workspace --lib
+
+      - name: Integration smoke (crypto fixtures)
+        run: cargo test -p ghidrust-cli --test eval_crypto_fixtures
+
+      - name: Build release binaries
+        run: cargo build --release -p ghidrust-cli -p ghidrust-gui
+
+      - name: Package Windows zip
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $ver = $tag -replace '^v',''
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item target/release/ghidrust.exe release/
+          Copy-Item target/release/ghidrust-gui.exe release/
+          Compress-Archive -Path release/* -DestinationPath "ghidrust-$ver-windows-x64.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ghidrust-windows-x64
+          path: ghidrust-*-windows-x64.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Ghidrust ${{ steps.meta.outputs.tag }}
+          files: artifacts/**/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false

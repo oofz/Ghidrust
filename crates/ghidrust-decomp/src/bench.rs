@@ -374,13 +374,7 @@ mod tests {
     use ghidrust_core::{fixture_path, load_path, Instruction};
 
     fn insn(addr: u64, mnem: &str, ops: &str, len: u8) -> Instruction {
-        Instruction {
-            address: addr,
-            bytes: vec![0; len as usize],
-            mnemonic: mnem.into(),
-            operands: ops.into(),
-            length: len,
-        }
+        Instruction::with_text(addr, vec![0; len as usize], mnem, ops, len)
     }
 
     #[test]
