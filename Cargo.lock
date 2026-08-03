@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-agent"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-agent",
  "ghidrust-core",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -1402,14 +1402,14 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-decode"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ghidrust-decomp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "ghidrust-core",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "eframe",
  "egui",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-il2cpp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-core",
  "serde",
@@ -1467,14 +1467,14 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-ir"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ghidrust-lift"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-decode",
  "ghidrust-ir",
@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-attr"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-net-schema",
  "serde",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-net-attr",
  "ghidrust-net-flow",
@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-correlate"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-core",
  "ghidrust-net-schema",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-detect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-net-flow",
  "ghidrust-net-rules",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-flow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-net-schema",
  "serde",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-parse"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-net-schema",
  "serde",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-rules"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-net-schema",
  "serde",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-net-schema"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-ssa"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-decode",
  "ghidrust-ir",
@@ -1568,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-structure"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-decode",
  "ghidrust-ir",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-decode",
  "ghidrust-ir",
@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "ghidrust-unity-inventory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ghidrust-core",
  "ghidrust-il2cpp",
