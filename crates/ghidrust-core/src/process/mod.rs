@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+#[cfg_attr(not(windows), allow(dead_code))]
 struct Attached {
     pid: u32,
     mode: SessionMode,
@@ -63,6 +64,7 @@ where
     f(guard.as_mut().unwrap())
 }
 
+#[cfg(windows)]
 fn now_token() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -70,6 +72,7 @@ fn now_token() -> u64 {
         .unwrap_or(0)
 }
 
+#[cfg(windows)]
 fn session_report(a: &Attached, session_id: &str) -> ProcessSession {
     let mut s = ProcessSession::new(session_id.to_string(), a.pid, a.mode, a.run_state);
     s.advisory = a.advisory.clone();

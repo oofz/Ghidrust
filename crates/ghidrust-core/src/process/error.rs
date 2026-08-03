@@ -112,6 +112,7 @@ impl From<ProcessError> for String {
 }
 
 /// Map common Win32 last-error patterns into structured codes.
+#[cfg(windows)]
 pub fn map_win32_message(err: u32, context: &str) -> ProcessError {
     // ERROR_ACCESS_DENIED = 5, ERROR_INVALID_PARAMETER = 87
     match err {

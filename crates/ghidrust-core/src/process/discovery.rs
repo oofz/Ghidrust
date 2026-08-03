@@ -388,6 +388,7 @@ pub fn eval_watch_expr(
     })
 }
 
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn parse_offset_token(tok: &str) -> Result<u64, ProcessError> {
     let t = tok.trim().trim_start_matches('+');
     if let Some(rest) = t.strip_prefix("*+") {
@@ -444,6 +445,7 @@ fn resolve_token(tok: &str, mods: &[ModuleInfo], _base: Option<u64>) -> Result<u
     parse_u64_flexible(tok)
 }
 
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
 fn parse_u64_flexible(s: &str) -> Result<u64, ProcessError> {
     let s = s.trim().trim_start_matches('+');
     let (s, radix) = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
