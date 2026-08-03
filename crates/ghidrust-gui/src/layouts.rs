@@ -7,7 +7,7 @@
 //! `%APPDATA%/ghidrust/layouts/<name>.tool.json`
 //! - the center `egui_dock` tree (`dock_tree`) plus a legacy `center`
 //! shim string for older layouts
-//! - a read-only Configure dialog listing every compile-time plugin
+//! - Configure dialog data: Appearance theme ids + read-only plugin catalog
 //!
 //! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
@@ -34,10 +34,17 @@ pub struct SavedLayout {
     /// layouts saved before center docking landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dock_tree: Option<serde_json::Value>,
-    /// Theme (`dark` / `light`).
+    /// Theme mode (`dark` / `light`). For Future Console: neon / amber gas.
     pub theme: String,
+    /// Appearance family (`classic_ghidrust` / `modern` / `future_console`).
+    #[serde(default = "default_appearance")]
+    pub appearance: String,
     /// Free-form comment shown in Configure dialog.
     pub comment: String,
+}
+
+fn default_appearance() -> String {
+    "classic_ghidrust".into()
 }
 
 /// Directory holding user-saved `<name>.tool.json` files.
@@ -227,8 +234,8 @@ pub const PLUGIN_CATALOG: &[PluginRow] = &[
     PluginRow {
         name: "InterpreterPanelPlugin",
         kind: "Scripting",
-        state: "Included · REPL stub",
-        description: "MCP REPL — wires into `ghidrust mcp` stdio host in P17.",
+        state: "Included · live",
+        description: "MCP REPL — stdio host to `ghidrust mcp` (non-network tools).",
     },
     PluginRow {
         name: "DebuggerTargetsPlugin",
@@ -239,8 +246,8 @@ pub const PLUGIN_CATALOG: &[PluginRow] = &[
     PluginRow {
         name: "DebuggerThreadsPlugin",
         kind: "Debugger",
-        state: "Included · stub",
-        description: "Tabbed Debugger · Threads — live backend not yet wired.",
+        state: "Included · live",
+        description: "Tabbed Debugger · Threads — process_threads when attached in debug mode.",
     },
     PluginRow {
         name: "DebuggerModulesPlugin",
@@ -257,20 +264,20 @@ pub const PLUGIN_CATALOG: &[PluginRow] = &[
     PluginRow {
         name: "DebuggerRegistersPlugin",
         kind: "Debugger",
-        state: "Included · stub",
-        description: "Tabbed Debugger · Registers — live backend not yet wired.",
+        state: "Included · live",
+        description: "Tabbed Debugger · Registers — process_thread_context_get/set when attached.",
     },
     PluginRow {
         name: "DebuggerStackPlugin",
         kind: "Debugger",
-        state: "Included · stub",
-        description: "Tabbed Debugger · Stack — live backend not yet wired.",
+        state: "Included · live",
+        description: "Tabbed Debugger · Stack — process_stack when attached in debug mode.",
     },
     PluginRow {
         name: "DebuggerBreakpointsPlugin",
         kind: "Debugger",
-        state: "Included · session",
-        description: "Tabbed Debugger · Breakpoints — session-only list; agent-set pending.",
+        state: "Included · live",
+        description: "Tabbed Debugger · Breakpoints — process_break_set/clear/list in debug mode.",
     },
     PluginRow {
         name: "DebuggerMemoryBytesPlugin",
@@ -281,14 +288,32 @@ pub const PLUGIN_CATALOG: &[PluginRow] = &[
     PluginRow {
         name: "DebuggerWatchesPlugin",
         kind: "Debugger",
-        state: "Included · session",
-        description: "Tabbed Debugger · Watches — session-only list; evaluator pending.",
+        state: "Included · live",
+        description: "Tabbed Debugger · Watches — process_watch_expr + scan when attached.",
     },
     PluginRow {
         name: "DebuggerConsolePlugin",
         kind: "Debugger",
-        state: "Included · stub",
-        description: "Tabbed Debugger · Console — target-agent stdio pending.",
+        state: "Included · live",
+        description: "Tabbed Debugger · Console — session event log + command entry.",
+    },
+    PluginRow {
+        name: "NetworkConnectionsPlugin",
+        kind: "Network",
+        state: "Included · host tab",
+        description: "Network host · Connections — process/peer/state/confidence; Dig CTA (Window/Network menu).",
+    },
+    PluginRow {
+        name: "NetworkCapturePlugin",
+        kind: "Network",
+        state: "Included · host tab",
+        description: "Network host · Capture — iface/filter/start-stop; Flows; Detect/Pivots (in-process session).",
+    },
+    PluginRow {
+        name: "NetworkAlertsPlugin",
+        kind: "Network",
+        state: "Included · host tab",
+        description: "Network host · Alerts — GNR severity queue with Dig closed-loop CTA.",
     },
 ];
 
@@ -305,6 +330,7 @@ mod tests {
             center: "listing".into(),
             dock_tree: None,
             theme: "dark".into(),
+            appearance: "classic_ghidrust".into(),
             comment: String::new(),
         };
         let text = serde_json::to_string(&l).unwrap();
@@ -325,6 +351,7 @@ mod tests {
         let back: SavedLayout = serde_json::from_str(text).unwrap();
         assert_eq!(back.center, "decompiler");
         assert!(back.dock_tree.is_none());
+        assert_eq!(back.appearance, "classic_ghidrust");
     }
 
     #[test]
@@ -335,7 +362,7 @@ mod tests {
 
     #[test]
     fn plugin_catalog_covers_graph_debugger_configure_providers() {
-        let names: Vec<&'static str> = PLUGIN_CATALOG.iter().map(|p| p.name()).collect();
+        let names: Vec<&'static str> = PLUGIN_CATALOG.iter().map(|p| p.name).collect();
         for expected in [
             "FunctionGraphPlugin",
             "FunctionCallGraphPlugin",
@@ -349,6 +376,9 @@ mod tests {
             "InterpreterPanelPlugin",
             "DebuggerTargetsPlugin",
             "DebuggerBreakpointsPlugin",
+            "NetworkConnectionsPlugin",
+            "NetworkCapturePlugin",
+            "NetworkAlertsPlugin",
         ] {
             assert!(names.contains(&expected), "missing plugin {expected}");
         }

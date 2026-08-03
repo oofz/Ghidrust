@@ -1,0 +1,10 @@
+[package]
+name = "ghidrust-net-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned network investigation value objects (hints, dig plans, alerts, flows)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

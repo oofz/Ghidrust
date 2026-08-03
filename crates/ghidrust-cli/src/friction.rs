@@ -5,7 +5,7 @@ use ghidrust_core::{
     load_path, process_attach_opts, process_break_clear, process_break_list, process_break_set,
     process_continue, process_detach, process_export_snapshot, process_launch, process_list,
     process_modules, process_pause, process_read, process_regions, process_resolve, process_resume,
-    process_scan_mem, process_stack, process_step_into, process_step_over,
+    process_scan_mem, process_stack, process_step_into, process_step_out, process_step_over,
     process_thread_context_get, process_threads, process_vtable_probe, process_wait,
     process_watch_expr, resolve_function, resolve_result_json, rtti_query, section_notes_for,
     spill_artifact, write_json_no_bom, AttachOpts, BreakKind, LaunchRequest, Project,
@@ -360,7 +360,7 @@ pub fn cmd_tree(args: &[String], json: bool) -> ExitCode {
 pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
     if args.is_empty() {
         eprintln!(
- "usage: ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions|break|continue|pause|wait|step|threads|regs|stack|scan|watch|vtable|snapshot … [-json]"
+ "usage: ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions|break|continue|pause|wait|step|step-out|threads|regs|stack|scan|watch|vtable|snapshot … [-json]"
         );
         return ExitCode::from(2);
     }
@@ -769,13 +769,29 @@ pub fn cmd_process(args: &[String], json: bool) -> ExitCode {
         }
         "step" => {
             let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            let out = args.iter().any(|a| a == "-out");
             let over = args.iter().any(|a| a == "-over");
-            let r = if over {
+            let r = if out {
+                process_step_out(sid, None)
+            } else if over {
                 process_step_over(sid, None)
             } else {
                 process_step_into(sid, None)
             };
             match r {
+                Ok(()) => {
+                    println!("{{\"ok\":true}}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        "step-out" => {
+            let sid = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match process_step_out(sid, None) {
                 Ok(()) => {
                     println!("{{\"ok\":true}}");
                     ExitCode::SUCCESS

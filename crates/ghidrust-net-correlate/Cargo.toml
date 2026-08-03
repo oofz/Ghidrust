@@ -1,0 +1,15 @@
+[package]
+name = "ghidrust-net-correlate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Network dig playbooks and closed-loop correlation into ghidrust-core"
+
+[dependencies]
+ghidrust-net-schema = { workspace = true }
+ghidrust-core = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"

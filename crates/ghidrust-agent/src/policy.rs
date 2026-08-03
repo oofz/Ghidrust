@@ -79,6 +79,33 @@ pub fn is_destructive_tool(tool_name: &str) -> bool {
     )
 }
 
+/// Tools that observe or acquire live host network state.
+///
+/// Airgap must refuse these. Path-only dig (`net_dig` / `net_playbook` without
+/// capture) is allowed offline and is **not** classified here.
+pub fn is_network_observe_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "net_connections"
+            | "net_owners"
+            | "net_ifaces"
+            | "net_capture_start"
+            | "net_capture_stop"
+            | "net_capture_status"
+            | "net_flows"
+            | "net_detect"
+    )
+}
+
+/// Whether `mode` may dispatch `tool_name` for network observe tools.
+pub fn network_tool_allowed(mode: AgentMode, tool_name: &str) -> bool {
+    if is_network_observe_tool(tool_name) {
+        !matches!(mode, AgentMode::Airgap)
+    } else {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +154,16 @@ mod tests {
         ] {
             assert!(!is_destructive_tool(t), "{t} should be non-destructive");
         }
+    }
+
+    #[test]
+    fn airgap_blocks_network_observe_allows_dig() {
+        assert!(is_network_observe_tool("net_capture_start"));
+        assert!(is_network_observe_tool("net_connections"));
+        assert!(!is_network_observe_tool("net_dig"));
+        assert!(!is_network_observe_tool("net_playbook"));
+        assert!(!network_tool_allowed(AgentMode::Airgap, "net_capture_start"));
+        assert!(network_tool_allowed(AgentMode::ReadOnly, "net_capture_start"));
+        assert!(network_tool_allowed(AgentMode::Airgap, "net_dig"));
     }
 }

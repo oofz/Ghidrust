@@ -213,7 +213,14 @@ pub fn write_project_skill(project_root: &Path, skill_source: &Path) -> io::Resu
         Ok(s) => s,
         Err(_) => EMBEDDED_SKILL_MD.to_string(),
     };
-    write_project_skill_contents(project_root, &skill)
+    let dest = write_project_skill_contents(project_root, &skill)?;
+    // Progressive disclosure: copy Ghidnet companion when present next to SKILL.md.
+    let companion = skill_source.with_file_name("ghidnet.md");
+    if companion.is_file() {
+        let dest_companion = dest.with_file_name("ghidnet.md");
+        let _ = fs::copy(&companion, &dest_companion);
+    }
+    Ok(dest)
 }
 
 /// Write skill from the embedded copy (always succeeds if the project dir is writable).

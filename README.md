@@ -1,10 +1,14 @@
 # Ghidrust
 
-Hand-rolled **Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra).
+**Rust** reverse-engineering toolkit inspired by [Ghidra](https://github.com/NationalSecurityAgency/ghidra).
 
 Ghidrust loads PE/ELF (and raw blobs), produces Capstone-class multi-arch listings (23 ISAs; x86-64 primary analyze/decompile pipeline), runs Auto Analysis, decompiles to pseudo-C, parses IL2CPP metadata / Unity install inventory, and saves durable projects — from a CLI, an MCP server for agents, or an egui CodeBrowser-style GUI.
 
-It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyzers, decompile) is written in-tree so the core stays small, auditable, and freestanding.
+**Ghidnet** (native network plane) attributes host sockets and capture flows to processes/images, runs in-tree GNR detection rules, and digs into the offending binary with the same RE stack.
+
+It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyzers, decompile, Ghidnet) is written in-tree so the core stays small, auditable, and freestanding.
+
+Includes custom GPU kernels to conduct decompiling at lightning speed, this feature is experimental and in development.
 
 ---
 
@@ -16,8 +20,9 @@ It is **not** a Ghidra fork or wrapper. Analysis logic (loaders, decode, analyze
 | **Ghidra-shaped workflow** | Familiar labels and surfaces (Auto Analysis names, project import/analyze/export, listing + click FUN → decompile) without depending on the Ghidra JVM stack |
 | **Custom core** | PE/ELF, Capstone-class multi-arch decode (`ghidrust-decode`), x86-64 RTTI/analyzers, and the IR → SSA → structure → typed-C pipeline implemented in Rust — third-party RE libraries are avoided at runtime; Ghidra sources are reference-only |
 | **CPU-correct first** | CPU paths are the oracle; optional GPU paths must match or enrich them, not replace honesty with speed claims |
-| **Agent-ready** | Headless CLI + stdio MCP with artifact spill/drain, program identity (`path` or `project`+`file_id`), PE install inventory, RTTI catalog query, UTF-16 xref support, function create / bounded disasm / call graphs, IL2CPP touch-map + body proof, live process bridge (Windows), and egui panes for every surface. **2026-07-19:** Windows agent disasm pipeline + bounds honesty (`--brief`/`--pretty`, `bounds_suspect`, `listing_text`) — see [CHANGELOG.md](CHANGELOG.md) |
+| **Agent-ready** | Headless CLI + stdio MCP with artifact spill/drain, program identity (`path` or `project`+`file_id`), PE install inventory, RTTI catalog query, UTF-16 xref support, function create / bounded disasm / call graphs, IL2CPP touch-map + body proof, live process bridge (Windows), **Ghidnet** (`net_*`, `tool_surface` ≥ 8), and egui panes for every surface. **2026-07-19:** Windows agent disasm pipeline + bounds honesty (`--brief`/`--pretty`, `bounds_suspect`, `listing_text`) — see [CHANGELOG.md](CHANGELOG.md) |
 | **Practical projects** | Create a workspace, import binaries, run analyzers, persist results (`analysis.bin`), reopen later |
+| **Ghidnet (native)** | Process-attributed sockets/flows → GNR alerts → dig into image (`load`/`analyze`/`decompile` / live process). In-tree only — see [Ghidnet](#ghidnet-native-network-plane) |
 
 ---
 
@@ -52,8 +57,9 @@ Binaries:
 
 | Binary | Path (after release build) |
 |--------|----------------------------|
-| CLI | `target/release/ghidrust` (`.exe` on Windows) |
+| CLI (+ MCP) | `target/release/ghidrust` (`.exe` on Windows) |
 | GUI | `target/release/ghidrust-gui` |
+| Ghidnet capture helper | `target/release/ghidrust-netcap` |
 
 ```bash
 # CLI only
@@ -61,6 +67,9 @@ cargo build -p ghidrust-cli --release
 
 # GUI only
 cargo build -p ghidrust-gui --release
+
+# Ghidnet capture helper
+cargo build -p ghidrust-net-capture --release --bin ghidrust-netcap
 
 # Explicit GPU decomp + core bulk features
 cargo build -p ghidrust-cli --release --features ghidrust-core/gpu
@@ -194,7 +203,8 @@ First-class commands for the queries agents used to need ad-hoc scripts for. Sam
 | `ghidrust inventory <dir>` | Generic PE install inventory (exe/dll + VERSIONINFO; artifact if large) | `--max-depth`, `--hash`, `--json` |
 | `ghidrust tree <path>` | Bounded file tree index (existence/size; no unpack) | `--max-depth`, `--ext`, `--name`, `--json` |
 | `ghidrust artifact get\|query\|list` | Drain spilled analysis artifacts (`next_offset`) | `--offset`, `--limit`, `--json` |
-| `ghidrust process list\|attach\|launch\|…\|break\|wait\|scan\|watch` | Live Process Bridge (Windows; observe default, `mode=debug` for BP/step; `tool_surface` 7) | session_id / `-mode` / `--args` / `--cwd` / `--addr` / `--module` / `--rva` |
+| `ghidrust process list\|attach\|launch\|…\|break\|wait\|scan\|watch` | Live Process Bridge (Windows; observe default, `mode=debug` for BP/step; `tool_surface` ≥ 7) | session_id / `-mode` / `--args` / `--cwd` / `--addr` / `--module` / `--rva` |
+| `ghidrust net dig\|playbook\|connections\|owners\|ifaces\|capture\|flows\|detect\|alerts\|rules\|pivots` | **Ghidnet** — attribute sockets/flows, GNR detect, dig into image (`tool_surface` ≥ 8) | See [Ghidnet](#ghidnet-native-network-plane) |
 | `ghidrust il2cpp meta\|map\|touch-map\|stubs\|icalls` | IL2CPP metadata + touch-map + method map (body proof / baseline) + stubs + icalls | See [docs/IL2CPP.md](docs/IL2CPP.md) |
 | `ghidrust unity-inventory <dir>` | Unity player layout (reuses PE VERSIONINFO helpers) | `--json`, `--out FILE` |
 | `ghidrust disasm <path>` | Capstone-class listing; bounded by function end by default; `decode_gaps` when `--skip-bad`; JSON `stop_reason` | `--addr HEX`, `--count N` (default 16), `--skip-bad`, `--linear`/`--flow`, `--arch`, `--mode`, `--syntax`, `--detail`/`--no-detail`, `--detail-real`, `--skipdata`, `--skipdata-mnemonic`, `--skipdata-size`, `--unsigned-imm`, `--only-offset-branch`, `--litbase`, `--mnem-override ID:MNEMONIC`, `--out`, `--json` |
@@ -268,7 +278,7 @@ Ghidrust exposes the **same analysis core** three ways. Pick one (or mix them):
 | **GUI** | Interactive CodeBrowser-style work | `ghidrust-gui` |
 | **MCP** | AI agents / IDEs that speak Model Context Protocol | `ghidrust mcp` (stdio) |
 
-Build both binaries first (`cargo build --workspace --release`), then use the sections below.
+Build release binaries first (`cargo build --workspace --release`), then use the sections below.
 
 ---
 
@@ -545,6 +555,11 @@ On Linux/macOS:
 | `gpu_decompile` | `path`, optional `addr`, `out` | GPU decompile at VA; metrics JSON; dump opaque |
 | `rtti_gpu_bench` | `path` | CPU vs GPU RTTI with PCIe/device split |
 | `process_list` / `process_attach` / `process_launch` / … / `process_break_*` / `process_wait` / `process_scan` / `process_watch_expr` | session / pid / mode / image / module / rva / max | Live Process Bridge (Windows; observe default; debug opt-in; `tool_surface` ≥ 7) |
+| `net_dig` / `net_playbook` | hint fields (`path`/`pid`/`host`/`ioc`) or alert/flow refs | Compile or execute dig playbook; closed-loop from alert (`tool_surface` ≥ 8) |
+| `net_connections` / `net_owners` / `net_ifaces` | optional pid / filter | Host sockets → owning image; interface list |
+| `net_capture_start` / `net_capture_stop` / `net_capture_status` / `net_flows` | session / iface / replay path | In-process capture session + attributed flows (MCP/GUI; not CLI one-shot reuse) |
+| `net_detect` / `net_alerts` / `net_rules_list` / `net_rules_load` / `net_rules_check` | pcap/rules path / max | In-tree GNR compile + detect + alert index |
+| `net_pivots` / `net_job_get` | pcap / job id | DNS/TLS/HTTP/SMB pivot fields; dig job status |
 
 #### Live process (Windows)
 
@@ -562,7 +577,7 @@ Default **observe** = read-only (`PROCESS_VM_READ`): `process list` → `attach 
 6. **Watches:** add `module+rva->*+0x10` → **Refresh**; optional AOB **Scan**
 7. **Console → Export snapshot** → **Detach**
 
-Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface`: **minimum `3`** (touch-map / body_class / function_create); **prefer `>= 4`** for bounded disasm / `get_calls_from`; **require `>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags; **`>= 6`** for crypto recover/bake; **`>= 7`** for live debug break/step/scan/watch; **current is `7`**. `server_info.decode` mirrors `decode-support`; `server_info.live_process` lists modes + capabilities.
+Versioning: `ghidrust --version`, MCP `initialize`/`server_info`, and egui Help → About / window title all report the same workspace package version. Agents also check `tool_surface`: **minimum `3`** (touch-map / body_class / function_create); **prefer `>= 4`** for bounded disasm / `get_calls_from`; **require `>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags; **`>= 6`** for crypto recover/bake; **`>= 7`** for live debug break/step/scan/watch; **`>= 8`** for Ghidnet (`net_*`, `server_info.network`); **current is `8`**. `server_info.decode` mirrors `decode-support`; `server_info.live_process` lists modes + capabilities; `server_info.network` describes Ghidnet.
 
 #### Analysis artifacts
 
@@ -579,6 +594,7 @@ Large MCP/CLI dumps spill to `%TEMP%/ghidrust-artifacts/`. Tool envelopes includ
 | GPU decompile | Analysis → **GPU Decompile…** |
 | Encoding / xrefs / RTTI / notes | Defined Strings, Symbol References, Symbol Tree Classes, Memory Map |
 | Live process | **Debugger** (tabbed): Targets / Modules / Memory Bytes / Regions / Breakpoints / Threads / Registers / Stack / Watches (live APIs under mode=debug) |
+| Ghidnet | **Network** tabbed host (Window → Network, or top-level **Network** menu): Connections / Capture / Alerts / Rules / Dig |
 
 IL2CPP version matrix and Unity inventory schema: [docs/IL2CPP.md](docs/IL2CPP.md).
 
@@ -626,6 +642,60 @@ For tools that load skill files (Cursor, Grok, etc.), also install [skill/SKILL.
 ```
 
 You should not need to type JSON by hand day-to-day — the IDE/agent does that once the server is registered.
+
+---
+
+## Ghidnet (native network plane)
+
+Ghidnet is Ghidrust’s in-tree network investigation plane: **attribute → detect → dig**. It does not vendor foreign capture/IDS products. Outcome target is host investigation that pivots into the same `load` / `analyze` / `decompile` / live-process stack — not packet-UI feature parity with desktop sniffers.
+
+### Pipeline
+
+| Stage | What you get | CLI | MCP |
+|-------|--------------|-----|-----|
+| **Attribute** | TCP/UDP sockets → owning PID/image; interface list | `net connections`, `net owners`, `net ifaces` | `net_connections`, `net_owners`, `net_ifaces` |
+| **Capture / flows** | In-process session, `GRNCAP01` files, replay backend, flow table | `net capture …`, `net flows`, `ghidrust-netcap` | `net_capture_*`, `net_flows` |
+| **Detect** | GNR rules → alerts (in-tree MPM) | `net detect`, `net alerts`, `net rules …` | `net_detect`, `net_alerts`, `net_rules_*` |
+| **Pivots** | DNS / TLS SNI / HTTP / SMB fields from frames | `net pivots --pcap FILE` | `net_pivots` |
+| **Dig** | Playbook compile/execute; closed-loop from alert → image RE | `net dig`, `net playbook` | `net_dig`, `net_playbook`, `net_job_get` |
+
+Requires `tool_surface >= 8`. `server_info.network` advertises the plane to agents. Airgap policy blocks live observe tools (`net_connections`, capture, detect) while still allowing path-only dig.
+
+### Quick examples
+
+```bash
+# Dig playbook from a hint (compile only)
+./target/release/ghidrust net dig --path fixtures/tiny_x64.pe --json
+
+# Execute offline dig (load + analyzers + string/import pivots)
+./target/release/ghidrust net dig --path fixtures/tiny_x64.pe --execute --json
+
+# Host sockets (Windows IP Helper / Linux /proc)
+./target/release/ghidrust net connections --json
+./target/release/ghidrust net owners --pid <PID> --json
+
+# Detect on a capture file with shipped minimal rules
+./target/release/ghidrust net detect --pcap path/to/capture.grncap --rules rules/ghidrust-minimal.rules --json
+./target/release/ghidrust net rules check --path rules/ghidrust-minimal.rules --json
+./target/release/ghidrust net pivots --pcap path/to/capture.grncap --json
+```
+
+**Session note:** capture `session_id` lives in one process (same rule as `process_*`). Multi-step capture/detect/flows must use MCP, the GUI Network host, or a single long-lived process — CLI one-shot cannot reopen another CLI’s session.
+
+### GUI (Network host)
+
+Same APIs as CLI/MCP, in-process:
+
+1. **Network → Show Connections** (or **Window → Network**)
+2. **Connections:** Refresh → select row → **Dig** (fills Dig tab hint)
+3. **Capture:** set iface / replay path → **Start** → **Flows** → **Detect** / **Pivots**
+4. **Alerts:** severity queue → **Dig** (closed-loop when owner path known)
+5. **Rules:** pack path → **Check** (default `rules/ghidrust-minimal.rules`)
+6. **Dig:** **Compile** / **Execute** → **Open in Listing** (loads image into CodeBrowser)
+
+**Honesty bounds:** live NIC acquisition may be stub/replay-first; capture sessions are process-local. Host header / Help→About show `NetworkInfo` (wave/caps). Capture **Export path** reveals `out_path` (copy + folder). **Inline block** is disabled unless `GHIDRUST_NET_INLINE=1` (hover shows reason).
+
+Shipped rules: [`rules/ghidrust-minimal.rules`](rules/ghidrust-minimal.rules).
 
 ---
 
@@ -687,7 +757,15 @@ MCP equivalents are `crypt_constants`, `recover_strings`, `list_crypto_capabilit
 | `ghidrust-decomp` | Stage-0 CFG → pseudo-C (regression oracle), Stage-0.5 IR-informed emit (`ir_emit`), decompile-bench harness, experimental GPU VRAM multipass |
 | `ghidrust-il2cpp` | IL2CPP `global-metadata.dat` + CodeRegistration correlation + resolve stubs |
 | `ghidrust-unity-inventory` | Unity player layout inventory (assemblies, plugins, metadata) |
-| `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` / `decompile-bench` |
+| `ghidrust-net-schema` | Ghidnet VOs (`NetHint`, `Alert`, `DigPlan`, flows/pivots) |
+| `ghidrust-net-attr` | Host socket → owner (Windows IP Helper / Linux `/proc`) |
+| `ghidrust-net-capture` | Capture sessions, `GRNCAP01`, replay; bin `ghidrust-netcap` |
+| `ghidrust-net-flow` | Flow table, reassembly, filters |
+| `ghidrust-net-rules` | GNR dialect parse/compile |
+| `ghidrust-net-detect` | In-tree MPM + alerts; optional inline via `GHIDRUST_NET_INLINE` |
+| `ghidrust-net-parse` | DNS / TLS SNI / HTTP / SMB pivot extractors |
+| `ghidrust-net-correlate` | Dig playbooks + closed-loop alert → RE |
+| `ghidrust-cli` | CLI + MCP + benches / `gpu-decompile` / `decompile-bench` / `net …` |
 | `ghidrust-gui` | CodeBrowser-style UI |
 
 ---

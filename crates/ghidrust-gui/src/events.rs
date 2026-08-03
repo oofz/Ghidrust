@@ -5,8 +5,8 @@
 //! fans events out to every subscribed pane (Symbol Tree, Bookmarks, Decompiler, etc.)
 //! so cross‑window sync is centralised.
 //!
-//! This is a Stage‑1 skeleton: the bus is a plain `Vec<GhidrustEvent>` and consumers
-//! poll it. Fan‑out to individual providers is still pending.
+//! The bus is a plain `Vec<GhidrustEvent>`; each frame `GhidrustApp::drain_events`
+//! fans events out (listing focus status, decompiler cache invalidation, etc.).
 
 use crate::nav::NavLocation;
 
@@ -21,12 +21,6 @@ pub enum GhidrustEvent {
         source: EventSource,
         location: NavLocation,
     },
-    /// Selection changed.
-    SelectionChanged {
-        source: EventSource,
-        start: NavLocation,
-        end: NavLocation,
-    },
     /// Program was mutated — every downstream pane invalidates its cache.
     ProgramMutated { kind: MutationKind },
     /// A new program was activated / opened.
@@ -34,18 +28,12 @@ pub enum GhidrustEvent {
 }
 
 /// Pane / plugin that emitted an event.
+///
+/// Only sources that currently publish are listed — add a variant when a producer lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventSource {
     Listing,
-    Decompiler,
-    SymbolTree,
-    ProgramTree,
-    SymbolTable,
-    FunctionsWindow,
-    Bookmarks,
     Navigation,
-    Search,
-    Other,
 }
 
 /// Kinds of program mutation subscribers care about (drives cache invalidation).
@@ -56,7 +44,6 @@ pub enum MutationKind {
     CommentChanged { va: u64 },
     BookmarkAdded { va: u64 },
     BookmarkRemoved { va: u64 },
-    Analysis,
 }
 
 /// Simple in-memory bus. Producers push; consumers drain each frame.
@@ -84,20 +71,14 @@ impl EventBus {
         std::mem::take(&mut self.events)
     }
 
-    #[allow(dead_code)] // exercised by tests only
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.events.len()
     }
 
-    #[allow(dead_code)] // exercised by tests only
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
-    }
-
-    /// Peek — used by tests.
-    #[allow(dead_code)] // exercised by tests only
-    pub fn peek(&self) -> &[GhidrustEvent] {
-        &self.events
     }
 }
 
@@ -118,7 +99,7 @@ mod tests {
             location: loc(0x1000),
         });
         bus.publish(GhidrustEvent::ProgramMutated {
-            kind: MutationKind::Analysis,
+            kind: MutationKind::CommentChanged { va: 0x1000 },
         });
         assert_eq!(bus.len(), 2);
         let drained = bus.drain();
@@ -145,11 +126,6 @@ mod tests {
             source: EventSource::Listing,
             location: loc(0x1000),
         });
-        bus.publish(GhidrustEvent::SelectionChanged {
-            source: EventSource::Listing,
-            start: loc(0x1000),
-            end: loc(0x1010),
-        });
         bus.publish(GhidrustEvent::ProgramMutated {
             kind: MutationKind::Rename {
                 va: 0x1000,
@@ -173,6 +149,10 @@ mod tests {
         });
         bus.publish(GhidrustEvent::ProgramActivated {
             name: "hello.exe".into(),
+        });
+        bus.publish(GhidrustEvent::CursorMoved {
+            source: EventSource::Navigation,
+            location: loc(0x2000),
         });
         assert_eq!(bus.len(), 8);
     }

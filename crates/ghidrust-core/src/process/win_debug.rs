@@ -205,7 +205,6 @@ enum PumpCmd {
 pub struct DebugSession {
     #[allow(dead_code)]
     pub pid: u32,
-    #[allow(dead_code)]
     pub process: HANDLE,
     cmd_tx: Sender<PumpCmd>,
     join: Option<JoinHandle<()>>,
@@ -363,6 +362,82 @@ impl DebugSession {
             |reply| PumpCmd::StepOver { tid, reply },
             Duration::from_secs(5),
         )?
+    }
+
+    /// Step out of the current frame.
+    ///
+    /// Prefer a oneshot software BP at the return address (from `[RBP+8]` or
+    /// `[RSP]`), then continue. If that fails, fall back to repeated `step_over`
+    /// until a RET opcode is executed (or a sane max).
+    pub fn step_out(&self, tid: u32) -> Result<(), ProcessError> {
+        if let Some(ret) = self.resolve_return_address(tid) {
+            if self.set_soft_bp(ret, true).is_ok() {
+                return self.continue_exec();
+            }
+        }
+
+        const MAX_STEPS: usize = 4096;
+        for i in 0..MAX_STEPS {
+            let regs = self.get_context(tid)?;
+            let at_ret = insn_is_ret(self.process, regs.rip);
+            if at_ret {
+                return self.step_into(tid);
+            }
+            self.step_over(tid)?;
+            let wr = self.wait(30_000);
+            if wr
+                .event
+                .as_ref()
+                .map(|e| e.reason.as_str() == "exit")
+                .unwrap_or(false)
+            {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::ProcessExited,
+                    "debuggee exited during step_out",
+                ));
+            }
+            if !wr.ok {
+                return Err(ProcessError::new(
+                    ProcessErrorCode::WaitTimeout,
+                    format!(
+                        "step_out fallback wait failed after {i} steps: {}",
+                        wr.message.unwrap_or_else(|| "no stop".into())
+                    ),
+                ));
+            }
+        }
+        Err(ProcessError::new(
+            ProcessErrorCode::InvalidState,
+            format!("step_out exceeded {MAX_STEPS} steps without RET"),
+        ))
+    }
+
+    /// Best-effort return address for the current frame.
+    fn resolve_return_address(&self, tid: u32) -> Option<u64> {
+        let regs = self.get_context(tid).ok()?;
+        // Prefer [RBP+8] when the frame pointer looks valid.
+        if regs.rbp >= 0x10000 {
+            let frame = win_observe::read_mem(self.process, regs.rbp, 16);
+            if frame.bytes_read >= 16 {
+                if let Ok(bytes) = frame.bytes[8..16].try_into() {
+                    let ret = u64::from_le_bytes(bytes);
+                    if looks_like_code_addr(ret) && ret != regs.rip {
+                        return Some(ret);
+                    }
+                }
+            }
+        }
+        // Fallback: qword at RSP (valid at function entry / after CALL).
+        let top = win_observe::read_mem(self.process, regs.rsp, 8);
+        if top.bytes_read >= 8 {
+            if let Ok(bytes) = top.bytes[0..8].try_into() {
+                let ret = u64::from_le_bytes(bytes);
+                if looks_like_code_addr(ret) && ret != regs.rip {
+                    return Some(ret);
+                }
+            }
+        }
+        None
     }
 
     pub fn stack(&self, tid: u32, max_frames: usize) -> Result<Vec<StackFrame>, ProcessError> {
@@ -1010,6 +1085,19 @@ fn set_tf(tid: u32, on: bool) -> Result<(), ProcessError> {
         regs.rflags &= !EFLAGS_TF;
     }
     set_thread_regs(tid, &regs)
+}
+
+fn looks_like_code_addr(addr: u64) -> bool {
+    // User-mode canonical range; excludes null/low junk and non-canonical high bits.
+    addr >= 0x10000 && addr < 0x0000_8000_0000_0000
+}
+
+fn insn_is_ret(process: HANDLE, rip: u64) -> bool {
+    let r = win_observe::read_mem(process, rip, 1);
+    if r.bytes_read < 1 {
+        return false;
+    }
+    matches!(r.bytes[0], 0xC3 | 0xCB | 0xC2 | 0xCA)
 }
 
 fn insn_preview(process: HANDLE, rip: u64) -> Option<String> {

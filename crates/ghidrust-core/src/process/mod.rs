@@ -663,6 +663,33 @@ pub fn process_step_over(session_id: &str, thread_id: Option<u32>) -> Result<(),
     }
 }
 
+pub fn process_step_out(session_id: &str, thread_id: Option<u32>) -> Result<(), String> {
+    require_session_cap(session_id, "step")?;
+    #[cfg(windows)]
+    {
+        with_sessions(|m| {
+            let a = m
+                .get_mut(session_id)
+                .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())?;
+            let d = a
+                .debug
+                .as_ref()
+                .ok_or_else(|| ProcessError::capability_missing("step").to_string())?;
+            let tid = thread_id
+                .or_else(|| d.last_stop().map(|s| s.thread_id))
+                .ok_or_else(|| "thread_id required when not stopped".to_string())?;
+            d.step_out(tid).map_err(|e| e.to_string())?;
+            a.run_state = d.run_state();
+            Ok(())
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = thread_id;
+        Err(ProcessError::platform().to_string())
+    }
+}
+
 pub fn process_threads(session_id: &str) -> Result<Vec<ThreadInfo>, String> {
     require_session_cap(session_id, "threads")?;
     #[cfg(windows)]

@@ -22,7 +22,9 @@ pub use installer::{
     grok_binary_path, install_command_for_platform, probe_grok_version, InstallCommand,
 };
 pub use markdown::{parse_markdown, MarkdownBlock};
-pub use policy::AgentMode;
+pub use policy::{
+    is_destructive_tool, is_network_observe_tool, network_tool_allowed, AgentMode,
+};
 pub use system_prompt::{
     FunctionFact, ImportFact, ProgramFacts, ProjectFileFact, SectionFact, SelectionFact,
     SystemPromptBuilder,

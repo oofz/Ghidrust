@@ -1,0 +1,3 @@
+# Ghidrust Net Rule (GNR) minimal pack — host investigation demos
+alert tcp any any -> any any (msg:"ghidrust evil marker"; content:"EVILCMD"; nocase; sid:1000001; severity:3;)
+alert tcp any any -> any any (msg:"ghidrust http get probe"; content:"GET /"; sid:1000002; severity:1;)

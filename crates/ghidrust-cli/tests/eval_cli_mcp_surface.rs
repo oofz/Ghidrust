@@ -47,6 +47,7 @@ const EXPECTED_MCP_TOOLS: &[&str] = &[
     "process_wait",
     "process_step_into",
     "process_step_over",
+    "process_step_out",
     "process_threads",
     "process_thread_context_get",
     "process_thread_context_set",
@@ -1056,6 +1057,11 @@ fn eval_cli_mcp_surface_catalog() {
         ("il2cpp_icalls", json!({ "binary": ipe })),
         ("rtti_gpu_bench", json!({ "path": pe })),
         ("process_list", json!({})),
+        // Honest unknown-session proves the tool is wired (debug session not required).
+        (
+            "process_step_out",
+            json!({ "session_id": "eval-missing-session" }),
+        ),
     ];
 
     const CHUNK: usize = 10;

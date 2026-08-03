@@ -362,6 +362,10 @@ fn mcp_server_info_and_live_tools() {
         || s.contains("\"tool_surface\": 6")
         || s.contains("\"tool_surface\":6")
         || s.contains("\"tool_surface\": 7")
-        || s.contains("\"tool_surface\":7");
+        || s.contains("\"tool_surface\":7")
+        || s.contains("\"toolSurface\":8")
+        || s.contains("\"tool_surface\": 8")
+        || s.contains("\"tool_surface\":8");
     assert!(surface_ok, "expected tool_surface >= 3 in {s}");
+    assert!(s.contains("net_dig"), "missing net_dig in {s}");
 }

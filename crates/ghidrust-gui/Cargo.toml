@@ -17,12 +17,20 @@ ghidrust-core = { workspace = true, features = ["gpu"] }
 # for this crate (no wgpu device requirement in the GUI process).
 ghidrust-decomp = { path = "../ghidrust-decomp" }
 ghidrust-types = { workspace = true }
-# §13 tool panes (IL2CPP Metadata/Methods/ICalls) — hand-rolled parser, no
-# Il2CppDumper/Cpp2IL at runtime.
+# §13 tool panes (IL2CPP Metadata/Methods/ICalls/TouchMap/Stubs) — hand-rolled
+# parser, no Il2CppDumper/Cpp2IL at runtime.
 ghidrust-il2cpp = { workspace = true }
+ghidrust-unity-inventory = { workspace = true }
 # Grok Build glue (install + MCP/skill/context). The TUI itself is hosted via
 # an in-tree hand-rolled PTY (`src/grok_term/`) — no crates.io terminal stacks.
 ghidrust-agent = { workspace = true }
+ghidrust-net-schema = { workspace = true }
+ghidrust-net-attr = { workspace = true }
+ghidrust-net-capture = { workspace = true }
+ghidrust-net-detect = { workspace = true }
+ghidrust-net-rules = { workspace = true }
+ghidrust-net-parse = { workspace = true }
+ghidrust-net-correlate = { workspace = true }
 eframe = { version = "0.31", default-features = true }
 egui = "0.31"
 # Decode bundled splash / window logo (`assets/ghidrust.png`).

@@ -1367,9 +1367,18 @@ dependencies = [
 name = "ghidrust-cli"
 version = "0.1.0"
 dependencies = [
+ "ghidrust-agent",
  "ghidrust-core",
  "ghidrust-decomp",
  "ghidrust-il2cpp",
+ "ghidrust-net-attr",
+ "ghidrust-net-capture",
+ "ghidrust-net-correlate",
+ "ghidrust-net-detect",
+ "ghidrust-net-flow",
+ "ghidrust-net-parse",
+ "ghidrust-net-rules",
+ "ghidrust-net-schema",
  "ghidrust-types",
  "ghidrust-unity-inventory",
  "serde",
@@ -1428,7 +1437,15 @@ dependencies = [
  "ghidrust-core",
  "ghidrust-decomp",
  "ghidrust-il2cpp",
+ "ghidrust-net-attr",
+ "ghidrust-net-capture",
+ "ghidrust-net-correlate",
+ "ghidrust-net-detect",
+ "ghidrust-net-parse",
+ "ghidrust-net-rules",
+ "ghidrust-net-schema",
  "ghidrust-types",
+ "ghidrust-unity-inventory",
  "image",
  "libc",
  "rfd",
@@ -1461,6 +1478,82 @@ version = "0.1.0"
 dependencies = [
  "ghidrust-decode",
  "ghidrust-ir",
+]
+
+[[package]]
+name = "ghidrust-net-attr"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-capture"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-net-attr",
+ "ghidrust-net-flow",
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-correlate"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-core",
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-detect"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-net-flow",
+ "ghidrust-net-rules",
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-flow"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-parse"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-rules"
+version = "0.1.0"
+dependencies = [
+ "ghidrust-net-schema",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ghidrust-net-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

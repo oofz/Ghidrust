@@ -1,7 +1,7 @@
 //! Instruction detail pane .
 
 use ghidrust_core::ghidrust_decode::{group_name, insn_name, reg_name};
-use ghidrust_core::ghidrust_decode::{OpType, Operand};
+use ghidrust_core::ghidrust_decode::Operand;
 use ghidrust_core::{Arch, Instruction};
 
 pub fn ui_detail_pane(ui: &mut egui::Ui, insn: &Instruction, arch: Arch) {
@@ -146,13 +146,3 @@ fn format_operand(arch: Arch, op: &Operand) -> String {
     }
 }
 
-#[allow(dead_code)]
-pub fn operand_type_label(op: &Operand) -> &'static str {
-    match op.op_type() {
-        OpType::Reg => "reg",
-        OpType::Imm => "imm",
-        OpType::Mem => "mem",
-        OpType::Fp => "fp",
-        OpType::Invalid => "invalid",
-    }
-}

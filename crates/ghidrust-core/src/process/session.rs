@@ -163,6 +163,7 @@ pub fn live_process_info_json() -> serde_json::Value {
             "process_pause",
             "process_step_into",
             "process_step_over",
+            "process_step_out",
             "process_wait",
             "process_threads",
             "process_thread_context_get",

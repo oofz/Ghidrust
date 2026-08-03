@@ -11,6 +11,14 @@ members = [
     "crates/ghidrust-decomp",
     "crates/ghidrust-il2cpp",
     "crates/ghidrust-unity-inventory",
+    "crates/ghidrust-net-schema",
+    "crates/ghidrust-net-correlate",
+    "crates/ghidrust-net-attr",
+    "crates/ghidrust-net-flow",
+    "crates/ghidrust-net-rules",
+    "crates/ghidrust-net-detect",
+    "crates/ghidrust-net-parse",
+    "crates/ghidrust-net-capture",
     "crates/ghidrust-cli",
     "crates/ghidrust-gui",
     "crates/ghidrust-agent",
@@ -35,3 +43,11 @@ ghidrust-decomp = { path = "crates/ghidrust-decomp" }
 ghidrust-il2cpp = { path = "crates/ghidrust-il2cpp" }
 ghidrust-unity-inventory = { path = "crates/ghidrust-unity-inventory" }
 ghidrust-agent = { path = "crates/ghidrust-agent" }
+ghidrust-net-schema = { path = "crates/ghidrust-net-schema" }
+ghidrust-net-correlate = { path = "crates/ghidrust-net-correlate" }
+ghidrust-net-attr = { path = "crates/ghidrust-net-attr" }
+ghidrust-net-flow = { path = "crates/ghidrust-net-flow" }
+ghidrust-net-rules = { path = "crates/ghidrust-net-rules" }
+ghidrust-net-detect = { path = "crates/ghidrust-net-detect" }
+ghidrust-net-parse = { path = "crates/ghidrust-net-parse" }
+ghidrust-net-capture = { path = "crates/ghidrust-net-capture" }

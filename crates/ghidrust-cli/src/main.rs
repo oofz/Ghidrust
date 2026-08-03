@@ -7,6 +7,7 @@ mod decode_support_cmd;
 mod disasm_cmd;
 mod friction;
 mod mcp_decode;
+mod net_cmds;
 
 use ghidrust_core::{
     analyze_path, analyzer_catalog, artifact_get, artifact_query, assess_decompile_bounds,
@@ -16,7 +17,7 @@ use ghidrust_core::{
     process_break_clear, process_break_list, process_break_set,
     process_continue, process_detach, process_export_snapshot, process_launch, process_list,
     process_modules, process_pause, process_read, process_regions, process_resolve, process_resume,
-    process_scan_mem, process_stack, process_step_into, process_step_over,
+    process_scan_mem, process_stack, process_step_into, process_step_out, process_step_over,
     process_thread_context_get, process_thread_context_set, process_threads, process_vtable_probe,
     process_wait, process_watch_expr, recover_rtti, resolve_function, rtti_query, run_analyzers,
     scan_ascii_strings_bulk, scan_printable_runs_gpu_or_fallback, scan_printable_runs_parallel,
@@ -52,7 +53,8 @@ const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `5` = decode engine surface (decode_support, decode_query, extended disassemble).
 /// `6` = crypt_constants, recover_strings, decode_bake/magic, crypto_capabilities.
 /// `7` = live process debug bridge (break/step/regs/stack/scan/watch).
-const TOOL_SURFACE_VERSION: u32 = 7;
+/// `8` = native network dig / connections / capture / detect / pivots.
+const TOOL_SURFACE_VERSION: u32 = 8;
 
 fn package_version() -> &'static str {
     PACKAGE_VERSION
@@ -84,12 +86,19 @@ fn server_info_json() -> Value {
     "recover_strings",
     "decode_bake",
     "decode_magic",
-    "list_crypto_capabilities"
+    "list_crypto_capabilities",
+    "net_dig",
+    "net_playbook",
+    "net_connections",
+    "net_capture_start",
+    "net_detect",
+    "net_pivots"
                ],
     "decode_diet": decode_block["features"]["decode_diet"],
     "x86_reduce": decode_block["features"]["x86_reduce"],
            },
     "live_process": live_process_info_json(),
+    "network": net_cmds::network_info_json(),
        })
 }
 
@@ -241,6 +250,7 @@ fn main() -> ExitCode {
         "tree" | "list-tree" => friction::cmd_tree(&args[1..], json_mode),
         "artifact" => friction::cmd_artifact(&args[1..], json_mode),
         "process" => friction::cmd_process(&args[1..], json_mode),
+        "net" => net_cmds::cmd_net(&args[1..], json_mode),
         "bulk-bench" => cmd_bulk_bench(&args[1..], json_mode),
         "decompile" => cmd_decompile(&args[1..], json_mode),
         "decompile-bench" => cmd_decompile_bench(&args[1..], json_mode),
@@ -303,6 +313,8 @@ fn print_help() {
            ghidrust process list|attach|launch|resume|detach|modules|read|resolve|regions|\n\
                     break|continue|pause|wait|step|threads|regs|stack|scan|watch|vtable|snapshot … [--json]\n\
              # attach/launch: -mode observe|debug; launch debug: -break-at-entry\n\
+           ghidrust net dig|playbook|connections|owners|ifaces|capture|flows|detect|alerts|rules|pivots … [--json]\n\
+             # Ghidnet (tool_surface>=8): attribute → detect → dig; see README Ghidnet\n\
            ghidrust rtti <path> [--filter|--name|--exact] [--match MODE] [--json]\n\
            ghidrust analyzers [--json]\n\
            ghidrust analyze <path> [--analyzers a,b | --analyzer NAME ...] [--gpu] [--json]\n\
@@ -3493,6 +3505,18 @@ fn tool_defs() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+ name: "process_step_out",
+ description: "Step out of the current frame (oneshot BP at return address, else step-over until RET). Uses last stop thread if thread_id omitted.",
+            input_schema: json!({
+ "type": "object",
+ "properties": {
+ "session_id": { "type": "string" },
+ "thread_id": { "type": "integer" }
+                },
+ "required": ["session_id"]
+            }),
+        },
+        ToolDef {
  name: "process_threads",
  description: "List threads in the target (debug mode)",
             input_schema: json!({
@@ -4003,6 +4027,175 @@ description: "Auto-detect a short peel chain (depth 1..4) maximizing printable r
  "end": { "type": "string" }
                 },
  "required": ["path", "addr"]
+            }),
+        },
+        ToolDef {
+            name: "net_dig",
+            description: "Compile/execute a native network dig playbook (path/host/ioc/alert → load/analyze/imports/strings). tool_surface>=8",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "pid": { "type": "integer" },
+                    "host": { "type": "string" },
+                    "ioc": { "type": "string" },
+                    "alert_id": { "type": "string" },
+                    "flow_ref": { "type": "string" },
+                    "execute": { "type": "boolean" },
+                    "live": { "type": "boolean" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "net_playbook",
+            description: "Compile dig playbook without executing",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "pid": { "type": "integer" },
+                    "host": { "type": "string" },
+                    "ioc": { "type": "string" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "net_connections",
+            description: "List host TCP/UDP sockets with process/image owners (native OS APIs)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pid": { "type": "integer" },
+                    "path": { "type": "string" },
+                    "proto": { "type": "string" },
+                    "max": { "type": "integer" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "net_owners",
+            description: "Resolve image path for a PID",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "pid": { "type": "integer" } },
+                "required": ["pid"]
+            }),
+        },
+        ToolDef {
+            name: "net_ifaces",
+            description: "List capture interfaces / backends",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "net_capture_start",
+            description: "Start native capture session (replay_path for fixtures; airgap refuses)",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "iface": { "type": "string" },
+                    "filter": { "type": "string" },
+                    "pid": { "type": "integer" },
+                    "path": { "type": "string" },
+                    "out": { "type": "string" },
+                    "replay_path": { "type": "string" }
+                }
+            }),
+        },
+        ToolDef {
+            name: "net_capture_stop",
+            description: "Stop capture session and flush capture file",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "session_id": { "type": "string" } },
+                "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+            name: "net_capture_status",
+            description: "Capture session status",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "session_id": { "type": "string" } },
+                "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+            name: "net_flows",
+            description: "Attributed flows for a capture session",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "max": { "type": "integer" }
+                },
+                "required": ["session_id"]
+            }),
+        },
+        ToolDef {
+            name: "net_detect",
+            description: "Run native GNR rules on a capture file / payload blob",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pcap": { "type": "string" },
+                    "rules": { "type": "string" },
+                    "attr": { "type": "string" }
+                },
+                "required": ["pcap"]
+            }),
+        },
+        ToolDef {
+            name: "net_alerts",
+            description: "List recent native detection alerts",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "max": { "type": "integer" } }
+            }),
+        },
+        ToolDef {
+            name: "net_rules_list",
+            description: "List bundled/native rule packs",
+            input_schema: json!({ "type": "object", "properties": {} }),
+        },
+        ToolDef {
+            name: "net_rules_load",
+            description: "Load/compile a GNR rules file",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "net_rules_check",
+            description: "Compile-check a GNR rules file",
+            input_schema: json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }),
+        },
+        ToolDef {
+            name: "net_pivots",
+            description: "Extract DNS/TLS/HTTP/SMB pivot fields from a capture or payload file",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "pcap": { "type": "string" },
+                    "flow_id": { "type": "string" }
+                },
+                "required": ["pcap"]
+            }),
+        },
+        ToolDef {
+            name: "net_job_get",
+            description: "Fetch a closed-loop dig job by id",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "job_id": { "type": "string" },
+                    "artifact_id": { "type": "string" }
+                }
             }),
         },
     ]
@@ -4517,6 +4710,15 @@ fn call_tool(params: &Value) -> Result<String, String> {
                 .ok_or_else(|| "missing arguments.session_id".to_string())?;
             let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
             process_step_over(sid, tid)?;
+            Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
+        }
+        "process_step_out" => {
+            let sid = args
+                .get("session_id")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| "missing arguments.session_id".to_string())?;
+            let tid = args.get("thread_id").and_then(|t| t.as_u64()).map(|t| t as u32);
+            process_step_out(sid, tid)?;
             Ok(serde_json::to_string_pretty(&json!({"ok": true})).unwrap())
         }
         "process_threads" => {
@@ -5484,6 +5686,9 @@ fn call_tool(params: &Value) -> Result<String, String> {
             }
             _ => unreachable!(),
         },
+        name if name.starts_with("net_") => {
+            net_cmds::mcp_net(name, &args, ghidrust_agent::AgentMode::Full)
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }

@@ -8,14 +8,16 @@
 
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_core::{
-    artifact_query, list_artifacts, ArtifactEnvelope, ArtifactMeta, PeInventory, PeInventoryEntry,
-    Program, ResolveResult, TreeEntry, TreeListOpts, TreeListResult,
+    artifact_get, artifact_query, list_artifacts, ArtifactEnvelope, ArtifactMeta, PeInventory,
+    PeInventoryEntry, Program, ResolveResult, TreeEntry, TreeListOpts, TreeListResult,
 };
 use ghidrust_il2cpp::{
     binary::{correlate, MethodMap, MethodMapEntry},
+    find_resolve_stubs, stub_matches_filter, touch_map, ResolveStub, TouchMapReport,
     icall::{filter_entries, resolve_icalls_path, ICallEntry, ICallResolveReport},
     metadata::Il2CppMetadata,
 };
+use ghidrust_unity_inventory::UnityInventory;
 
 fn err_label(ui: &mut Ui, err: &str) {
     ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
@@ -27,6 +29,9 @@ pub struct ToolPanesState {
     pub il2cpp_meta: Il2cppMetaState,
     pub il2cpp_methods: Il2cppMethodsState,
     pub il2cpp_icalls: Il2cppIcallsState,
+    pub il2cpp_touch_map: Il2cppTouchMapState,
+    pub il2cpp_stubs: Il2cppStubsState,
+    pub unity_inventory: UnityInventoryState,
     pub install_inventory: InstallInventoryState,
     pub fs_browser: FileSystemBrowserState,
     pub artifacts: AnalysisArtifactsState,
@@ -474,6 +479,392 @@ fn resolve_icalls_via_owned(prog: &mut Program) -> Result<ICallResolveReport, St
     ghidrust_il2cpp::icall::resolve_icalls(prog).map_err(|e| e.to_string())
 }
 
+// ── IL2CPP Touch Map ────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct Il2cppTouchMapState {
+    pub use_loaded_program: bool,
+    pub meta_path_input: String,
+    pub binary_path_input: String,
+    pub filter: String,
+    pub report: Option<TouchMapReport>,
+    pub error: Option<String>,
+}
+
+impl Il2cppTouchMapState {
+    fn new_default() -> Self {
+        Self {
+            use_loaded_program: true,
+            ..Default::default()
+        }
+    }
+}
+
+pub fn ui_il2cpp_touch_map(
+    ui: &mut Ui,
+    s: &mut Il2cppTouchMapState,
+    program: Option<&Program>,
+    muted: Color32,
+) {
+    if s.meta_path_input.is_empty() && s.report.is_none() && s.filter.is_empty() {
+        *s = Il2cppTouchMapState::new_default();
+    }
+    ui.heading("IL2CPP Touch Map");
+    ui.small(
+        RichText::new(
+            "ghidrust-il2cpp::touch_map · metadata string-heap → method/type hits (+ optional RVA)",
+        )
+        .color(muted),
+    );
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Metadata:");
+        ui.add(
+            egui::TextEdit::singleline(&mut s.meta_path_input)
+                .desired_width(320.0)
+                .hint_text("global-metadata.dat"),
+        );
+        if ui.button("Browse…").clicked() {
+            if let Some(p) = rfd::FileDialog::new()
+                .set_title("Select global-metadata.dat")
+                .pick_file()
+            {
+                s.meta_path_input = p.display().to_string();
+            }
+        }
+    });
+    ui.checkbox(
+        &mut s.use_loaded_program,
+        "Correlate RVA against currently loaded program (optional)",
+    );
+    if !s.use_loaded_program {
+        ui.horizontal(|ui| {
+            ui.label("Binary:");
+            ui.add(
+                egui::TextEdit::singleline(&mut s.binary_path_input)
+                    .desired_width(320.0)
+                    .hint_text("GameAssembly.dll (optional)"),
+            );
+            if ui.button("Browse…").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .set_title("Select binary")
+                    .pick_file()
+                {
+                    s.binary_path_input = p.display().to_string();
+                }
+            }
+        });
+    } else if let Some(p) = program {
+        ui.small(format!("Binary: {} (loaded)", p.name));
+    }
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.add(
+            egui::TextEdit::singleline(&mut s.filter)
+                .desired_width(240.0)
+                .hint_text("substring…"),
+        );
+        let can_run = !s.meta_path_input.trim().is_empty() && !s.filter.trim().is_empty();
+        if ui
+            .add_enabled(can_run, egui::Button::new("Build touch map"))
+            .clicked()
+        {
+            s.error = None;
+            s.report = None;
+            let owned = if s.use_loaded_program {
+                None
+            } else if s.binary_path_input.trim().is_empty() {
+                None
+            } else {
+                match ghidrust_core::load_path(s.binary_path_input.trim()) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        s.error = Some(format!("binary: {e}"));
+                        return;
+                    }
+                }
+            };
+            let prog_ref = if s.use_loaded_program {
+                program
+            } else {
+                owned.as_ref()
+            };
+            let meta = std::path::Path::new(s.meta_path_input.trim());
+            match touch_map(Some(meta), None, s.filter.trim(), prog_ref) {
+                Ok(rep) => s.report = Some(rep),
+                Err(e) => s.error = Some(e.to_string()),
+            }
+        }
+    });
+    if let Some(e) = &s.error {
+        err_label(ui, e);
+    }
+    let Some(report) = &s.report else {
+        ui.weak("Enter a metadata path + filter substring to build the touch map.");
+        return;
+    };
+    ui.small(format!(
+        "filter={:?} · {} row(s)",
+        report.filter, report.row_count
+    ));
+    for n in &report.notes {
+        ui.small(RichText::new(n).color(muted).italics());
+    }
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
+    egui::ScrollArea::vertical()
+        .id_salt("il2cpp_touch_map_scroll")
+        .auto_shrink([false, false])
+        .max_height(360.0)
+        .show_rows(ui, row_h, report.rows.len(), |ui, range| {
+            for i in range {
+                let r = &report.rows[i];
+                let va = r
+                    .va
+                    .map(|v| format!("{v:#x}"))
+                    .unwrap_or_else(|| "—".into());
+                ui.monospace(format!(
+                    "{:?}  conf={:?}  va={va}  {}  {}",
+                    r.kind,
+                    r.confidence,
+                    r.string,
+                    r.full_name.as_deref().unwrap_or("-")
+                ));
+            }
+        });
+}
+
+// ── IL2CPP Stubs ────────────────────────────────────────────────────────
+
+pub struct Il2cppStubsState {
+    pub use_loaded_program: bool,
+    pub binary_path_input: String,
+    pub filter: String,
+    pub max_scan: usize,
+    pub stubs: Vec<ResolveStub>,
+    pub error: Option<String>,
+    pub scanned: bool,
+}
+
+impl Default for Il2cppStubsState {
+    fn default() -> Self {
+        Self {
+            use_loaded_program: true,
+            binary_path_input: String::new(),
+            filter: String::new(),
+            max_scan: 250_000,
+            stubs: Vec::new(),
+            error: None,
+            scanned: false,
+        }
+    }
+}
+
+pub fn ui_il2cpp_stubs(
+    ui: &mut Ui,
+    s: &mut Il2cppStubsState,
+    program: Option<&Program>,
+    muted: Color32,
+) {
+    ui.heading("IL2CPP Stubs");
+    ui.small(
+        RichText::new(
+            "ghidrust-il2cpp::find_resolve_stubs · lazy resolve thunks (LEA name → call → jmp reg)",
+        )
+        .color(muted),
+    );
+    ui.separator();
+    ui.checkbox(
+        &mut s.use_loaded_program,
+        "Use currently loaded program as the binary",
+    );
+    if !s.use_loaded_program {
+        ui.horizontal(|ui| {
+            ui.label("Binary:");
+            ui.add(
+                egui::TextEdit::singleline(&mut s.binary_path_input)
+                    .desired_width(320.0)
+                    .hint_text("GameAssembly.dll / il2cpp binary"),
+            );
+            if ui.button("Browse…").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .set_title("Select binary")
+                    .pick_file()
+                {
+                    s.binary_path_input = p.display().to_string();
+                }
+            }
+        });
+    } else if let Some(p) = program {
+        ui.small(format!("Binary: {} (loaded)", p.name));
+    } else {
+        ui.small(RichText::new("No program loaded.").color(muted));
+    }
+    ui.horizontal(|ui| {
+        ui.label("Filter:");
+        ui.add(
+            egui::TextEdit::singleline(&mut s.filter)
+                .desired_width(200.0)
+                .hint_text("icall name…"),
+        );
+        ui.label("Max scan:");
+        ui.add(egui::DragValue::new(&mut s.max_scan).range(1_000..=2_000_000));
+        let can_run = s.use_loaded_program || !s.binary_path_input.trim().is_empty();
+        if ui
+            .add_enabled(can_run, egui::Button::new("Scan stubs"))
+            .clicked()
+        {
+            s.error = None;
+            s.stubs.clear();
+            s.scanned = true;
+            let owned = if s.use_loaded_program {
+                None
+            } else {
+                match ghidrust_core::load_path(s.binary_path_input.trim()) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        s.error = Some(format!("binary: {e}"));
+                        return;
+                    }
+                }
+            };
+            let Some(prog_ref) = (if s.use_loaded_program {
+                program
+            } else {
+                owned.as_ref()
+            }) else {
+                s.error = Some("no program available — load a binary first".into());
+                return;
+            };
+            let mut stubs = find_resolve_stubs(prog_ref, s.max_scan);
+            if !s.filter.trim().is_empty() {
+                stubs.retain(|st| stub_matches_filter(prog_ref, st, s.filter.trim()));
+            }
+            s.stubs = stubs;
+        }
+    });
+    if let Some(e) = &s.error {
+        err_label(ui, e);
+    }
+    if !s.scanned {
+        ui.weak("Scan an IL2CPP binary for resolve stubs.");
+        return;
+    }
+    ui.small(format!("{} stub(s)", s.stubs.len()));
+    let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 2.0;
+    egui::ScrollArea::vertical()
+        .id_salt("il2cpp_stubs_scroll")
+        .auto_shrink([false, false])
+        .max_height(360.0)
+        .show_rows(ui, row_h, s.stubs.len(), |ui, range| {
+            for i in range {
+                let st = &s.stubs[i];
+                ui.monospace(format!(
+                    "{:#x}  {}  slot={}",
+                    st.entry,
+                    st.icall_name.as_deref().unwrap_or("(unnamed)"),
+                    st.slot_va
+                        .map(|v| format!("{v:#x}"))
+                        .unwrap_or_else(|| "—".into())
+                ));
+            }
+        });
+}
+
+// ── Unity Inventory ─────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct UnityInventoryState {
+    pub root_input: String,
+    pub inventory: Option<UnityInventory>,
+    pub error: Option<String>,
+}
+
+pub fn ui_unity_inventory(ui: &mut Ui, s: &mut UnityInventoryState, muted: Color32) {
+    ui.heading("Unity Inventory");
+    ui.small(
+        RichText::new(
+            "ghidrust-unity-inventory::inventory_path · player dir → assemblies / plugins / XR / metadata",
+        )
+        .color(muted),
+    );
+    ui.separator();
+    ui.horizontal(|ui| {
+        ui.label("Game folder:");
+        ui.add(
+            egui::TextEdit::singleline(&mut s.root_input)
+                .desired_width(320.0)
+                .hint_text("Unity player install root…"),
+        );
+        if ui.button("Browse…").clicked() {
+            if let Some(p) = rfd::FileDialog::new()
+                .set_title("Select Unity game folder")
+                .pick_folder()
+            {
+                s.root_input = p.display().to_string();
+            }
+        }
+        if ui
+            .add_enabled(!s.root_input.trim().is_empty(), egui::Button::new("Inventory"))
+            .clicked()
+        {
+            s.error = None;
+            match ghidrust_unity_inventory::inventory_path(s.root_input.trim()) {
+                Ok(inv) => s.inventory = Some(inv),
+                Err(e) => {
+                    s.inventory = None;
+                    s.error = Some(e);
+                }
+            }
+        }
+    });
+    if let Some(e) = &s.error {
+        err_label(ui, e);
+    }
+    let Some(inv) = &s.inventory else {
+        ui.weak("Pick a Unity player folder (exe + *_Data/) to inventory.");
+        return;
+    };
+    ui.small(format!(
+        "schema={} root={} · verdict={:?} confidence={:?} · il2cpp={} mono={}",
+        inv.schema_version,
+        inv.root,
+        inv.verdict,
+        inv.confidence,
+        inv.engine.il2cpp,
+        inv.engine.mono
+    ));
+    if let Some(meta) = &inv.metadata {
+        ui.monospace(format!(
+            "metadata present={} version={:?} encrypted={}",
+            meta.present, meta.version, meta.encrypted_or_obfuscated
+        ));
+    }
+    egui::CollapsingHeader::new(format!(
+        "Scripting assemblies ({})",
+        inv.scripting_assemblies.len()
+    ))
+    .default_open(true)
+    .show(ui, |ui| {
+        for a in inv.scripting_assemblies.iter().take(200) {
+            ui.monospace(a);
+        }
+    });
+    egui::CollapsingHeader::new(format!("Plugins ({})", inv.plugins.len()))
+        .default_open(false)
+        .show(ui, |ui| {
+            for p in inv.plugins.iter().take(200) {
+                ui.monospace(p);
+            }
+        });
+    egui::CollapsingHeader::new(format!("Notes ({})", inv.notes.len()))
+        .default_open(false)
+        .show(ui, |ui| {
+            for n in &inv.notes {
+                ui.small(n);
+            }
+        });
+}
+
 // ── Install Inventory ───────────────────────────────────────────────────
 
 pub struct InstallInventoryState {
@@ -771,6 +1162,8 @@ pub struct AnalysisArtifactsState {
     pub artifacts: Vec<ArtifactMeta>,
     pub selected_id: Option<String>,
     pub preview: Option<ArtifactEnvelope>,
+    /// Full JSON from `artifact_get` when the user opens the selected item.
+    pub full_json: Option<String>,
     pub offset: usize,
     pub limit: usize,
     pub error: Option<String>,
@@ -783,6 +1176,7 @@ impl Default for AnalysisArtifactsState {
             artifacts: Vec::new(),
             selected_id: None,
             preview: None,
+            full_json: None,
             offset: 0,
             limit: 32,
             error: None,
@@ -840,13 +1234,53 @@ pub fn ui_analysis_artifacts(ui: &mut Ui, s: &mut AnalysisArtifactsState, muted:
         if let Some(id) = clicked {
             s.selected_id = Some(id);
             s.offset = 0;
+            s.full_json = None;
             load_preview(s);
         }
 
         cols[1].strong("Preview");
         cols[1].separator();
+        let mut open_full = false;
+        let mut clear_full = false;
+        cols[1].horizontal(|ui| {
+            if ui
+                .add_enabled(s.selected_id.is_some(), egui::Button::new("Open (artifact_get)"))
+                .on_hover_text("Load full artifact JSON via ghidrust_core::artifact_get")
+                .clicked()
+            {
+                open_full = true;
+            }
+            if s.full_json.is_some() && ui.button("Show paged preview").clicked() {
+                clear_full = true;
+            }
+        });
+        if open_full {
+            load_full(s);
+        }
+        if clear_full {
+            s.full_json = None;
+        }
+        if let Some(full) = &mut s.full_json {
+            cols[1].small(
+                RichText::new("Full content (artifact_get)")
+                    .color(muted)
+                    .italics(),
+            );
+            egui::ScrollArea::vertical()
+                .id_salt("artifacts_full_scroll")
+                .max_height(360.0)
+                .show(&mut cols[1], |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(full)
+                            .code_editor()
+                            .desired_rows(18)
+                            .desired_width(f32::INFINITY),
+                    );
+                });
+            return;
+        }
         let Some(env) = &s.preview else {
-            cols[1].weak("Select an artifact on the left to preview its entries.");
+            cols[1].weak("Select an artifact on the left to preview, or Open for full content.");
             return;
         };
         cols[1].small(format!(
@@ -915,6 +1349,24 @@ fn load_preview(s: &mut AnalysisArtifactsState) {
         Ok(env) => s.preview = Some(env),
         Err(e) => {
             s.preview = None;
+            s.error = Some(e.to_string());
+        }
+    }
+}
+
+fn load_full(s: &mut AnalysisArtifactsState) {
+    let Some(id) = s.selected_id.clone() else {
+        return;
+    };
+    s.error = None;
+    match artifact_get(&id) {
+        Ok(v) => {
+            s.full_json = Some(
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),
+            );
+        }
+        Err(e) => {
+            s.full_json = None;
             s.error = Some(e.to_string());
         }
     }

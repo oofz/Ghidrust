@@ -587,6 +587,7 @@ mod tests {
                 mnemonic: "nop".into(),
                 operands: String::new(),
                 length: 1,
+                ..Default::default()
             },
             Instruction {
                 address: 0x1001,
@@ -594,6 +595,7 @@ mod tests {
                 mnemonic: "ret".into(),
                 operands: String::new(),
                 length: 1,
+                ..Default::default()
             },
         ];
         assert_eq!(listing_index_at_or_before(&listing, 0x1000), Some(0));
@@ -646,6 +648,7 @@ mod tests {
                 mnemonic: "add".into(),
                 operands: "eax, 5".into(),
                 length: 3,
+                ..Default::default()
             },
             Instruction {
                 address: 0x1003,
@@ -653,6 +656,7 @@ mod tests {
                 mnemonic: "add".into(),
                 operands: "eax, 100".into(),
                 length: 3,
+                ..Default::default()
             },
         ];
         let low = search_scalars(&listing, 0, 10, 32);
@@ -672,6 +676,7 @@ mod tests {
                 mnemonic: "push".into(),
                 operands: "rbp".into(),
                 length: 1,
+                ..Default::default()
             },
             Instruction {
                 address: 0x1001,
@@ -679,6 +684,7 @@ mod tests {
                 mnemonic: "ret".into(),
                 operands: String::new(),
                 length: 1,
+                ..Default::default()
             },
         ];
         assert_eq!(

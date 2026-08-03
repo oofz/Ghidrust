@@ -7,7 +7,7 @@
 //!
 //! Source anchors: see internal UI notes § 1.1 and § 1.2.
 
-use eframe::egui::{self, Color32, RichText, Ui};
+use eframe::egui::{Color32, RichText, Ui};
 
 /// One provider (window / dockable pane).
 ///
@@ -63,6 +63,12 @@ pub enum PaneKind {
     Il2cppMethods,
     /// Unity native icall name‖fn table pairing.
     Il2cppIcalls,
+    /// Metadata string-heap touch-map (`ghidrust_il2cpp::touch_map`).
+    Il2cppTouchMap,
+    /// IL2CPP resolve-stub scanner (`ghidrust_il2cpp::find_resolve_stubs`).
+    Il2cppStubs,
+    /// Unity player install inventory (`ghidrust_unity_inventory::inventory_path`).
+    UnityInventory,
     /// Folder → PE inventory (VERSIONINFO catalog) via `ghidrust_core::inventory`.
     InstallInventory,
     /// Bounded directory tree browser via `ghidrust_core::tree_index`.
@@ -121,6 +127,9 @@ impl PaneKind {
         PaneKind::Il2cppMetadata,
         PaneKind::Il2cppMethods,
         PaneKind::Il2cppIcalls,
+        PaneKind::Il2cppTouchMap,
+        PaneKind::Il2cppStubs,
+        PaneKind::UnityInventory,
         PaneKind::InstallInventory,
         PaneKind::FileSystemBrowser,
         PaneKind::AnalysisArtifacts,
@@ -169,18 +178,13 @@ impl PaneKind {
             PaneKind::Il2cppMetadata => "IL2CPP Metadata",
             PaneKind::Il2cppMethods => "IL2CPP Methods",
             PaneKind::Il2cppIcalls => "IL2CPP ICalls",
+            PaneKind::Il2cppTouchMap => "IL2CPP Touch Map",
+            PaneKind::Il2cppStubs => "IL2CPP Stubs",
+            PaneKind::UnityInventory => "Unity Inventory",
             PaneKind::InstallInventory => "Install Inventory",
             PaneKind::FileSystemBrowser => "File System Browser",
             PaneKind::AnalysisArtifacts => "Analysis Artifacts",
         }
-    }
-
-    /// Short shell-pane test name (used by `GhidrustApp::shell_panes()`).
-    ///
-    /// Kept alphabetical + unique so structural tests can assert every provider is present.
-    pub const fn shell_pane_name(self) -> &'static str {
-        // Titles happen to be unique across our catalog; use them as canonical.
-        self.title()
     }
 
     /// plugin owner (for empty-state hint text).
@@ -226,6 +230,9 @@ impl PaneKind {
             PaneKind::Il2cppMetadata => "Il2cppMetadataPlugin",
             PaneKind::Il2cppMethods => "Il2cppMethodMapPlugin",
             PaneKind::Il2cppIcalls => "Il2cppICallsPlugin",
+            PaneKind::Il2cppTouchMap => "Il2cppTouchMapPlugin",
+            PaneKind::Il2cppStubs => "Il2cppStubsPlugin",
+            PaneKind::UnityInventory => "UnityInventoryPlugin",
             PaneKind::InstallInventory => "InstallInventoryPlugin",
             PaneKind::FileSystemBrowser => "FileSystemBrowserPlugin",
             PaneKind::AnalysisArtifacts => "AnalysisArtifactsPlugin",
@@ -233,6 +240,7 @@ impl PaneKind {
     }
 
     /// True if backend implementation is Stage-0 or better (used to hide "backend pending" copy).
+    #[cfg(test)]
     pub const fn has_backend(self) -> bool {
         matches!(
             self,
@@ -271,9 +279,14 @@ impl PaneKind {
                 | PaneKind::Il2cppMetadata
                 | PaneKind::Il2cppMethods
                 | PaneKind::Il2cppIcalls
+                | PaneKind::Il2cppTouchMap
+                | PaneKind::Il2cppStubs
+                | PaneKind::UnityInventory
                 | PaneKind::InstallInventory
                 | PaneKind::FileSystemBrowser
                 | PaneKind::AnalysisArtifacts
+                | PaneKind::RegisterManager
+                | PaneKind::DataTypeManager
         )
     }
 
@@ -320,6 +333,9 @@ impl PaneKind {
             PaneKind::Il2cppMetadata => "pane_il2cpp_metadata",
             PaneKind::Il2cppMethods => "pane_il2cpp_methods",
             PaneKind::Il2cppIcalls => "pane_il2cpp_icalls",
+            PaneKind::Il2cppTouchMap => "pane_il2cpp_touch_map",
+            PaneKind::Il2cppStubs => "pane_il2cpp_stubs",
+            PaneKind::UnityInventory => "pane_unity_inventory",
             PaneKind::InstallInventory => "pane_install_inventory",
             PaneKind::FileSystemBrowser => "pane_fs_browser",
             PaneKind::AnalysisArtifacts => "pane_analysis_artifacts",
@@ -403,26 +419,26 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
 pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
     match kind {
         PaneKind::AgentConsole => "",
-        PaneKind::Bookmarks => "Backend pending — Bookmarks model + margin markers land in .",
+        PaneKind::Bookmarks => "Session bookmarks with margin markers.",
         PaneKind::Bytes => "",
         PaneKind::ChecksumGenerator => "",
-        PaneKind::CommentWindow => "Backend pending — comment model lands in .",
+        PaneKind::CommentWindow => "Program comments filter + jump to VA.",
         PaneKind::Console => "",
-        PaneKind::DataTypeManager => "Backend pending — DTM tree (Built-In / Program / Archive) lands in .",
+        PaneKind::DataTypeManager => "",
         PaneKind::DataTypePreview => "",
         PaneKind::DecompiledView => "Stage-1 SSA-C (expression fold + typed locals/params). Emit-time tokens when available; rename/commit wired.",
         PaneKind::CryptoCapabilities => "",
         PaneKind::CryptoConstants => "",
         PaneKind::Decrypt => "",
-        PaneKind::DefinedData => "Backend pending — Program::data_items model lands in .",
+        PaneKind::DefinedData => "Defined-data proxy from strings + RTTI; Apply-at-address via DTM.",
         PaneKind::DefinedStrings => "Uses ghidrust-core::analyzers::strings::run — session-only until Program::strings lands.",
-        PaneKind::DisassembledView => "Backend pending — virtual disassembly + pcode preview lands in .",
-        PaneKind::Entropy => "Backend pending — GPU/CPU histogram lands in .",
+        PaneKind::DisassembledView => "Listing-backed disassembly view.",
+        PaneKind::Entropy => "Shannon entropy strip over mapped blocks.",
         PaneKind::EquatesTable => "",
         PaneKind::ExternalPrograms => "",
-        PaneKind::FunctionCallGraph => "Backend pending — level-based directed graph lands in .",
-        PaneKind::FunctionCallTrees => "Backend pending — incoming/outgoing GTree pair lands in .",
-        PaneKind::FunctionGraph => "Backend pending — CFG vertex/edge layout lands in .",
+        PaneKind::FunctionCallGraph => "Level-based directed call graph from Stage-0 refs.",
+        PaneKind::FunctionCallTrees => "Incoming callers / outgoing callees trees.",
+        PaneKind::FunctionGraph => "CFG vertex/edge layout from Stage-0 blocks.",
         PaneKind::FunctionTags => "",
         PaneKind::FunctionsWindow => "Uses Program::analysis.functions.",
         PaneKind::Listing => "",
@@ -430,44 +446,25 @@ pub const fn backend_pending_message(kind: PaneKind) -> &'static str {
         PaneKind::Overview => "",
         PaneKind::ProgramTree => "",
         PaneKind::ProjectTree => "",
-        PaneKind::Python => "Backend pending — scripting host / MCP REPL lands in .",
+        PaneKind::Python => "MCP REPL — tool_name / tool_name {json} via ghidrust mcp (non-network).",
         PaneKind::RecoveredStrings => "",
-        PaneKind::RegisterManager => "Backend pending — register lattice values from live/debug backends.",
-        PaneKind::RelocationTable => "Uses Program::sections metadata; full PE/ELF reloc parse lands in .",
-        PaneKind::ScriptManager => "Backend pending — script catalog lands in .",
+        PaneKind::RegisterManager => "",
+        PaneKind::RelocationTable => "",
+        PaneKind::ScriptManager => "Catalog of ghidrust MCP tools; Run → CLI mapping or mcp tools/call.",
         PaneKind::SymbolReferences => "",
         PaneKind::SymbolTable => "Uses Program::analysis.symbols + functions (flat table).",
         PaneKind::SymbolTree => "",
-        PaneKind::TextEditor => "Backend pending — script editor lands in .",
+        PaneKind::TextEditor => "Multi-tab in-memory editor (Open/Save via rfd).",
         PaneKind::Il2cppMetadata => "",
         PaneKind::Il2cppMethods => "",
         PaneKind::Il2cppIcalls => "",
+        PaneKind::Il2cppTouchMap => "",
+        PaneKind::Il2cppStubs => "",
+        PaneKind::UnityInventory => "",
         PaneKind::InstallInventory => "",
         PaneKind::FileSystemBrowser => "",
         PaneKind::AnalysisArtifacts => "",
     }
-}
-
-/// Egui window helper: draw a floating provider pane with a close-toggle backing bool.
-///
-/// Kept as a public helper for future refactors that centralise floating-window creation.
-#[allow(dead_code)] // used by future refactor consolidating floating panes
-pub fn open_pane_window(
-    ctx: &egui::Context,
-    open: &mut bool,
-    kind: PaneKind,
-    default_size: egui::Vec2,
-    add_contents: impl FnOnce(&mut Ui),
-) {
-    if !*open {
-        return;
-    }
-    egui::Window::new(kind.title())
-        .id(egui::Id::new(kind.egui_id()))
-        .open(open)
-        .default_size(default_size)
-        .resizable(true)
-        .show(ctx, add_contents);
 }
 
 #[cfg(test)]

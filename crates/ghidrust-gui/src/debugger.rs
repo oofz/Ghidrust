@@ -9,11 +9,13 @@ use ghidrust_core::process::{
     process_attach_opts, process_break_clear, process_break_list, process_break_set,
     process_continue, process_detach, process_export_snapshot, process_launch, process_list,
     process_modules, process_pause, process_read, process_regions, process_resume, process_scan_mem,
-    process_stack, process_step_into, process_step_over, process_thread_context_get, process_threads,
-    process_wait, process_watch_expr, static_to_live, AttachOpts, BreakKind, BreakpointInfo,
-    LaunchRequest, ModuleInfo, ProcessInfo, ProcessSession, ReadResult, RegionInfo, RegisterSet,
-    ScanHit, ScanOpts, SessionMode, StackFrame, StopEvent, ThreadInfo, WatchResult,
+    process_stack, process_step_into, process_step_out, process_step_over,
+    process_thread_context_get, process_thread_context_set, process_threads, process_wait,
+    process_watch_expr, static_to_live, AttachOpts, BreakKind, BreakpointInfo, LaunchRequest,
+    ModuleInfo, ProcessInfo, ProcessSession, ReadResult, RegionInfo, RegisterSet, ScanHit,
+    ScanOpts, SessionMode, StackFrame, StopEvent, ThreadInfo, WatchResult,
 };
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Host window egui / layout id.
@@ -68,7 +70,7 @@ impl DebuggerPane {
     }
 
     /// display title (legacy Window menu / provider `TITLE`).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const fn title(self) -> &'static str {
         match self {
             DebuggerPane::Targets => "Debugger Targets",
@@ -117,7 +119,7 @@ impl DebuggerPane {
     }
 
     /// Columns rendered in the empty-state table (layout).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const fn columns(self) -> &'static [&'static str] {
         match self {
             DebuggerPane::Targets => &["Name", "Type", "State"],
@@ -134,7 +136,7 @@ impl DebuggerPane {
     }
 
     /// Copy pointing at the pending backend for this pane.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub const fn backend_message(self) -> &'static str {
         match self {
             DebuggerPane::Targets => {
@@ -150,7 +152,7 @@ impl DebuggerPane {
                 "Live Process Bridge (Windows) — ghidrust_core::process_regions (VirtualQueryEx)."
             }
             DebuggerPane::Registers => {
-                "Live Process Bridge — process_thread_context_get (debug mode, x64 CONTEXT)."
+                "Live Process Bridge — process_thread_context_get/set (debug mode, editable x64 CONTEXT)."
             }
             DebuggerPane::Stack => {
                 "Live Process Bridge — process_stack (debug mode, RBP/pdata unwind)."
@@ -164,7 +166,9 @@ impl DebuggerPane {
             DebuggerPane::Watches => {
                 "Live Process Bridge — process_watch_expr (pointer-chase DSL)."
             }
-            DebuggerPane::DebuggerConsole => "Debugger console (session events / stop reasons).",
+            DebuggerPane::DebuggerConsole => {
+                "Debugger console — session log + command line (process helpers / mcp_host)."
+            }
         }
     }
 }
@@ -257,10 +261,14 @@ pub struct DebuggerState {
     pub threads_cache: Vec<ThreadInfo>,
     pub active_thread_id: Option<u32>,
     pub registers_cache: Option<RegisterSet>,
+    /// Editable hex strings keyed by register name (synced from `registers_cache`).
+    pub reg_edit: BTreeMap<String, String>,
     pub stack_cache: Vec<StackFrame>,
     pub watch_results: Vec<WatchResult>,
     pub last_stop: Option<StopEvent>,
     pub console_log: Vec<String>,
+    /// Debugger console command line (appends to log; optional process_* / mcp_host).
+    pub console_input: String,
     pub scan_aob: String,
     pub scan_string: String,
     pub scan_hits: Vec<ScanHit>,
@@ -305,10 +313,12 @@ impl Default for DebuggerState {
             threads_cache: Vec::new(),
             active_thread_id: None,
             registers_cache: None,
+            reg_edit: BTreeMap::new(),
             stack_cache: Vec::new(),
             watch_results: Vec::new(),
             last_stop: None,
             console_log: Vec::new(),
+            console_input: String::new(),
             scan_aob: String::new(),
             scan_string: String::new(),
             scan_hits: Vec::new(),
@@ -326,7 +336,32 @@ impl DebuggerState {
         }
     }
 
-    #[allow(dead_code)]
+    /// Toggle a local breakpoint, mirroring it to the attached debug session when possible.
+    pub fn toggle_breakpoint_live(&mut self, va: u64) {
+        if let Some(sess) = self.session.clone().filter(|s| s.mode == SessionMode::Debug) {
+            let existing = self
+                .live_breakpoints
+                .iter()
+                .find(|bp| bp.addr == va)
+                .map(|bp| bp.id);
+            let result = match existing {
+                Some(id) => process_break_clear(&sess.session_id, Some(id), None),
+                None => process_break_set(&sess.session_id, va, BreakKind::Software, false)
+                    .map(|_| ()),
+            };
+            match result {
+                Ok(()) => {
+                    self.log(format!("breakpoint toggled at {va:#x}"));
+                    self.refresh_debug_views();
+                    return;
+                }
+                Err(e) => self.live_error = Some(e),
+            }
+        }
+        self.toggle_breakpoint(va);
+    }
+
+    #[cfg(test)]
     pub fn has_breakpoint(&self, va: u64) -> bool {
         self.breakpoints.contains(&va)
     }
@@ -405,10 +440,167 @@ impl DebuggerState {
         self.threads_cache.clear();
         self.active_thread_id = None;
         self.registers_cache = None;
+        self.reg_edit.clear();
         self.stack_cache.clear();
         self.watch_results.clear();
         self.last_stop = None;
         self.scan_hits.clear();
+    }
+
+    /// Sync editable register fields from the live cache.
+    pub fn sync_reg_edit_from_cache(&mut self) {
+        let Some(regs) = self.registers_cache.clone() else {
+            self.reg_edit.clear();
+            return;
+        };
+        self.reg_edit.clear();
+        for (n, v) in register_pairs(&regs) {
+            self.reg_edit.insert(n.to_string(), format!("{v:#x}"));
+        }
+    }
+
+    /// Apply one edited register via `process_thread_context_set`.
+    pub fn apply_register_edit(&mut self, name: &str) {
+        let Some(sess) = self.session.clone() else {
+            self.live_error = Some("no session".into());
+            return;
+        };
+        if sess.mode != SessionMode::Debug {
+            self.live_error = Some("registers require mode=debug".into());
+            return;
+        }
+        let Some(tid) = self.active_thread_id else {
+            self.live_error = Some("no active thread".into());
+            return;
+        };
+        let Some(raw) = self.reg_edit.get(name).cloned() else {
+            return;
+        };
+        let Some(val) = parse_hex(raw.trim_start_matches('!')) else {
+            self.live_error = Some(format!("bad hex for {name}: {raw}"));
+            return;
+        };
+        let mut regs = match self.registers_cache.clone() {
+            Some(r) => r,
+            None => match process_thread_context_get(&sess.session_id, tid) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.live_error = Some(e);
+                    return;
+                }
+            },
+        };
+        if !set_register_field(&mut regs, name, val) {
+            self.live_error = Some(format!("unknown register {name}"));
+            return;
+        }
+        match process_thread_context_set(&sess.session_id, tid, &regs) {
+            Ok(()) => {
+                self.registers_cache = Some(regs);
+                self.reg_edit.insert(name.to_string(), format!("{val:#x}"));
+                self.log(format!("process_thread_context_set {name}={val:#x} tid={tid}"));
+                self.live_error = None;
+            }
+            Err(e) => self.live_error = Some(e),
+        }
+    }
+
+    /// Run a console command line: always appends to the log; optionally
+    /// dispatches built-in process helpers or `mcp_host` tool lines.
+    pub fn run_console_command(&mut self, line: &str) {
+        let line = line.trim();
+        if line.is_empty() {
+            return;
+        }
+        self.log(format!("> {line}"));
+        let lower = line.to_ascii_lowercase();
+        if let Some(sess) = self.session.clone() {
+            let sid = sess.session_id.clone();
+            match lower.as_str() {
+                "continue" | "g" | "c" => {
+                    match process_continue(&sid) {
+                        Ok(()) => self.log("continue ok"),
+                        Err(e) => self.log(format!("continue error: {e}")),
+                    }
+                    return;
+                }
+                "pause" | "break" | "interrupt" => {
+                    match process_pause(&sid) {
+                        Ok(()) => self.log("pause ok"),
+                        Err(e) => self.log(format!("pause error: {e}")),
+                    }
+                    return;
+                }
+                "step" | "stepi" | "si" => {
+                    match process_step_into(&sid, self.active_thread_id) {
+                        Ok(()) => {
+                            self.log("step-into requested");
+                            self.poll_stop(2000);
+                            self.refresh_debug_views();
+                        }
+                        Err(e) => self.log(format!("step error: {e}")),
+                    }
+                    return;
+                }
+                "stepover" | "next" | "ni" => {
+                    match process_step_over(&sid, self.active_thread_id) {
+                        Ok(()) => {
+                            self.log("step-over requested");
+                            self.poll_stop(2000);
+                            self.refresh_debug_views();
+                        }
+                        Err(e) => self.log(format!("stepover error: {e}")),
+                    }
+                    return;
+                }
+                "regs" | "registers" => {
+                    self.refresh_debug_views();
+                    if let Some(r) = &self.registers_cache {
+                        for (n, v) in register_pairs(r) {
+                            self.log(format!("  {n}={v:#x}"));
+                        }
+                    } else {
+                        self.log("no register cache");
+                    }
+                    return;
+                }
+                "threads" => {
+                    self.refresh_debug_views();
+                    let tids: Vec<u32> = self.threads_cache.iter().map(|t| t.thread_id).collect();
+                    for tid in tids {
+                        self.log(format!("  tid={tid}"));
+                    }
+                    return;
+                }
+                "help" => {
+                    self.log(
+                        "commands: continue|pause|step|stepover|regs|threads|help · or process_* / tool {json}",
+                    );
+                    return;
+                }
+                _ => {}
+            }
+        } else if matches!(
+            lower.as_str(),
+            "continue" | "g" | "c" | "pause" | "break" | "interrupt" | "step" | "stepi" | "si"
+                | "stepover" | "next" | "ni" | "regs" | "registers" | "threads"
+        ) {
+            self.log("no live session — attach/launch first");
+            return;
+        }
+
+        // Optional mcp_host path for process_* / other non-net tools.
+        if lower.starts_with("process_") || line.contains('{') {
+            match crate::mcp_host::parse_tool_line(line) {
+                Ok((tool, args)) => {
+                    let out = crate::mcp_host::invoke_tool(&tool, &args);
+                    for l in out.lines().take(40) {
+                        self.log(l.to_string());
+                    }
+                }
+                Err(e) => self.log(format!("parse error: {e}")),
+            }
+        }
     }
 
     pub fn log(&mut self, line: impl Into<String>) {
@@ -585,6 +777,7 @@ impl DebuggerState {
         if let Some(tid) = self.active_thread_id {
             if let Ok(regs) = process_thread_context_get(&sess.session_id, tid) {
                 self.registers_cache = Some(regs);
+                self.sync_reg_edit_from_cache();
             }
             if let Ok(frames) = process_stack(&sess.session_id, tid, 32) {
                 self.stack_cache = frames;
@@ -659,6 +852,20 @@ impl DebuggerState {
             Ok(()) => {
                 self.log(if over { "step over" } else { "step into" });
                 self.poll_stop(2000);
+            }
+            Err(e) => self.live_error = Some(e),
+        }
+    }
+
+    pub fn debug_step_out(&mut self) {
+        let Some(sess) = self.session.clone() else {
+            return;
+        };
+        let tid = self.active_thread_id;
+        match process_step_out(&sess.session_id, tid) {
+            Ok(()) => {
+                self.log("step out");
+                self.poll_stop(5000);
             }
             Err(e) => self.live_error = Some(e),
         }
@@ -1032,6 +1239,17 @@ fn render_host_body(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
             .clicked()
         {
             state.debug_step(true);
+        }
+        if ui
+            .add_enabled(dbg, egui::Button::new("Step Out (Shift+F8)").small())
+            .on_hover_text(if dbg {
+                "process_step_out"
+            } else {
+                "Requires mode=debug"
+            })
+            .clicked()
+        {
+            state.debug_step_out();
         }
         if ui
             .add_enabled(dbg, egui::Button::new("Wait stop").small())
@@ -1760,13 +1978,13 @@ fn render_registers(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         return;
     };
     if sess.mode != SessionMode::Debug {
-        ui.weak("Registers require mode=debug (process_thread_context_get).");
+        ui.weak("Registers require mode=debug (process_thread_context_get / set).");
         return;
     }
     ui.horizontal(|ui| {
         ui.small(
             RichText::new(format!(
-                "tid={}",
+                "tid={} · edit hex → Set → process_thread_context_set",
                 state
                     .active_thread_id
                     .map(|t| t.to_string())
@@ -1784,47 +2002,53 @@ fn render_registers(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
             stop.reason, stop.rip
         ));
     }
-    let Some(regs) = state.registers_cache.clone() else {
+    if state.registers_cache.is_none() {
         ui.weak("No register cache — stop on a BP or Refresh after selecting a thread.");
         return;
-    };
-    let pairs = [
-        ("rax", regs.rax),
-        ("rbx", regs.rbx),
-        ("rcx", regs.rcx),
-        ("rdx", regs.rdx),
-        ("rsi", regs.rsi),
-        ("rdi", regs.rdi),
-        ("rbp", regs.rbp),
-        ("rsp", regs.rsp),
-        ("r8", regs.r8),
-        ("r9", regs.r9),
-        ("r10", regs.r10),
-        ("r11", regs.r11),
-        ("r12", regs.r12),
-        ("r13", regs.r13),
-        ("r14", regs.r14),
-        ("r15", regs.r15),
-        ("rip", regs.rip),
-        ("rflags", regs.rflags),
-    ];
+    }
+    if state.reg_edit.is_empty() {
+        state.sync_reg_edit_from_cache();
+    }
+    let names: Vec<&'static str> = register_pairs(state.registers_cache.as_ref().unwrap())
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    let mut apply_name: Option<String> = None;
     egui::ScrollArea::vertical()
         .id_salt("dbg_regs")
         .show(ui, |ui| {
             egui::Grid::new("dbg_regs_grid")
-                .num_columns(2)
+                .num_columns(3)
                 .striped(true)
                 .show(ui, |ui| {
                     ui.strong("Register");
                     ui.strong("Value");
+                    ui.strong("");
                     ui.end_row();
-                    for (n, v) in pairs {
-                        ui.monospace(n);
-                        ui.monospace(format!("{v:#018x}"));
+                    for n in &names {
+                        ui.monospace(*n);
+                        let entry = state
+                            .reg_edit
+                            .entry((*n).to_string())
+                            .or_insert_with(String::new);
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(entry)
+                                .desired_width(160.0)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            apply_name = Some((*n).to_string());
+                        }
+                        if ui.small_button("Set").clicked() {
+                            apply_name = Some((*n).to_string());
+                        }
                         ui.end_row();
                     }
                 });
         });
+    if let Some(n) = apply_name {
+        state.apply_register_edit(&n);
+    }
 }
 
 fn render_stack(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
@@ -1884,7 +2108,10 @@ fn render_stack(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
 
 fn render_console(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
     ui.horizontal(|ui| {
-        ui.small(RichText::new("Session events / stop reasons").color(muted));
+        ui.small(
+            RichText::new("Session events · command line (continue/step/regs or process_* {json})")
+                .color(muted),
+        );
         if ui.button("Clear log").clicked() {
             state.console_log.clear();
         }
@@ -1898,7 +2125,6 @@ fn render_console(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
                     Ok(snap) => {
                         if let Ok(j) = serde_json::to_string_pretty(&snap) {
                             state.log(format!("snapshot ok bytes={}", j.len()));
-                            // Keep a short head in the log for the user.
                             for line in j.lines().take(12) {
                                 state.log(line.to_string());
                             }
@@ -1914,14 +2140,35 @@ fn render_console(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
     egui::ScrollArea::vertical()
         .id_salt("dbg_console")
         .stick_to_bottom(true)
+        .max_height(280.0)
         .show(ui, |ui| {
             if state.console_log.is_empty() {
-                ui.weak("No events yet.");
+                ui.weak("No events yet — type a command below.");
             }
             for line in &state.console_log {
                 ui.monospace(line);
             }
         });
+    ui.separator();
+    let mut submit = false;
+    ui.horizontal(|ui| {
+        ui.label(">");
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut state.console_input)
+                .desired_width(f32::INFINITY)
+                .hint_text("continue · step · regs · process_threads {\"session_id\":\"…\"}"),
+        );
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            submit = true;
+        }
+        if ui.button("Run").clicked() {
+            submit = true;
+        }
+    });
+    if submit {
+        let cmd = std::mem::take(&mut state.console_input);
+        state.run_console_command(&cmd);
+    }
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
@@ -1931,6 +2178,54 @@ fn parse_hex(s: &str) -> Option<u64> {
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
     u64::from_str_radix(s, 16).ok()
+}
+
+fn register_pairs(regs: &RegisterSet) -> [(&'static str, u64); 18] {
+    [
+        ("rax", regs.rax),
+        ("rbx", regs.rbx),
+        ("rcx", regs.rcx),
+        ("rdx", regs.rdx),
+        ("rsi", regs.rsi),
+        ("rdi", regs.rdi),
+        ("rbp", regs.rbp),
+        ("rsp", regs.rsp),
+        ("r8", regs.r8),
+        ("r9", regs.r9),
+        ("r10", regs.r10),
+        ("r11", regs.r11),
+        ("r12", regs.r12),
+        ("r13", regs.r13),
+        ("r14", regs.r14),
+        ("r15", regs.r15),
+        ("rip", regs.rip),
+        ("rflags", regs.rflags),
+    ]
+}
+
+fn set_register_field(regs: &mut RegisterSet, name: &str, val: u64) -> bool {
+    match name.to_ascii_lowercase().as_str() {
+        "rax" => regs.rax = val,
+        "rbx" => regs.rbx = val,
+        "rcx" => regs.rcx = val,
+        "rdx" => regs.rdx = val,
+        "rsi" => regs.rsi = val,
+        "rdi" => regs.rdi = val,
+        "rbp" => regs.rbp = val,
+        "rsp" => regs.rsp = val,
+        "r8" => regs.r8 = val,
+        "r9" => regs.r9 = val,
+        "r10" => regs.r10 = val,
+        "r11" => regs.r11 = val,
+        "r12" => regs.r12 = val,
+        "r13" => regs.r13 = val,
+        "r14" => regs.r14 = val,
+        "r15" => regs.r15 = val,
+        "rip" => regs.rip = val,
+        "rflags" => regs.rflags = val,
+        _ => return false,
+    }
+    true
 }
 
 #[cfg(test)]

@@ -103,7 +103,7 @@ impl NavHistory {
     }
 
     /// Currently-selected location (last pushed / most recent nav step).
-    #[allow(dead_code)] // read by future Overview status chip
+    #[cfg(test)]
     pub fn current(&self) -> Option<NavLocation> {
         self.current
     }
@@ -116,8 +116,7 @@ impl NavHistory {
         self.forward.len()
     }
 
-    /// Clear all nav state (used when closing a program).
-    #[allow(dead_code)] // reserved for File → Close program hook
+    /// Clear all nav state (used when closing / switching program).
     pub fn clear(&mut self) {
         self.back.clear();
         self.forward.clear();

@@ -42,9 +42,6 @@ pub enum TokenKind {
     Syntax,
     /// Whitespace-only chunk (preserved so we can round-trip render).
     Whitespace,
-    /// Newline sentinel (reserved for future non-`\n`-split renderers).
-    #[allow(dead_code)]
-    Newline,
 }
 
 /// One decompiler line, with its (optional) source instruction address and its tokens.
@@ -409,16 +406,13 @@ fn first_hex_in(s: &str) -> Option<u64> {
 }
 
 /// Return every distinct occurrence of `text` in the given line set (for middle-click highlight).
-#[allow(dead_code)] // reserved for future "count occurrences" hover UI
+#[cfg(test)]
 pub fn occurrences_of<'a>(lines: &'a [DecompLine], text: &str) -> Vec<(usize, usize)> {
     let mut hits = Vec::new();
     for line in lines {
         for (ti, tok) in line.tokens.iter().enumerate() {
             if tok.text == text
-                && !matches!(
-                    tok.kind,
-                    TokenKind::Whitespace | TokenKind::Syntax | TokenKind::Newline
-                )
+                && !matches!(tok.kind, TokenKind::Whitespace | TokenKind::Syntax)
             {
                 hits.push((line.line, ti));
             }

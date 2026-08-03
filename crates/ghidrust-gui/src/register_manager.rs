@@ -15,6 +15,7 @@
 //! instead of piling into `main.rs`.
 
 use eframe::egui::{self, Color32, Ui};
+use ghidrust_core::process::RegisterSet;
 use std::collections::BTreeMap;
 
 /// One user-set register value covering an address range.
@@ -36,6 +37,15 @@ pub struct RegisterManagerState {
     pub input_start: String,
     pub input_end: String,
     pub input_value: String,
+    /// Last live snapshot pulled from debugger (`process_thread_context_get`).
+    pub live_snapshot: Option<RegisterSet>,
+}
+
+impl RegisterManagerState {
+    /// Refresh from an optional live `RegisterSet` (debugger session).
+    pub fn apply_live_registers(&mut self, regs: Option<&RegisterSet>) {
+        self.live_snapshot = regs.cloned();
+    }
 }
 
 /// One node in the register lattice tree.
@@ -520,22 +530,78 @@ pub fn group_by_kind() -> BTreeMap<RegisterKind, Vec<&'static RegisterNode>> {
 }
 
 /// Render the Register Manager pane.
+///
+/// `live_regs` — optional refresh from the Debugger host
+/// (`process_thread_context_get` when attached in debug mode).
 pub fn render(
     state: &mut RegisterManagerState,
     format: Option<&str>,
+    live_regs: Option<&RegisterSet>,
     ui: &mut Ui,
     muted: Color32,
     primary: Color32,
 ) {
+    if live_regs.is_some() {
+        state.apply_live_registers(live_regs);
+    }
     ui.heading("Register Manager");
     let arch = format.unwrap_or("(no program)");
     ui.small(
         egui::RichText::new(format!(
-            "Register Manager · {arch} register lattice · session-only values"
+            "Register Manager · {arch} register lattice · session values + optional live debug sync"
         ))
         .color(muted),
     );
     ui.separator();
+
+    if let Some(regs) = &state.live_snapshot {
+        egui::CollapsingHeader::new("Live (debugger)")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.small(
+                    egui::RichText::new("Synced from process_thread_context_get when attached")
+                        .color(muted),
+                );
+                egui::Grid::new("regmgr_live_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (n, v) in [
+                            ("RAX", regs.rax),
+                            ("RBX", regs.rbx),
+                            ("RCX", regs.rcx),
+                            ("RDX", regs.rdx),
+                            ("RSI", regs.rsi),
+                            ("RDI", regs.rdi),
+                            ("RBP", regs.rbp),
+                            ("RSP", regs.rsp),
+                            ("R8", regs.r8),
+                            ("R9", regs.r9),
+                            ("R10", regs.r10),
+                            ("R11", regs.r11),
+                            ("R12", regs.r12),
+                            ("R13", regs.r13),
+                            ("R14", regs.r14),
+                            ("R15", regs.r15),
+                            ("RIP", regs.rip),
+                            ("RFLAGS", regs.rflags),
+                        ] {
+                            ui.monospace(n);
+                            ui.monospace(format!("{v:#x}"));
+                            ui.end_row();
+                        }
+                    });
+            });
+        ui.separator();
+    } else {
+        ui.small(
+            egui::RichText::new(
+                "No live debugger registers — attach in debug mode to sync via process_thread_context_get.",
+            )
+            .color(muted)
+            .italics(),
+        );
+    }
 
     ui.horizontal(|ui| {
         ui.label("Filter:");

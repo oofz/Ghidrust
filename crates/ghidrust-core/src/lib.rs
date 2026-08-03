@@ -96,8 +96,9 @@ pub use process::{
     process_break_clear, process_break_list, process_break_set, process_continue, process_detach,
     process_export_snapshot, process_is_suspended, process_launch, process_list, process_modules,
     process_pause, process_read, process_regions, process_resolve, process_resume, process_scan_mem,
-    process_stack, process_step_into, process_step_over, process_thread_context_get,
-    process_thread_context_set, process_threads, process_vtable_probe, process_wait,
+    process_stack, process_step_into, process_step_out, process_step_over,
+    process_thread_context_get, process_thread_context_set, process_threads,
+    process_vtable_probe, process_wait,
     process_watch_expr, static_to_live, AcAdvisory, AttachOpts, BreakKind, BreakpointInfo,
     ExportSnapshot, LaunchRequest, LaunchResult, ModuleInfo, ProcessError, ProcessErrorCode,
     ProcessInfo, ProcessSession, ReadResult, RegionInfo, RegisterSet, ResolveLive, RunState,
@@ -120,7 +121,7 @@ pub use rtti_catalog::{
     RttiQueryResult,
 };
 pub use section_notes::{section_notes_for, SectionNote};
-pub use theme::{m3_tokens, M3Tokens, ThemeMode};
+pub use theme::{m3_tokens, theme_tokens, AppearanceTheme, M3Tokens, ThemeMode};
 pub use tree_index::{list_tree, TreeEntry, TreeListOpts, TreeListResult};
 pub use xrefs::{
     calls_callees, instruction_targets, operand_addresses, rip_relative_targets, xrefs_from,

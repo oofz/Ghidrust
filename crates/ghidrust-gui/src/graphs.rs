@@ -30,13 +30,6 @@ pub struct GraphPaneState {
     /// Function Call Graph — expanded levels in / out (0 = source only).
     pub call_graph_levels_in: usize,
     pub call_graph_levels_out: usize,
-    /// Call Trees — expanded "incoming callers of X" set (function VAs).
-    /// Reserved for future stateful-tree work; expansion currently happens
-    /// on demand via `expand_tree_node`.
-    #[allow(dead_code)]
-    pub call_tree_expanded_in: BTreeSet<u64>,
-    #[allow(dead_code)]
-    pub call_tree_expanded_out: BTreeSet<u64>,
     /// Call Trees — filter out thunks.
     pub call_tree_hide_thunks: bool,
     /// Call Trees — "References Only" mode (data refs, no call edges).

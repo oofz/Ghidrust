@@ -1,23 +1,15 @@
-//! Ghidrust GUI ·, Text Editor, and
-//! MCP REPL / interpreter panes.
+//! Ghidrust GUI Script Manager, Text Editor, and MCP REPL panes.
 //!
-//! `` (Text Editor), and
-//! `` (Python REPL) get honest Ghidrust analogs:
-//!
-//! **** — categorised catalog of shipped Ghidrust MCP tools
-//!   (see `skill/SKILL.md`). Selecting a tool shows its description; the
-//!   `Run` button emits a Console message so users see the parity surface
-//!   without a live MCP host wired up.
-//! - **Text Editor** — multi-tab in-memory editor for `.rust` / `.py`
-//!   scripts on disk. Uses `rfd` to Open/Save files.
-//! - **MCP REPL** — a line-oriented prompt that logs commands to Console
-//!   and echoes a "Backend pending" hint. Full REPL wires into the
-//!   `ghidrust-cli mcp` stdio host in a follow-up.
-//!
-//! Extracted per internal modularization notes — new UI panes land here
-//! instead of piling into `main.rs`.
+//! - **Script Manager** — catalog of shipped Ghidrust MCP tools (non-network).
+//!   `Run` invokes `ghidrust` CLI (when mappable) or `ghidrust mcp` tools/call.
+//! - **Text Editor** — multi-tab in-memory editor for scripts on disk.
+//! - **MCP REPL** — line-oriented `tool_name` / `tool_name {json}` → MCP/CLI.
 
+use crate::mcp_host::{
+    invoke_tool, invoke_tool_with_session, parse_tool_line, McpStdioSession,
+};
 use eframe::egui::{self, Color32, Ui};
+use serde_json::json;
 use std::path::PathBuf;
 
 /// One script entry (Ghidrust MCP tools double as the catalog).
@@ -30,9 +22,7 @@ pub struct ScriptEntry {
     pub key_binding: String,
 }
 
-/// Built-in catalog — mirrors the MCP tool surface described in
-/// `skill/SKILL.md`. Order = order (alphabetical
-/// within category).
+/// Built-in catalog — real `ghidrust mcp` tool names (excludes all `net_*`).
 pub fn builtin_catalog() -> Vec<ScriptEntry> {
     let s = |name: &str, cat: &str, desc: &str| ScriptEntry {
         name: name.into(),
@@ -41,195 +31,84 @@ pub fn builtin_catalog() -> Vec<ScriptEntry> {
         key_binding: String::new(),
     };
     vec![
+        // Core
         s(
-            "mcp.list_methods",
-            "MCP · Functions",
-            "Enumerate methods in the active program (paginated).",
+            "server_info",
+            "MCP · Core",
+            "Package version, tool_surface, and feature flags.",
         ),
         s(
-            "mcp.list_functions",
-            "MCP · Functions",
-            "List every recovered function entry.",
+            "load",
+            "MCP · Core",
+            "Load a PE or ELF binary (path or project+file_id).",
         ),
         s(
-            "mcp.search_functions_by_name",
-            "MCP · Functions",
-            "Substring search over function names.",
+            "list_analyzers",
+            "MCP · Analysis",
+            "List Auto Analysis options (labels).",
         ),
         s(
-            "mcp.decompile_function",
-            "MCP · Decompiler",
-            "Return pseudo-C for a named function.",
+            "analyze",
+            "MCP · Analysis",
+            "Run selected analyzers on a binary path; optional GPU enrich.",
         ),
         s(
-            "mcp.decompile_function_by_address",
-            "MCP · Decompiler",
-            "Return pseudo-C for a function at a VA.",
+            "list_gpu_strategies",
+            "MCP · Analysis",
+            "Per-analyzer GPU strategy matrix.",
+        ),
+        // Disasm / decode
+        s(
+            "disassemble",
+            "MCP · Disasm",
+            "Disassemble at addr with decode engine options.",
         ),
         s(
-            "mcp.disassemble_function",
-            "MCP · Decompiler",
-            "Return decoded listing for a function.",
+            "decode_support",
+            "MCP · Disasm",
+            "Report decode engine / arch support matrix.",
         ),
         s(
-            "mcp.rename_function",
-            "MCP · Edits",
-            "Rename the function at a VA.",
+            "decode_query",
+            "MCP · Disasm",
+            "Engine introspection (insn/reg/group queries).",
         ),
         s(
-            "mcp.rename_function_by_address",
-            "MCP · Edits",
-            "Rename by address.",
+            "read_bytes",
+            "MCP · Disasm",
+            "Read raw bytes at a VA from a loaded path.",
+        ),
+        // Decompile
+        s(
+            "decompile",
+            "MCP · Decompile",
+            "Stage-1 expression-folded typed C; optional follow_stub.",
         ),
         s(
-            "mcp.rename_variable",
-            "MCP · Edits",
-            "Rename a local variable inside a function.",
+            "gpu_decompile",
+            "MCP · Decompile",
+            "GPU VRAM multipass decompile to .gdecomp.",
         ),
+        // Strings / crypto
         s(
-            "mcp.rename_data",
-            "MCP · Edits",
-            "Rename a global data item.",
-        ),
-        s(
-            "mcp.set_function_prototype",
-            "MCP · Edits",
-            "Set the C signature of a function.",
-        ),
-        s(
-            "mcp.set_local_variable_type",
-            "MCP · Edits",
-            "Retype a local variable.",
-        ),
-        s(
-            "mcp.set_decompiler_comment",
-            "MCP · Comments",
-            "Attach a decompiler-side comment.",
-        ),
-        s(
-            "mcp.set_disassembly_comment",
-            "MCP · Comments",
-            "Attach a listing-side comment.",
-        ),
-        s(
-            "mcp.list_classes",
-            "MCP · Program",
-            "Enumerate C++/RTTI classes recovered.",
-        ),
-        s(
-            "mcp.list_namespaces",
-            "MCP · Program",
-            "Enumerate scoped namespaces.",
-        ),
-        s(
-            "mcp.list_segments",
-            "MCP · Program",
-            "Enumerate mapped memory blocks / sections.",
-        ),
-        s(
-            "mcp.list_imports",
-            "MCP · Program",
-            "Enumerate PE import / IAT slots.",
-        ),
-        s(
-            "mcp.list_exports",
-            "MCP · Program",
-            "Enumerate exported symbols.",
-        ),
-        s(
-            "mcp.list_data_items",
-            "MCP · Program",
-            "Enumerate defined data items.",
-        ),
-        s(
-            "mcp.list_strings",
-            "MCP · Program",
+            "list_strings",
+            "MCP · Strings",
             "ASCII/UTF-16 strings; match/limit/raw blob.",
         ),
         s(
-            "mcp.search_strings",
-            "MCP · Program",
-            "Alias of list_strings (filter-oriented).",
-        ),
-        s(
-            "mcp.get_import_xrefs",
-            "MCP · Xrefs",
-            "Code sites referencing an import IAT slot.",
-        ),
-        s(
-            "mcp.get_string_xrefs",
-            "MCP · Xrefs",
-            "Resolve strings by filter, then xrefs to each.",
-        ),
-        s(
-            "mcp.get_xrefs_to",
-            "MCP · Xrefs",
-            "Refs to a VA; optional skip_stubs/classify.",
-        ),
-        s(
-            "mcp.get_xrefs_from",
-            "MCP · Xrefs",
-            "References emitted from a VA.",
-        ),
-        s(
-            "mcp.get_function_xrefs",
-            "MCP · Xrefs",
-            "Callers and callees of a function.",
-        ),
-        s(
-            "mcp.il2cpp_meta",
-            "MCP · IL2CPP",
-            "Parse global-metadata.dat types/methods.",
-        ),
-        s(
-            "mcp.il2cpp_map",
-            "MCP · IL2CPP",
-            "Metadata ↔ RVA map (null when unproven).",
-        ),
-        s(
-            "mcp.il2cpp_stubs",
-            "MCP · IL2CPP",
-            "List IL2CPP resolve stubs by icall name.",
-        ),
-        s(
-            "mcp.unity_inventory",
-            "MCP · Unity",
-            "Player install inventory (assemblies, plugins, metadata).",
-        ),
-        s(
-            "mcp.function_at",
-            "MCP · Functions",
-            "Containing function for a body VA.",
-        ),
-        s(
-            "mcp.function_create",
-            "MCP · Functions",
-            "Create/heal a function at VA (optional end).",
-        ),
-        s(
-            "mcp.decompile",
-            "MCP · Decompile",
-            "Stage-1 C; optional follow_stub for IL2CPP.",
-        ),
-        s(
-            "mcp.get_current_address",
-            "MCP · Cursor",
-            "Report the currently focused Listing VA.",
-        ),
-        s(
-            "mcp.get_current_function",
-            "MCP · Cursor",
-            "Report the function containing the cursor.",
-        ),
-        s(
-            "mcp.get_function_by_address",
-            "MCP · Functions",
-            "Fetch function metadata by VA.",
+            "search_strings",
+            "MCP · Strings",
+            "Filter-oriented alias of list_strings.",
         ),
         s(
             "crypt_constants",
             "MCP · Crypto",
-            "Crypto Constants constant-table hits.",
+            "Scan cryptographic constant tables (S-boxes, TEA, …).",
+        ),
+        s(
+            "list_crypt_constants",
+            "MCP · Crypto",
+            "List detected crypto constant hits (catalog form).",
         ),
         s(
             "recover_strings",
@@ -251,10 +130,175 @@ pub fn builtin_catalog() -> Vec<ScriptEntry> {
             "MCP · Crypto",
             "List detected cryptographic capabilities.",
         ),
+        // Functions / xrefs
+        s(
+            "function_at",
+            "MCP · Functions",
+            "Containing function for a body VA.",
+        ),
+        s(
+            "get_function_by_address",
+            "MCP · Functions",
+            "Fetch function metadata by VA.",
+        ),
+        s(
+            "function_create",
+            "MCP · Functions",
+            "Create/heal a function at VA (optional end).",
+        ),
+        s(
+            "get_xrefs_to",
+            "MCP · Xrefs",
+            "Refs to a VA; optional skip_stubs/classify.",
+        ),
+        s(
+            "get_xrefs_from",
+            "MCP · Xrefs",
+            "References emitted from a VA.",
+        ),
+        s(
+            "get_calls_from",
+            "MCP · Xrefs",
+            "Call sites from a function VA.",
+        ),
+        s(
+            "list_imports",
+            "MCP · Xrefs",
+            "Enumerate PE import / IAT slots.",
+        ),
+        s(
+            "get_import_xrefs",
+            "MCP · Xrefs",
+            "Code sites referencing an import IAT slot.",
+        ),
+        s(
+            "get_string_xrefs",
+            "MCP · Xrefs",
+            "Resolve strings by filter, then xrefs to each.",
+        ),
+        // Artifacts / FS
+        s(
+            "inventory",
+            "MCP · FS",
+            "Generic PE install inventory (exe/dll + VERSIONINFO).",
+        ),
+        s(
+            "list_tree",
+            "MCP · FS",
+            "Bounded file tree index (size/mtime).",
+        ),
+        s(
+            "artifact_list",
+            "MCP · Artifacts",
+            "List recent spilled analysis artifacts.",
+        ),
+        s(
+            "artifact_query",
+            "MCP · Artifacts",
+            "Page through an artifact with offset/limit.",
+        ),
+        s(
+            "artifact_get",
+            "MCP · Artifacts",
+            "Fetch a spilled analysis artifact by id or path.",
+        ),
+        // IL2CPP / Unity
+        s(
+            "il2cpp_meta",
+            "MCP · IL2CPP",
+            "Parse global-metadata.dat types/methods.",
+        ),
+        s(
+            "il2cpp_map",
+            "MCP · IL2CPP",
+            "Metadata ↔ RVA map (null when unproven).",
+        ),
+        s(
+            "il2cpp_touch_map",
+            "MCP · IL2CPP",
+            "Substring touch-map over metadata heaps.",
+        ),
+        s(
+            "il2cpp_stubs",
+            "MCP · IL2CPP",
+            "List IL2CPP resolve stubs by icall name.",
+        ),
+        s(
+            "il2cpp_icalls",
+            "MCP · IL2CPP",
+            "Resolve Unity engine icall name‖fn pointer tables.",
+        ),
+        s(
+            "unity_inventory",
+            "MCP · Unity",
+            "Player install inventory (assemblies, plugins, metadata).",
+        ),
+        // RTTI
+        s(
+            "rtti",
+            "MCP · RTTI",
+            "Recover C++ RTTI class names and vtable links.",
+        ),
+        s(
+            "rtti_query",
+            "MCP · RTTI",
+            "RTTI catalog query (filter/exact) with multi-vtable honesty.",
+        ),
+        s(
+            "rtti_gpu_bench",
+            "MCP · RTTI",
+            "CPU recover_rtti vs GPU rtti_scan with PCIe split.",
+        ),
+        // Process
+        s(
+            "process_list",
+            "MCP · Process",
+            "List OS processes (Live Process Bridge).",
+        ),
+        s(
+            "process_attach",
+            "MCP · Process",
+            "Attach to pid; mode=observe|debug.",
+        ),
+        s(
+            "process_modules",
+            "MCP · Process",
+            "List modules for an attached session.",
+        ),
+        s(
+            "process_break_set",
+            "MCP · Process",
+            "Set software breakpoint (debug mode).",
+        ),
+        s(
+            "process_continue",
+            "MCP · Process",
+            "Continue a stopped debug session.",
+        ),
+        s(
+            "process_step_into",
+            "MCP · Process",
+            "Single-step into (TF).",
+        ),
+        s(
+            "process_step_over",
+            "MCP · Process",
+            "Single-step over (TF MVP).",
+        ),
+        s(
+            "process_step_out",
+            "MCP · Process",
+            "Step out of current frame (debug mode).",
+        ),
+        s(
+            "process_vtable_probe",
+            "MCP · Process",
+            "Validate object* vtable; list slot targets as live VAs.",
+        ),
     ]
 }
 
-/// session state.
+/// Script Manager session state.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptManagerState {
     pub catalog: Vec<ScriptEntry>,
@@ -262,6 +306,9 @@ pub struct ScriptManagerState {
     pub selected: Option<usize>,
     /// User-assigned category filter ("" = all).
     pub category_filter: String,
+    /// Last Run stdout / JSON / error text shown in the pane.
+    pub last_result: String,
+    pub last_run_name: String,
 }
 
 impl ScriptManagerState {
@@ -355,10 +402,12 @@ impl TextEditorState {
 }
 
 /// MCP REPL session state.
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct MacropadReplState {
     pub input: String,
     pub transcript: Vec<ReplLine>,
+    /// Persistent `ghidrust mcp` child when available.
+    session: Option<McpStdioSession>,
 }
 
 #[derive(Debug, Clone)]
@@ -377,10 +426,10 @@ impl MacropadReplState {
             prompt: true,
             text: cmd.clone(),
         });
-        // Echo response: backend-pending honest hint.
-        let out = format!(
-            "Backend pending — MCP REPL not yet wired to ghidrust mcp stdio host. See skill/SKILL.md."
-        );
+        let out = match parse_tool_line(&cmd) {
+            Ok((name, args)) => invoke_tool_with_session(&mut self.session, &name, &args),
+            Err(e) => e,
+        };
         self.transcript.push(ReplLine {
             prompt: false,
             text: out.clone(),
@@ -390,9 +439,14 @@ impl MacropadReplState {
     }
 }
 
+/// Run a catalog tool (empty args) via CLI mapping or MCP tools/call.
+pub fn run_catalog_tool(name: &str) -> String {
+    invoke_tool(name, &json!({}))
+}
+
 // ── Rendering ────────────────────────────────────────────────────────────────
 
-/// Render the. Returns `Some(name)` if a Run was requested.
+/// Render Script Manager. Returns `Some(name)` if a Run was requested.
 pub fn render_script_manager(
     state: &mut ScriptManagerState,
     ui: &mut Ui,
@@ -402,7 +456,7 @@ pub fn render_script_manager(
     ui.heading("Script Manager");
     ui.small(
         egui::RichText::new(
-            "Script Manager · catalog is Ghidrust's MCP tool surface (see skill/SKILL.md)",
+            "Script Manager · Ghidrust MCP tools (non-network) · Run → ghidrust CLI / mcp",
         )
         .color(muted),
     );
@@ -454,7 +508,7 @@ pub fn render_script_manager(
     let mut requested_run: Option<String> = None;
     egui::ScrollArea::vertical()
         .id_salt("scriptmgr_scroll")
-        .max_height(360.0)
+        .max_height(280.0)
         .show(ui, |ui| {
             egui::Grid::new("scriptmgr_grid")
                 .num_columns(5)
@@ -499,6 +553,27 @@ pub fn render_script_manager(
             ui.monospace(&entry.name);
             ui.small(&entry.description);
         }
+    }
+
+    if let Some(name) = requested_run.clone() {
+        let out = run_catalog_tool(&name);
+        state.last_run_name = name;
+        state.last_result = out;
+    }
+
+    if !state.last_result.is_empty() {
+        ui.separator();
+        ui.label(
+            egui::RichText::new(format!("Result · {}", state.last_run_name))
+                .strong()
+                .color(primary),
+        );
+        egui::ScrollArea::vertical()
+            .id_salt("scriptmgr_result")
+            .max_height(180.0)
+            .show(ui, |ui| {
+                ui.monospace(egui::RichText::new(&state.last_result).color(muted));
+            });
     }
 
     requested_run
@@ -619,7 +694,10 @@ pub fn render_mcp_repl(
     primary: Color32,
 ) {
     ui.heading("Python (MCP REPL)");
-    ui.small(egui::RichText::new("MCP REPL · pipes to ghidrust mcp (stub)").color(muted));
+    ui.small(
+        egui::RichText::new("MCP REPL · ghidrust mcp stdio (tool_name or tool_name {json})")
+            .color(muted),
+    );
     ui.separator();
 
     egui::ScrollArea::vertical()
@@ -642,7 +720,7 @@ pub fn render_mcp_repl(
         let resp = ui.add(
             egui::TextEdit::singleline(&mut state.input)
                 .desired_width(ui.available_width() - 80.0)
-                .hint_text("call an MCP tool… e.g. mcp.list_functions"),
+                .hint_text(r#"server_info  |  list_strings {"path":"…"}"#),
         );
         let submit = ui.button("Run").clicked()
             || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
@@ -660,16 +738,50 @@ mod tests {
     fn builtin_catalog_covers_ghidrust_mcp_surface() {
         let cat = builtin_catalog();
         assert!(cat.len() >= 20);
+        assert!(
+            !cat.iter().any(|s| s.name.starts_with("net_")),
+            "catalog must exclude net_* tools"
+        );
         for want in [
-            "mcp.list_functions",
-            "mcp.decompile_function",
-            "mcp.rename_function",
-            "mcp.get_xrefs_to",
+            "load",
+            "analyze",
+            "disassemble",
+            "decompile",
+            "list_strings",
             "crypt_constants",
-            "recover_strings",
-            "decode_bake",
-            "decode_magic",
-            "list_crypto_capabilities",
+            "function_at",
+            "function_create",
+            "get_xrefs_to",
+            "get_xrefs_from",
+            "get_calls_from",
+            "inventory",
+            "list_tree",
+            "artifact_list",
+            "artifact_query",
+            "artifact_get",
+            "il2cpp_meta",
+            "il2cpp_map",
+            "il2cpp_icalls",
+            "il2cpp_touch_map",
+            "il2cpp_stubs",
+            "unity_inventory",
+            "decode_support",
+            "decode_query",
+            "process_list",
+            "process_attach",
+            "process_modules",
+            "process_break_set",
+            "process_continue",
+            "process_step_into",
+            "process_step_over",
+            "process_step_out",
+            "process_vtable_probe",
+            "server_info",
+            "list_analyzers",
+            "list_gpu_strategies",
+            "rtti",
+            "rtti_query",
+            "rtti_gpu_bench",
         ] {
             assert!(cat.iter().any(|s| s.name == want), "missing {want}");
         }
@@ -702,11 +814,13 @@ mod tests {
     #[test]
     fn repl_submit_appends_prompt_and_response() {
         let mut r = MacropadReplState::default();
-        r.input = "mcp.list_functions".into();
+        r.input = "server_info".into();
         r.submit();
         assert_eq!(r.transcript.len(), 2);
         assert!(r.transcript[0].prompt);
         assert!(!r.transcript[1].prompt);
         assert!(r.input.is_empty());
+        // Response is either real JSON from CLI/MCP or a resolve error — never the old stub.
+        assert!(!r.transcript[1].text.contains("Backend pending"));
     }
 }

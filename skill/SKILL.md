@@ -3,13 +3,15 @@ name: ghidrust
 description: >
   x86-64 Auto Analysis, projects, CLI/MCP, egui GUI, IL2CPP metadata, Unity player inventory,
   GPU analyzer kernels + multipass decompile, crypt-constants / recover-strings / decode bake /
-  crypto-capabilities. Exhaustive feature catalog with when-to-use guidance.
+  crypto-capabilities, Ghidnet native network dig/connections/capture/detect/pivots/rules.
+  Exhaustive feature catalog with when-to-use guidance.
   Triggers: /ghidrust, reverse engineer, RE a PE/ELF, disassemble, decode-support, decode-query,
   MCP ghidrust, strings/functions, crypt-constants, recover-strings, decode bake, decode magic,
   crypto-capabilities, GPU decompile, IL2CPP, global-metadata, unity-inventory, GameAssembly,
-  analyzer-bench, rtti-gpu-bench, bulk-bench.
+  analyzer-bench, rtti-gpu-bench, bulk-bench, Ghidnet, net dig, phone home, network pivot, IOC dig,
+  net_connections, net_detect, net_capture, net_rules_check, GNR, ghidrust-netcap.
 metadata:
-  short-description: "Ghidrust RE — decode, crypto recover, CLI, MCP, IL2CPP, Unity, analyzers, GPU"
+  short-description: "Ghidrust RE — decode, crypto, Ghidnet, CLI, MCP, IL2CPP, Unity, analyzers, GPU"
 ---
 
 # Ghidrust — agent skill
@@ -23,6 +25,9 @@ metadata:
 | Workspace root | repo root (`Cargo.toml` with `ghidrust-core`, `ghidrust-cli`, `ghidrust-gui`, `ghidrust-decomp`, `ghidrust-il2cpp`, `ghidrust-unity-inventory`) |
 | CLI | `cargo run -p ghidrust-cli --release -- <cmd>` or `target/release/ghidrust.exe` |
 | GUI | `cargo run -p ghidrust-gui --release` |
+| Ghidnet helper | `target/release/ghidrust-netcap` |
+| GNR rules | `rules/ghidrust-minimal.rules` |
+| Ghidnet SOP | [ghidnet.md](ghidnet.md) (`tool_surface >= 8`) |
 | Fixtures | `fixtures/tiny_x64.pe`, `fixtures/analysis_lab.pe`, `fixtures/tiny_x64.elf`, `fixtures/il2cpp/*` |
 | Docs | `README.md`, `docs/IL2CPP.md`, `docs/GPU_ANALYZER_MATRIX.md`, `docs/PARALLEL_RE_RESEARCH.md` |
 | Decode API | `ghidrust-decode::Engine` — `open`, `disasm`, `disasm_one`, `option`, `insn_name`, `reg_name`, `group_name`, `regs_access`; re-exported from `ghidrust-core` |
@@ -57,7 +62,7 @@ JSON shape:
 | `features.decode_diet` | `false` — full detail path (not diet build) |
 | `features.x86_reduce` | `false` — full x86 table (not x86 reduce build) |
 
-`server_info` also sets **`tool_surface: 6`** and lists decode + crypto tools under `features.surface` (`decode_support` / `decode_query` / `crypt_constants` / `recover_strings` / `decode_bake` / `decode_magic` / `list_crypto_capabilities`).
+`server_info` reports monotonic **`tool_surface`** (current **`8`** when Ghidnet is present) and lists surface tools under `features.surface` (decode/crypto/`net_*`). Prefer `server_info.network` for Ghidnet caps.
 
 ### CLI — `disasm`, `decode-support`, `decode-query`
 
@@ -263,7 +268,7 @@ Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
 
 ## Agent friction SOPs (required)
 
-- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer **`>= 4`** for bounded disasm / `get_calls_from`. Require **`>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags. Require **`>= 6`** for crypt-constants / recover-strings / decode bake|magic / crypto-capabilities. If `server_info` is missing, `tool_surface` is below the needed minimum, or expected tools are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
+- **Version / stale MCP**: Call `server_info` first (or read `initialize.serverInfo`). This skill requires **`tool_surface >= 3`** (touch-map, body_class map, function_create, live process + artifacts). Prefer **`>= 4`** for bounded disasm / `get_calls_from`. Require **`>= 5`** for `decode_support`, `decode_query`, and extended `disassemble` decode flags. Require **`>= 6`** for crypt-constants / recover-strings / decode bake|magic / crypto-capabilities. Require **`>= 8`** for native network tools (`net_*`, `server_info.network`). If `server_info` is missing, `tool_surface` is below the needed minimum, or expected tools are absent from `tools/list` → rebuild `ghidrust`, point the MCP `command` at that binary, **restart the MCP server**. Do **not** conclude live process is unsupported; do **not** invent heap-scan scripts as a substitute. CLI/GUI/MCP share one package version (`ghidrust --version`, MCP `version`, egui About).
 - **Crypto / obfuscated strings**: Prefer `crypt_constants` → `recover_strings` → `decode_bake`/`decode_magic` on leftover blobs; use `list_crypto_capabilities` to locate decrypt/encrypt API sites. Never invent plaintext — empty hits are honest.
 - **Artifacts**: When envelope `entry_count` > preview or the host truncates tool text, drain via `artifact_query` / `artifact get` until `next_offset` is null. Never assume truncated MCP text is complete.
 - **Program identity**: Prefer `load` with absolute `path`, or `project` + `file_id`. Facts always include `resolved_path` or honest null — resolve before analyze/decompile.
@@ -275,6 +280,7 @@ Brief line (`--brief` / MCP `listing_text`): `{addr:#x}: {mnemonic} {operands}`.
 - **RTTI catalog**: Prefer `rtti_query` (`--filter`/`--exact`) before mangled `.?AV` string archaeology. Multi-vtable types report `vtable_vas[]` honestly.
 - **UTF-16 xrefs**: If `search_strings` returns `utf16le`, query `get_string_xrefs` with `encoding=all` (or `utf16le`) before concluding “no refs”.
 - **Live process (Windows, `tool_surface >= 7`)**: Multi-step live work **must** use MCP (or one long-lived process). Default attach is **observe** (read-only). Pass `mode: "debug"` for break/step/registers/stack. Loop: `process_list` → `process_attach|process_launch` → `process_modules` → `process_resolve` → optional `process_break_set` / `process_scan` / `process_watch_expr` → `process_continue`/`process_wait` → regs/stack/`process_read` → `process_export_snapshot` → `process_detach`. Observe launch still uses CREATE_SUSPENDED + `process_resume`. Debug launch uses Windows debug APIs (initial break). Never chain separate CLI `ghidrust process` spawns expecting the same `session_id`. Bytes ≠ types. Hardware BP / instrument mode not enabled.
+- **Ghidnet (native, `tool_surface >= 8`)**: Prefer `net_dig` / `net_playbook` over hand-chained load/analyze for phone-home / IOC digs. Check `server_info.network`. Default pack: `rules/ghidrust-minimal.rules`. Multi-step capture/detect **must** use MCP or GUI Network host (`session_id` process-local). GUI: **Network** / **Window → Network** (Connections\|Capture\|Alerts\|Rules\|Dig); Dig → **Open in Listing**; Capture **Export path**; inline block only if `GHIDRUST_NET_INLINE=1`. Airgap: path-only dig; refuse live observe/capture/detect. Never invent hosts; `pid_confidence=unknown` ≠ ground truth; no foreign IDS. Full matrix/workflows: [ghidnet.md](ghidnet.md).
 - **IL2CPP offline → live**: (1) `il2cpp_touch_map` / `il2cpp_meta` / `il2cpp_map` for names + method RVAs (null = unknown offline; encrypted → `next_steps` with meta-sections/touch-map). (2) Require `body_class` not `shared_stub` / `semantics_mismatch` before treating a name as a hook target. (3) `decompile` + `follow_stub` for resolve stubs with mapped slots. (4) On `runtime_unresolved` / `trampoline_or_invoker` → live attach → `process_resolve(module, rva)` → `process_read`. (5) Multi-build work: `il2cpp map --baseline PREV.json` → inspect `build_skew` (stale **map catalog**, not only stale MCP binary).
 - **Skill bootstrap**: GUI project open / Start writes `.grok/skills/ghidrust/SKILL.md` (disk or embedded fallback) and shows a fail-loud checklist (mcp/skill/agents/context + hash).
 - **Do not**: invent enum ordinals; treat `section_notes` as proof of hooks; read `.gdecomp` dumps as text (metrics JSON only); hook shared stubs as unique gameplay methods.
@@ -318,6 +324,14 @@ Need crypto constants / obfuscated strings / peel a blob?
   → decode magic (-b64|-hex|…) [-depth N] [--crib TEXT] --json
   → MCP: crypt_constants / recover_strings / list_crypto_capabilities / decode_bake / decode_magic
   → analyze --analyzer "Find Crypt" / "Obfuscated Strings" / "Crypto Capabilities"
+
+Need network dig / phone-home / IOC → binary (Ghidnet, tool_surface >= 8)?
+  → server_info.network first; full matrix: skill/ghidnet.md
+  → MCP: net_connections → net_dig (execute)  OR  net_capture_* → net_flows → dig
+  → Detect: net_rules_check → net_detect → net_dig (alert_id)
+  → Pivots: net_pivots → net_dig host/ioc
+  → CLI: ghidrust net … ; GUI: Network host tabs
+  → Airgap: path-only net_dig; no foreign IDS
 
 Need GPU decompile at a VA?
   → gpu-decompile <path> --addr HEX   (metrics JSON; .gdecomp opaque)
@@ -469,6 +483,13 @@ Requires **`tool_surface >= 3`** (prefer **`>= 4`** for bounded disasm / `get_ca
 | `process_list` / `process_attach` / `process_launch` / `process_resume` / `process_detach` / `process_modules` / `process_read` / `process_resolve` / `process_regions` | pid / image / session / `mode` / module / rva / max | Live Process Bridge (Windows; default observe) |
 | `process_break_set` / `_clear` / `_list` / `process_continue` / `process_pause` / `process_wait` / `process_step_into` / `_over` / `process_threads` / `process_thread_context_get` / `_set` / `process_stack` | session / addr / thread_id / timeout_ms | Debug mode (`tool_surface >= 7`) |
 | `process_scan` / `process_watch_expr` / `process_vtable_probe` / `process_export_snapshot` | session / aob / expr / addr | Live data discovery (`tool_surface >= 7`) |
+| `net_dig` / `net_playbook` | path / pid / host / ioc / alert_id / execute / live | Dig playbooks + closed-loop (`tool_surface >= 8`; see [ghidnet.md](ghidnet.md)) |
+| `net_connections` / `net_owners` | pid / path / proto / max | Host socket → owner (airgap refuses) |
+| `net_ifaces` / `net_capture_start` / `_stop` / `_status` / `net_flows` | iface / filter / session_id / replay_path | Capture sessions (airgap refuses) |
+| `net_detect` / `net_alerts` | pcap / rules / max | GNR detect + alert queue |
+| `net_rules_list` / `net_rules_load` / `net_rules_check` | path | GNR pack list/load/check (`rules/ghidrust-minimal.rules`) |
+| `net_pivots` | pcap | DNS / TLS SNI / HTTP / SMB pivots |
+| `net_job_get` | job_id | **Stub** — do not rely on async dig jobs yet |
 
 MCP launch: `ghidrust mcp` / `target/release/ghidrust.exe mcp` (stdio; no host-specific paths).
 
