@@ -1,10 +1,12 @@
 //! Live data discovery: scan, watch_expr, vtable_probe (bytes ≠ types).
 
 use super::error::{ProcessError, ProcessErrorCode};
+#[cfg(windows)]
 use super::types::{
     ModuleInfo, RegionInfo, ScanHit, ScanResult, VtableProbeResult, VtableSlot, WatchResult,
     WatchStep,
 };
+#[cfg(windows)]
 use super::win_observe::{self, HANDLE};
 
 /// AOB pattern: hex bytes with `??` wildcards, space-separated.
@@ -50,6 +52,7 @@ pub fn find_aob(hay: &[u8], pat: &[Option<u8>]) -> Vec<usize> {
     hits
 }
 
+#[cfg(windows)]
 fn find_module<'a>(mods: &'a [ModuleInfo], va: u64) -> Option<&'a ModuleInfo> {
     mods.iter().find(|m| va >= m.base && va < m.base.wrapping_add(m.size))
 }
@@ -85,6 +88,7 @@ impl Default for ScanOpts {
     }
 }
 
+#[cfg(windows)]
 pub fn process_scan(
     handle: HANDLE,
     pid: u32,
@@ -208,7 +212,6 @@ pub fn process_scan(
             }
         }
         // Also re-scan same patterns for new hits that changed? Keep simple: changed among hits.
-        let _ = before_placeholder();
         diff_changed = Some(changed);
     }
 
@@ -222,13 +225,12 @@ pub fn process_scan(
     })
 }
 
-fn before_placeholder() {}
-
 /// Watch DSL:
 /// - `0xVA` or `VA` — read u64
 /// - `module+rva` e.g. `game.exe+0x1234`
 /// - chain: `0xVA->*+0x10->*+0x8`  (follow pointer, add offset)
 /// - `u32@0xVA` / `u64@…` / `f32@…` / `f64@…`
+#[cfg(windows)]
 pub fn eval_watch_expr(
     handle: HANDLE,
     pid: u32,
@@ -398,6 +400,7 @@ fn parse_offset_token(tok: &str) -> Result<u64, ProcessError> {
     parse_u64_flexible(t.trim_start_matches('+'))
 }
 
+#[cfg(windows)]
 fn resolve_token(tok: &str, mods: &[ModuleInfo], _base: Option<u64>) -> Result<u64, ProcessError> {
     let tok = tok.trim();
     if let Some((mod_name, rva_s)) = tok.split_once('+') {
@@ -458,6 +461,7 @@ fn parse_u64_flexible(s: &str) -> Result<u64, ProcessError> {
     })
 }
 
+#[cfg(windows)]
 pub fn vtable_probe(
     handle: HANDLE,
     pid: u32,

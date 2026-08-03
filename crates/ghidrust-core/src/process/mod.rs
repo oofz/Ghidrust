@@ -19,7 +19,10 @@ mod win_debug;
 mod win_observe;
 
 pub use ac_advisory::{scan_modules_for_ac, AcAdvisory};
+#[cfg(windows)]
 pub use discovery::{eval_watch_expr, find_aob, parse_aob, ScanOpts};
+#[cfg(not(windows))]
+pub use discovery::{find_aob, parse_aob, ScanOpts};
 pub use error::{ProcessError, ProcessErrorCode};
 pub use session::{
     live_process_info_json, RunState, SessionMode, DEBUG_CAPS, OBSERVE_CAPS, SHIPPED_MODES,
@@ -866,7 +869,7 @@ pub fn process_vtable_probe(
     }
     #[cfg(not(windows))]
     {
-        let _ = (object_va, max_slots);
+        let _ = (session_id, object_va, max_slots);
         Err(ProcessError::platform().to_string())
     }
 }
@@ -922,7 +925,7 @@ pub fn process_export_snapshot(
     }
     #[cfg(not(windows))]
     {
-        let _ = (watch_exprs, nearby_vas);
+        let _ = (session_id, watch_exprs, nearby_vas);
         Err(ProcessError::platform().to_string())
     }
 }
