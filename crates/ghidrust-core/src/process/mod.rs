@@ -7,7 +7,6 @@
 //! Sessions are in-process (`session_id`). CLI one-shot cannot reuse sessions across spawns.
 
 mod ac_advisory;
-mod backend;
 mod discovery;
 mod error;
 mod session;
@@ -29,30 +28,30 @@ pub use session::{
 };
 pub use types::*;
 
-use std::collections::HashMap;
 use std::path::Path;
+#[cfg(windows)]
+use std::collections::HashMap;
+#[cfg(windows)]
 use std::sync::Mutex;
 
-#[cfg_attr(not(windows), allow(dead_code))]
+/// Live session state — Windows-only (attach/launch never succeed elsewhere).
+#[cfg(windows)]
 struct Attached {
     pid: u32,
     mode: SessionMode,
     run_state: RunState,
-    #[cfg(windows)]
     handle: isize,
     /// Primary thread from CreateProcess (observe launch); closed on detach.
-    #[cfg(windows)]
     thread: Option<isize>,
     suspended: bool,
-    #[allow(dead_code)]
-    launched_image: Option<String>,
     advisory: Option<AcAdvisory>,
-    #[cfg(windows)]
     debug: Option<win_debug::DebugSession>,
 }
 
+#[cfg(windows)]
 static SESSIONS: Mutex<Option<HashMap<String, Attached>>> = Mutex::new(None);
 
+#[cfg(windows)]
 fn with_sessions<F, R>(f: F) -> R
 where
     F: FnOnce(&mut HashMap<String, Attached>) -> R,
@@ -80,13 +79,21 @@ fn session_report(a: &Attached, session_id: &str) -> ProcessSession {
 }
 
 fn require_session_cap(session_id: &str, cap: &str) -> Result<SessionMode, String> {
-    with_sessions(|m| {
-        let a = m
-            .get(session_id)
-            .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())?;
-        a.mode.require(cap).map_err(|e| e.to_string())?;
-        Ok(a.mode)
-    })
+    #[cfg(windows)]
+    {
+        with_sessions(|m| {
+            let a = m
+                .get(session_id)
+                .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())?;
+            a.mode.require(cap).map_err(|e| e.to_string())?;
+            Ok(a.mode)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (session_id, cap);
+        Err(ProcessError::platform().to_string())
+    }
 }
 
 /// List processes (Windows). Other platforms return a clear error.
@@ -139,7 +146,6 @@ pub fn process_attach_opts(pid: u32, opts: &AttachOpts) -> Result<ProcessSession
                 handle,
                 thread: None,
                 suspended: false,
-                launched_image: None,
                 advisory: Some(adv),
                 debug: Some(dbg),
             };
@@ -164,7 +170,6 @@ pub fn process_attach_opts(pid: u32, opts: &AttachOpts) -> Result<ProcessSession
                 handle,
                 thread: None,
                 suspended: false,
-                launched_image: None,
                 advisory: Some(adv),
                 debug: None,
             };
@@ -232,7 +237,6 @@ pub fn process_launch(req: &LaunchRequest) -> Result<LaunchResult, String> {
                 handle: h_proc,
                 thread: None,
                 suspended: matches!(run_state, RunState::Stopped),
-                launched_image: Some(image_str.clone()),
                 advisory: Some(adv),
                 debug: Some(dbg),
             };
@@ -267,7 +271,6 @@ pub fn process_launch(req: &LaunchRequest) -> Result<LaunchResult, String> {
                 handle: h_proc,
                 thread: Some(h_thread),
                 suspended: true,
-                launched_image: Some(image_str.clone()),
                 advisory: Some(adv),
                 debug: None,
             };
@@ -328,11 +331,19 @@ pub fn process_resume(session_id: &str) -> Result<(), String> {
 }
 
 pub fn process_is_suspended(session_id: &str) -> Result<bool, String> {
-    with_sessions(|m| {
-        m.get(session_id)
-            .map(|a| a.suspended)
-            .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())
-    })
+    #[cfg(windows)]
+    {
+        with_sessions(|m| {
+            m.get(session_id)
+                .map(|a| a.suspended)
+                .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = session_id;
+        Err(ProcessError::platform().to_string())
+    }
 }
 
 pub fn launch_command_line(image: &Path, args: Option<&str>) -> String {
@@ -838,23 +849,23 @@ pub fn process_watch_expr(
     expr: &str,
     matrix_heuristic: bool,
 ) -> Result<WatchResult, String> {
-    // watch_read for observe; full watch for debug — allow watch_read always
-    let cap = with_sessions(|m| {
-        m.get(session_id)
-            .map(|a| a.mode)
-            .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())
-    })?;
-    if !cap.has("watch_read") && !cap.has("watch") {
-        return Err(ProcessError::capability_missing("watch_read").to_string());
-    }
     #[cfg(windows)]
     {
+        // watch_read for observe; full watch for debug — allow watch_read always
+        let cap = with_sessions(|m| {
+            m.get(session_id)
+                .map(|a| a.mode)
+                .ok_or_else(|| ProcessError::unknown_session(session_id).to_string())
+        })?;
+        if !cap.has("watch_read") && !cap.has("watch") {
+            return Err(ProcessError::capability_missing("watch_read").to_string());
+        }
         let (pid, handle) = session_handle(session_id)?;
         discovery::eval_watch_expr(handle, pid, expr, matrix_heuristic).map_err(|e| e.to_string())
     }
     #[cfg(not(windows))]
     {
-        let _ = (expr, matrix_heuristic);
+        let _ = (session_id, expr, matrix_heuristic);
         Err(ProcessError::platform().to_string())
     }
 }

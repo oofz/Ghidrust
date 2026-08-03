@@ -203,8 +203,6 @@ enum PumpCmd {
 }
 
 pub struct DebugSession {
-    #[allow(dead_code)]
-    pub pid: u32,
     pub process: HANDLE,
     cmd_tx: Sender<PumpCmd>,
     join: Option<JoinHandle<()>>,
@@ -233,7 +231,6 @@ impl DebugSession {
             pump_loop(pid, process, primary_tid, cmd_rx, shared2);
         });
         Self {
-            pid,
             process,
             cmd_tx,
             join: Some(join),
