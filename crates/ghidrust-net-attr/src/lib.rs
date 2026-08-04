@@ -198,8 +198,11 @@ mod win {
     }
 
     fn ipv4_string(addr: DWORD) -> String {
-        let a = Ipv4Addr::from(u32::from_le(addr));
-        a.to_string()
+        // GetExtendedTcpTable / UdpTable store IPv4 in *network byte order* (wire
+        // octets in memory). On little-endian that loads as e.g. 0x0100_007f for
+        // 127.0.0.1. `Ipv4Addr::from(u32)` expects host order (0x7f00_0001), so
+        // using it directly yields 1.0.0.127. Take native memory bytes instead.
+        Ipv4Addr::from(addr.to_ne_bytes()).to_string()
     }
 
     fn tcp_state(s: DWORD) -> &'static str {
@@ -379,6 +382,20 @@ mod win {
             Ok(out)
         }
     }
+
+    #[cfg(test)]
+    mod ipv4_tests {
+        use super::ipv4_string;
+
+        #[test]
+        fn network_order_dword_formats_loopback() {
+            // In-memory octets 7f 00 00 01 load as LE DWORD 0x0100007f.
+            assert_eq!(ipv4_string(0x0100_007f), "127.0.0.1");
+            assert_eq!(ipv4_string(0), "0.0.0.0");
+            // 8.8.8.8 → memory 08 08 08 08 → DWORD 0x08080808 on any endian.
+            assert_eq!(ipv4_string(0x0808_0808), "8.8.8.8");
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -542,6 +559,23 @@ mod tests {
                         || r.local.contains(&port.to_string())
                 });
                 assert!(hit || !rows.is_empty(), "expected self connection, got {rows:?}");
+                for r in &rows {
+                    assert!(
+                        !r.local.starts_with("1.0.0.127") && !r.remote.starts_with("1.0.0.127"),
+                        "IPv4 octets reversed (endian bug): local={} remote={}",
+                        r.local,
+                        r.remote
+                    );
+                    if r.local.contains(&format!(":{port}")) || r.remote.contains(&format!(":{port}"))
+                    {
+                        assert!(
+                            r.local.starts_with("127.0.0.1") || r.remote.starts_with("127.0.0.1"),
+                            "loopback should be 127.0.0.1, got local={} remote={}",
+                            r.local,
+                            r.remote
+                        );
+                    }
+                }
                 if let Some(r) = rows.first() {
                     assert_eq!(r.pid, pid);
                 }
