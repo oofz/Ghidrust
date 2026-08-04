@@ -2,6 +2,8 @@
 //!
 //! Extracted per demonolith Wave 5.
 
+use ghidrust_core::FibScale;
+use crate::layout_tokens::{FieldWidth, WinTier};
 use super::{
     first_address_hint, first_scalar_hint, token_style, GhidrustApp,
     NewTypeKind,
@@ -21,7 +23,7 @@ use crate::menu_actions::{
 use crate::nav::NavLocation;
 use crate::panes::{BookmarkKind, PaneKind};
 use eframe::egui::{self, Color32};
-use ghidrust_core::{CommentKind, BUILTIN_TYPES};
+use ghidrust_core::{CommentKind, BUILTIN_TYPES, ThemeDensity};
 use std::collections::BTreeMap;
 
 impl GhidrustApp {
@@ -64,17 +66,17 @@ impl GhidrustApp {
             .color(muted),
         );
 
-        ui.add_space(8.0);
+        ui.add_space(FibScale::MD);
         ui.horizontal(|ui| {
             let card = |ui: &mut egui::Ui, title: &str, value: String| {
                 ui.group(|ui| {
-                    ui.set_min_width(120.0);
+                    ui.set_min_width(FibScale::XL4);
                     ui.label(egui::RichText::new(title).small().color(muted));
                     ui.label(
                         egui::RichText::new(value)
                             .strong()
                             .color(primary)
-                            .size(18.0),
+                            .size(FibScale::XL),
                     );
                 });
             };
@@ -89,7 +91,7 @@ impl GhidrustApp {
             card(ui, "Sections", format!("{}", prog.sections.len()));
         });
 
-        ui.add_space(10.0);
+        ui.add_space(FibScale::LG);
         if !self.last_analyzers_run.is_empty() {
             ui.label(egui::RichText::new("Analyzers last run / saved").strong());
             ui.horizontal_wrapped(|ui| {
@@ -102,14 +104,14 @@ impl GhidrustApp {
         }
 
         if !self.rtti.notes.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(FibScale::SM);
             ui.label(egui::RichText::new("RTTI notes").strong());
             for n in &self.rtti.notes {
                 ui.small(n);
             }
         }
 
-        ui.add_space(12.0);
+        ui.add_space(FibScale::LG);
         ui.separator();
         ui.label(egui::RichText::new("What to do next").strong());
         ui.label("• Symbol Tree (right): expand Classes / RTTI, type a filter, scroll the list.");
@@ -127,10 +129,10 @@ impl GhidrustApp {
 
         // Sample of first few RTTI hits for confidence without opening the full drawer
         if !self.rtti.classes.is_empty() {
-            ui.add_space(10.0);
+            ui.add_space(FibScale::LG);
             ui.label(egui::RichText::new("RTTI sample (first 12)").strong());
             egui::ScrollArea::vertical()
-                .max_height(160.0)
+                .max_height(FibScale::XL5)
                 .show(ui, |ui| {
                     for c in self.rtti.classes.iter().take(12) {
                         let va = c
@@ -148,6 +150,7 @@ impl GhidrustApp {
 
     /// draw all edit dialogs (rename / retype / comment / signature / new type).
     pub(crate) fn draw_edit_dialogs(&mut self, ctx: &egui::Context) {
+        let d = self.theme_spec().density;
         // Rename dialog .
         if self.show_rename_dialog {
             let mut close = false;
@@ -248,7 +251,7 @@ impl GhidrustApp {
                 .id(egui::Id::new("dialog_comment"))
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(WinTier::Sm.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     if let Some(va) = va {
@@ -328,7 +331,7 @@ impl GhidrustApp {
                 .id(egui::Id::new("dialog_fn_sig"))
                 .collapsible(false)
                 .resizable(true)
-                .default_width(520.0)
+                .default_width(WinTier::Md.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     if let Some(entry) = entry {
@@ -391,7 +394,7 @@ impl GhidrustApp {
                 .id(egui::Id::new("dialog_new_type"))
                 .collapsible(false)
                 .resizable(true)
-                .default_width(560.0)
+                .default_width(WinTier::Md.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label("Name:");
@@ -436,7 +439,7 @@ impl GhidrustApp {
                 .id(egui::Id::new("dialog_edit_type"))
                 .collapsible(false)
                 .resizable(true)
-                .default_width(560.0)
+                .default_width(WinTier::Md.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label("Name:");
@@ -489,7 +492,7 @@ impl GhidrustApp {
                 .id(egui::Id::new("dialog_type_chooser"))
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(WinTier::Sm.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     if let Some(va) = va {
@@ -501,7 +504,7 @@ impl GhidrustApp {
                         ui.label("Filter:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.type_chooser_filter)
-                                .desired_width(240.0)
+                                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                                 .hint_text("Type name…"),
                         );
                     });
@@ -513,7 +516,7 @@ impl GhidrustApp {
                         .unwrap_or_default();
                     egui::ScrollArea::vertical()
                         .id_salt("type_chooser_scroll")
-                        .max_height(280.0)
+                        .max_height(d.scroll_sm)
                         .show(ui, |ui| {
                             for name in BUILTIN_TYPES {
                                 if !q.is_empty() && !name.to_ascii_lowercase().contains(&q) {
@@ -598,7 +601,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.dtm_filter)
-                    .desired_width(200.0)
+                    .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Type name…"),
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1521,6 +1524,7 @@ impl GhidrustApp {
         // Render tokenised lines.
         let visuals = ui.visuals().clone();
         let text_color = visuals.text_color();
+        let syntax = self.theme_spec().semantics;
         let cross_line = self.decomp_cross_line;
         let highlight_text = self.decomp_highlight_text.clone();
         let mut clicked_addr: Option<u64> = None;
@@ -1559,7 +1563,7 @@ impl GhidrustApp {
                                 .selectable(false),
                             );
                             for tok in &line.tokens {
-                                let (color, italic) = token_style(&tok.kind, text_color);
+                                let (color, italic) = token_style(&tok.kind, text_color, &syntax);
                                 let highlighted = highlight_text
                                     .as_deref()
                                     .map(|h| h == tok.text)

@@ -1,4 +1,7 @@
-//! Shell chrome — nav toolbar, main toolbar, status bar.
+//! Shell chrome — nav toolbar and status bar.
+//!
+//! Project / binary open-import-load-analyze-save live in File / Analysis menus
+//! (and Project Tree), not duplicated under the menubar.
 //!
 //! Extracted per demonolith Wave 3. Nested under `app` for private field access.
 
@@ -8,7 +11,7 @@ use crate::panes::{BookmarkKind, PaneKind};
 use eframe::egui::{self, Color32};
 
 impl GhidrustApp {
-    /// Draw nav toolbar, main toolbar, and status bar panels.
+    /// Draw nav toolbar and status bar panels.
     pub(crate) fn draw_shell_chrome(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("nav_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -95,140 +98,6 @@ impl GhidrustApp {
                 );
                 ui.small(hist);
             });
-        });
-
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Project dir:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.project_dir_input)
-                        .desired_width(240.0)
-                        .hint_text("folder for New/Open project"),
-                );
-                if ui
-                    .button("Browse…")
-                    .on_hover_text("Choose project folder")
-                    .clicked()
-                {
-                    self.browse_project_dir();
-                }
-                ui.label("Name:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.project_name_input).desired_width(100.0),
-                );
-                if ui
-                    .button("New")
-                    .on_hover_text("Create project (browse if dir empty)")
-                    .clicked()
-                {
-                    if self.project_dir_input.trim().is_empty() {
-                        self.browse_and_create_project();
-                    } else if let Err(e) = self.create_project() {
-                        self.status = format!("error: {e}");
-                        self.log(self.status.clone());
-                    }
-                }
-                if ui
-                    .button("Open")
-                    .on_hover_text("Open project (browse if dir empty)")
-                    .clicked()
-                {
-                    if self.project_dir_input.trim().is_empty() {
-                        self.browse_and_open_project();
-                    } else if let Err(e) = self.open_project() {
-                        self.status = format!("error: {e}");
-                        self.log(self.status.clone());
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Binary:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.path_input)
-                        .desired_width(320.0)
-                        .hint_text("PE/ELF — or use Browse"),
-                );
-                if ui
-                    .button("Browse…")
-                    .on_hover_text("Choose binary file")
-                    .clicked()
-                {
-                    self.browse_binary_path();
-                }
-                if ui
-                    .button("Import")
-                    .on_hover_text("Import into project (browse if empty)")
-                    .clicked()
-                {
-                    if self.path_input.trim().is_empty() {
-                        self.browse_and_import();
-                    } else if let Err(e) = self.import_into_project() {
-                        self.status = format!("error: {e}");
-                        self.log(self.status.clone());
-                    }
-                }
-                if ui
-                    .button("Load")
-                    .on_hover_text("Load binary without project (browse if empty)")
-                    .clicked()
-                {
-                    if self.path_input.trim().is_empty() {
-                        self.browse_and_load_binary();
-                    } else {
-                        let p = self.path_input.clone();
-                        if let Err(e) = self.load_binary(p) {
-                            self.status = format!("error: {e}");
-                            self.log(self.status.clone());
-                        }
-                    }
-                }
-                if ui
-                    .button("Analyze…")
-                    .on_hover_text("Open analysis options (analyzers + GPU)")
-                    .clicked()
-                {
-                    self.pending_analyze_file_id = self.active_file_id.clone();
-                    self.show_analysis_dialog = true;
-                }
-                if ui.button("Save").clicked() {
-                    if let Err(e) = self.save_results() {
-                        self.status = format!("error: {e}");
-                        self.log(self.status.clone());
-                    }
-                }
-            });
-            let file_chips: Vec<(String, String, String)> = self
-                .project
-                .as_ref()
-                .map(|p| {
-                    let pname = p.meta.name.clone();
-                    let files = p
-                        .meta
-                        .files
-                        .iter()
-                        .map(|f| (f.id.clone(), f.display_name.clone()))
-                        .collect::<Vec<_>>();
-                    files
-                        .into_iter()
-                        .map(|(id, name)| (pname.clone(), id, name))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !file_chips.is_empty() {
-                let pname = file_chips[0].0.clone();
-                ui.horizontal(|ui| {
-                    ui.label(format!("Open: {pname} | files:"));
-                    for (_, id, name) in &file_chips {
-                        let selected = self.active_file_id.as_deref() == Some(id.as_str());
-                        if ui.selectable_label(selected, name).clicked() {
-                            if let Err(e) = self.open_project_file(id) {
-                                self.status = format!("error: {e}");
-                                self.log(self.status.clone());
-                            }
-                        }
-                    }
-                });
-            }
         });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {

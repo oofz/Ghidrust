@@ -30,6 +30,7 @@ use ghidrust_core::{
     analyzer_catalog, set_preferred_bulk_mode, AnalysisRunReport, AnalyzerInfo,
     AppearanceTheme, BulkScanMode, CommentKind, CryptConstantHit, CryptoCapabilityHit,
     FoundString, Instruction, ObfuscatedStringHit, Program, Project, RttiReport, ThemeMode,
+    ThemeSemantics,
 };
 use crate::graphs::{
     expand_tree_node, CallTreeNode, GraphPaneState,
@@ -535,24 +536,21 @@ pub(crate) fn first_address_hint(operands: &str) -> Option<String> {
     Some(format!("target addr {va:#x}"))
 }
 
-/// ``- syntax colour picker for the Decompiler pane.
-pub(crate) fn token_style(kind: &TokenKind, base: Color32) -> (Color32, bool) {
+/// Decompiler syntax colors from the active theme pack's semantic accents.
+pub(crate) fn token_style(
+    kind: &TokenKind,
+    base: Color32,
+    sem: &ThemeSemantics,
+) -> (Color32, bool) {
+    let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     match kind {
-        // Keywords: cyan .
-        TokenKind::Keyword => (Color32::from_rgb(0x64, 0xB5, 0xF6), false),
-        // Function names: warm orange.
-        TokenKind::Function => (Color32::from_rgb(0xFF, 0xB7, 0x4D), false),
-        // Variables: white/text default.
+        TokenKind::Keyword => (rgb(sem.syntax_keyword), false),
+        TokenKind::Function => (rgb(sem.syntax_function), false),
         TokenKind::Variable => (base, false),
-        // Block labels: purple.
-        TokenKind::Label => (Color32::from_rgb(0xBA, 0x68, 0xC8), false),
-        // Addresses: cyan for click-hint.
-        TokenKind::Address => (Color32::from_rgb(0x4D, 0xD0, 0xE1), false),
-        // Constants: lighter cyan.
-        TokenKind::Constant => (Color32::from_rgb(0x80, 0xDE, 0xEA), false),
-        // Comments: green italics.
-        TokenKind::Comment => (Color32::from_rgb(0x81, 0xC7, 0x84), true),
-        // Syntax / whitespace / newline: dimmed text.
+        TokenKind::Label => (rgb(sem.syntax_label), false),
+        TokenKind::Address => (rgb(sem.syntax_address), false),
+        TokenKind::Constant => (rgb(sem.syntax_constant), false),
+        TokenKind::Comment => (rgb(sem.syntax_comment), true),
         TokenKind::Syntax => (base.gamma_multiply(0.85), false),
         TokenKind::Whitespace => (base, false),
     }
@@ -659,7 +657,7 @@ impl GhidrustApp {
             path_input: String::new(),
             project_dir_input: String::new(),
             project_name_input: "MyProject".into(),
-            status: "Ready — File → New/Open Project, then Import binary".into(),
+            status: "Ready — File → New/Open Project, then File → Import binary".into(),
             console: vec!["Ghidrust CodeBrowser started.".into()],
             theme: ThemeMode::Dark,
             project: None,
@@ -683,7 +681,7 @@ impl GhidrustApp {
             show_program_tree: true,
             show_symbol_tree: true,
             show_console: true,
-            console_height: 280.0,
+            console_height: ghidrust_core::ThemeDensity::FIB_DESKTOP.console_default,
             show_analysis_dialog: false,
             use_gpu_experimental: false,
             pending_analyze_file_id: None,
@@ -881,18 +879,19 @@ impl eframe::App for GhidrustApp {
             // Detect Grok TUI child exit before paint.
             self.grok_pane.poll();
             let screen_h = ctx.screen_rect().height();
+            let d = self.theme_spec().density;
             // Own the height ourselves + paint a real drag grip. Built-in
             // `resizable(true)` on TopBottomPanel is unreliable here (snaps
             // back when content doesn't expand — egui #581 / 0.31).
-            let max_h = (screen_h - 160.0).max(220.0);
-            let min_h = 140.0;
+            let max_h = (screen_h - d.panel_symbol_min).max(d.scroll_sm);
+            let min_h = d.console_min;
             self.console_height = self.console_height.clamp(min_h, max_h);
             egui::TopBottomPanel::bottom("console")
                 .exact_height(self.console_height)
                 .show_separator_line(false)
                 .show(ctx, |ui| {
                     // Full-width drag strip at the top of the dock.
-                    let grip_h = 10.0;
+                    let grip_h = d.console_grip;
                     let (grip_rect, grip_resp) = ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), grip_h),
                         egui::Sense::drag(),
@@ -906,11 +905,13 @@ impl eframe::App for GhidrustApp {
                     };
                     ui.painter().rect_filled(grip_rect, 0.0, grip_color);
                     // Center handle bar.
-                    let bar =
-                        egui::Rect::from_center_size(grip_rect.center(), egui::vec2(48.0, 3.0));
+                    let bar = egui::Rect::from_center_size(
+                        grip_rect.center(),
+                        egui::vec2(d.console_handle_w, d.space_xs),
+                    );
                     ui.painter().rect_filled(
                         bar,
-                        1.5,
+                        d.space_xs / 2.0,
                         ui.visuals().widgets.noninteractive.fg_stroke.color,
                     );
                     if grip_resp.hovered() || grip_resp.dragged() {
@@ -1031,7 +1032,7 @@ impl eframe::App for GhidrustApp {
                 let primary = Color32::from_rgb(t.primary[0], t.primary[1], t.primary[2]);
                 let ok = Color32::from_rgb(0x4C, 0xAF, 0x50);
                 ui.horizontal(|ui| {
-                    m3_icon(ui, M3Icon::CheckCircle, 18.0, ok);
+                    m3_icon(ui, M3Icon::CheckCircle, self.theme_spec().density.icon_md, ok);
                     ui.label(egui::RichText::new(banner).color(primary).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Dismiss").clicked() {
@@ -1083,7 +1084,7 @@ impl eframe::App for GhidrustApp {
                 .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -48.0])
                 .title_bar(true)
                 .show(ctx, |ui| {
-                    ui.set_min_width(360.0);
+                    ui.set_min_width(self.theme_spec().density.scroll_md);
                     if let Some(job) = &self.analysis_job {
                         let n = job.names.len().max(1);
                         let step = (job.index + 1).min(n);
@@ -1102,9 +1103,9 @@ impl eframe::App for GhidrustApp {
                             ui.small("GPU experimental bulk path enabled");
                         }
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(self.theme_spec().density.space_sm);
                     m3_linear_progress(ui, frac, primary, track);
-                    ui.add_space(2.0);
+                    ui.add_space(ghidrust_core::FibScale::XXS);
                     ui.small(format!("{:.0}%", frac * 100.0));
                 });
         }

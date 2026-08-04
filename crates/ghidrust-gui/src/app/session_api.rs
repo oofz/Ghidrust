@@ -1269,6 +1269,11 @@ impl GhidrustApp {
         crate::theme::tokens(self.appearance, self.theme)
     }
 
+    /// Resolve the full swappable theme pack (colors + chrome + semantics).
+    pub fn theme_spec(&self) -> ghidrust_core::ThemeSpec {
+        crate::theme::spec(self.appearance, self.theme)
+    }
+
     pub fn apply_theme(&self, ctx: &egui::Context) {
         crate::theme::apply(ctx, self.appearance, self.theme)
     }

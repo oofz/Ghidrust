@@ -1,7 +1,8 @@
 //! Filter listing rows by mnemonic / instruction id / group.
 
+use crate::layout_tokens::FieldWidth;
 use ghidrust_core::ghidrust_decode::{group_name, insn_name};
-use ghidrust_core::{Arch, Instruction};
+use ghidrust_core::{Arch, Instruction, ThemeDensity};
 
 /// User-entered listing filter (all fields are substring / prefix matches).
 #[derive(Debug, Clone)]
@@ -69,17 +70,17 @@ pub fn ui_search_bar(ui: &mut egui::Ui, search: &mut ListingSearch) {
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut search.mnemonic)
-                .desired_width(90.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("mnemonic"),
         );
         ui.add(
             egui::TextEdit::singleline(&mut search.insn_id)
-                .desired_width(70.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("id"),
         );
         ui.add(
             egui::TextEdit::singleline(&mut search.group)
-                .desired_width(90.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("group"),
         );
         if search.is_active() && ui.small_button("Clear").clicked() {

@@ -1,9 +1,10 @@
 //! Decrypt / crypto-result pane helpers for egui.
 
+use crate::layout_tokens::FieldWidth;
 use eframe::egui::{self, Color32, Ui};
 use ghidrust_core::{
     bake, extract_iocs, magic, suggest_recipe_for_hint, BakeOp, CryptConstantHit,
-    CryptoCapabilityHit, ObfuscatedStringHit, Program,
+    CryptoCapabilityHit, ObfuscatedStringHit, Program, ThemeDensity,
 };
 use std::cell::RefCell;
 
@@ -334,7 +335,7 @@ pub fn ui_crypto_constants(
         return;
     }
     egui::ScrollArea::vertical()
-        .max_height(420.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             egui::Grid::new("crypt_const_grid")
                 .num_columns(4)
@@ -379,7 +380,7 @@ pub fn ui_recovered_strings(
         return;
     }
     egui::ScrollArea::vertical()
-        .max_height(420.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             egui::Grid::new("recovered_str_grid")
                 .num_columns(5)
@@ -432,7 +433,7 @@ pub fn ui_crypto_capabilities(
         return;
     }
     egui::ScrollArea::vertical()
-        .max_height(420.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             egui::Grid::new("crypto_cap_grid")
                 .num_columns(4)
@@ -595,7 +596,7 @@ fn ui_bake_tab(
     ui.small(format!("Input source: {}", state.input_source));
     ui.horizontal(|ui| {
         ui.label("VA:");
-        ui.add(egui::TextEdit::singleline(&mut state.va_input).desired_width(120.0));
+        ui.add(egui::TextEdit::singleline(&mut state.va_input).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)));
         ui.label("Length:");
         ui.add(egui::DragValue::new(&mut state.va_len).range(1..=0x10000));
         if ui.button("Load VA").clicked() {
@@ -613,7 +614,7 @@ fn ui_bake_tab(
     });
     ui.horizontal(|ui| {
         ui.label("File:");
-        ui.add(egui::TextEdit::singleline(&mut state.file_path).desired_width(280.0));
+        ui.add(egui::TextEdit::singleline(&mut state.file_path).desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP)));
         if ui.button("Load file").clicked() {
             match std::fs::read(&state.file_path) {
                 Ok(bytes) => {
@@ -633,9 +634,9 @@ fn ui_bake_tab(
     );
     ui.horizontal(|ui| {
         ui.label("Key hex:");
-        ui.add(egui::TextEdit::singleline(&mut state.key_hex).desired_width(180.0));
+        ui.add(egui::TextEdit::singleline(&mut state.key_hex).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)));
         ui.label("IV hex:");
-        ui.add(egui::TextEdit::singleline(&mut state.iv_hex).desired_width(180.0));
+        ui.add(egui::TextEdit::singleline(&mut state.iv_hex).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)));
     });
     ui.horizontal(|ui| {
         ui.label("Mode:");
@@ -647,9 +648,9 @@ fn ui_bake_tab(
                 }
             });
         ui.label("Nonce:");
-        ui.add(egui::TextEdit::singleline(&mut state.nonce_hex).desired_width(130.0));
+        ui.add(egui::TextEdit::singleline(&mut state.nonce_hex).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)));
         ui.label("Counter:");
-        ui.add(egui::TextEdit::singleline(&mut state.counter).desired_width(55.0));
+        ui.add(egui::TextEdit::singleline(&mut state.counter).desired_width(FieldWidth::Micro.px(&ThemeDensity::FIB_DESKTOP)));
     });
     ui.horizontal(|ui| {
         ui.label("Operation:");
@@ -670,7 +671,7 @@ fn ui_bake_tab(
     });
     ui.horizontal(|ui| {
         ui.label("Magic crib:");
-        ui.add(egui::TextEdit::singleline(&mut state.crib).desired_width(180.0));
+        ui.add(egui::TextEdit::singleline(&mut state.crib).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)));
         if ui.button("Magic").clicked() {
             state.bake_preset("magic");
         }

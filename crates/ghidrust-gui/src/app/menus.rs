@@ -500,14 +500,13 @@ impl GhidrustApp {
                             }
                         });
                         ui.menu_button("Window", |ui| {
-                            // Docked panels (long-standing).
+                            // Keep the open menu short — providers live in hover submenus.
                             ui.label(egui::RichText::new("Docked").small().weak());
                             ui.checkbox(&mut self.show_project_tree, "Project Tree (dock)");
                             ui.checkbox(&mut self.show_program_tree, "Program Tree (dock)");
                             ui.checkbox(&mut self.show_symbol_tree, "Symbol Tree (dock)");
                             ui.checkbox(&mut self.show_console, "Console (dock)");
                             ui.separator();
-                            // Center dock tabs (Listing/Decompiler prefer side-by-side).
                             ui.label(egui::RichText::new("Center Tabs").small().weak());
                             if ui
                                 .selectable_label(self.center == CenterPane::Overview, "Overview")
@@ -534,46 +533,34 @@ impl GhidrustApp {
                                 self.focus_center_tab(DockTab::DataTypes);
                             }
                             ui.separator();
-                            // Full provider catalog (floating windows).
-                            // Sorted alphabetically by title to mirror Window menu.
-                            ui.label(
-                                egui::RichText::new("All Providers (catalog)")
-                                    .small()
-                                    .weak(),
-                            );
-                            let mut providers: Vec<PaneKind> = PaneKind::ALL.to_vec();
-                            providers.sort_by_key(|k| k.title());
-                            for k in providers {
-                                // Skip providers that are already covered by a dock/checkbox above
-                                // to avoid double-toggles (Project/Program/Symbol Tree, Console).
-                                if matches!(
-                                    k,
-                                    PaneKind::ProjectTree
-                                        | PaneKind::ProgramTree
-                                        | PaneKind::SymbolTree
-                                        | PaneKind::Console
-                                        | PaneKind::Overview
-                                        | PaneKind::Listing
-                                        | PaneKind::DecompiledView
-                                        | PaneKind::DataTypeManager
-                                ) {
-                                    continue;
+                            ui.menu_button("Providers", |ui| {
+                                for group in PaneKind::WINDOW_MENU_GROUPS {
+                                    ui.menu_button(*group, |ui| {
+                                        let mut providers: Vec<PaneKind> = PaneKind::ALL
+                                            .iter()
+                                            .copied()
+                                            .filter(|k| k.window_menu_group() == Some(*group))
+                                            .collect();
+                                        providers.sort_by_key(|k| k.title());
+                                        for k in providers {
+                                            if k == PaneKind::AgentConsole {
+                                                if ui.button("Grok").clicked() {
+                                                    self.show_console = true;
+                                                    self.grok_pane.tab =
+                                                        crate::agent_pane::BottomTab::Grok;
+                                                    ui.close_menu();
+                                                }
+                                                continue;
+                                            }
+                                            let mut open = self.is_pane_open(k);
+                                            if ui.checkbox(&mut open, k.title()).changed() {
+                                                self.toggle_pane(k, open);
+                                            }
+                                        }
+                                    });
                                 }
-                                if k == PaneKind::AgentConsole {
-                                    if ui.button("Grok").clicked() {
-                                        self.show_console = true;
-                                        self.grok_pane.tab = crate::agent_pane::BottomTab::Grok;
-                                    }
-                                    continue;
-                                }
-                                let mut open = self.is_pane_open(k);
-                                if ui.checkbox(&mut open, k.title()).changed() {
-                                    self.toggle_pane(k, open);
-                                }
-                            }
+                            });
                             ui.separator();
-                            // Single tabbed Debugger host.
-                            ui.label(egui::RichText::new("Debugger tool").small().weak());
                             let mut dbg_open = self.debugger.host_open;
                             if ui.checkbox(&mut dbg_open, "Debugger").changed() {
                                 self.debugger.host_open = dbg_open;
@@ -585,18 +572,17 @@ impl GhidrustApp {
                                 }
                             }
                             if self.debugger.host_open {
-                                ui.indent("dbg_tab_focus", |ui| {
+                                ui.menu_button("Debugger tabs", |ui| {
                                     for p in DebuggerPane::TAB_ORDER {
                                         let selected = self.debugger.active_tab == *p;
-                                        if ui.selectable_label(selected, p.short_title()).clicked() {
+                                        if ui.selectable_label(selected, p.short_title()).clicked()
+                                        {
                                             self.debugger.focus_tab(*p);
+                                            ui.close_menu();
                                         }
                                     }
                                 });
                             }
-                            ui.separator();
-                            // Single tabbed Network (Ghidnet) host.
-                            ui.label(egui::RichText::new("Network tool (Ghidnet)").small().weak());
                             let mut net_open = self.network.host_open;
                             if ui.checkbox(&mut net_open, "Network").changed() {
                                 self.network.host_open = net_open;
@@ -605,17 +591,18 @@ impl GhidrustApp {
                                 }
                             }
                             if self.network.host_open {
-                                ui.indent("net_tab_focus", |ui| {
+                                ui.menu_button("Network tabs", |ui| {
                                     for p in NetworkPane::TAB_ORDER {
                                         let selected = self.network.active_tab == *p;
-                                        if ui.selectable_label(selected, p.short_title()).clicked() {
+                                        if ui.selectable_label(selected, p.short_title()).clicked()
+                                        {
                                             self.network.focus_tab(*p);
+                                            ui.close_menu();
                                         }
                                     }
                                 });
                             }
                             ui.separator();
-                            // layout tools.
                             if ui.button("Configure plugins…").clicked() {
                                 self.show_configure_dialog = true;
                                 self.configure_section = ConfigureSection::Plugins;

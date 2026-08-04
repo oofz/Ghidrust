@@ -1,6 +1,8 @@
 //! Small dialogs kept out of `app.rs` so menu-heavy agents can edit menus
 //! without merge conflicts on dialog bodies.
 
+use crate::layout_tokens::FieldWidth;
+use ghidrust_core::ThemeDensity;
 use eframe::egui::{self, Color32, Ui};
 
 /// State for Data Type Manager → Apply at address (button path; DnD not required).
@@ -52,7 +54,7 @@ pub fn ui_apply_type_at_address(
                 ui.label("Address:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.addr_input)
-                        .desired_width(180.0)
+                        .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                         .hint_text("0x140001000"),
                 );
             });
@@ -60,7 +62,7 @@ pub fn ui_apply_type_at_address(
                 ui.label("Type:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.type_name)
-                        .desired_width(220.0)
+                        .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                         .hint_text("dword / MyStruct…"),
                 );
             });
@@ -110,7 +112,7 @@ pub fn ui_dtm_apply_bar(
         ui.label("Apply at:");
         ui.add(
             egui::TextEdit::singleline(addr_input)
-                .desired_width(140.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x…"),
         );
         let typ = selected_type.unwrap_or("");

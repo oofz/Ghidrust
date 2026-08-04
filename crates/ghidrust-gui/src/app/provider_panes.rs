@@ -2,6 +2,7 @@
 //!
 //! Extracted per demonolith Wave 4.
 
+use ghidrust_core::ThemeDensity;
 use super::{render_call_tree_node, GhidrustApp};
 use crate::dock_tabs::DockTab;
 use crate::graphs::{
@@ -9,6 +10,7 @@ use crate::graphs::{
     layout_function_graph, render_call_graph, render_function_graph, FunctionGraphLayout,
 };
 use crate::menu_actions::STAGE0_MAX_INSNS;
+use crate::layout_tokens::WinTier;
 use crate::panes::{BookmarkKind, PaneKind};
 use crate::scripts::{
     render_mcp_repl, render_script_manager, render_text_editor, TextEditorRequest,
@@ -25,6 +27,7 @@ impl GhidrustApp {
     /// pending" empty state that names the analyzer/model responsible for filling
     /// them. See `crate::panes::empty_state` for the shared template.
     pub(crate) fn draw_provider_panes(&mut self, ctx: &egui::Context) {
+        let d = self.theme_spec().density;
         let t = self.tokens();
         let muted = Color32::from_rgb(
             t.on_surface_variant[0],
@@ -48,7 +51,7 @@ impl GhidrustApp {
                 .id(id)
                 .open(&mut open)
                 .resizable(true)
-                .default_size(egui::vec2(520.0, 360.0));
+                .default_size(WinTier::Md.size(&d));
 
             match kind {
                 PaneKind::Bookmarks => {
@@ -174,53 +177,53 @@ impl GhidrustApp {
                 }
                 // Graphs & maps.
                 PaneKind::FunctionGraph => {
-                    win.default_size(egui::vec2(760.0, 520.0))
+                    win.default_size(WinTier::Lg.size(&d))
                         .show(ctx, |ui| self.ui_function_graph_pane(ui, muted, primary));
                 }
                 PaneKind::FunctionCallGraph => {
-                    win.default_size(egui::vec2(760.0, 480.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Lg.size(&d)).show(ctx, |ui| {
                         self.ui_function_call_graph_pane(ui, muted, primary)
                     });
                 }
                 PaneKind::FunctionCallTrees => {
-                    win.default_size(egui::vec2(760.0, 460.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Lg.size(&d)).show(ctx, |ui| {
                         self.ui_function_call_trees_pane(ui, muted, primary)
                     });
                 }
                 PaneKind::Entropy => {
-                    win.default_size(egui::vec2(680.0, 220.0))
+                    win.default_size(WinTier::Md.size(&d))
                         .show(ctx, |ui| self.ui_entropy_pane(ui, muted, primary));
                 }
                 PaneKind::Overview => {
-                    win.default_size(egui::vec2(680.0, 340.0))
+                    win.default_size(WinTier::Md.size(&d))
                         .show(ctx, |ui| self.ui_overview(ui));
                 }
                 PaneKind::RegisterManager => {
-                    win.default_size(egui::vec2(560.0, 520.0))
+                    win.default_size(WinTier::Lg.size(&d))
                         .show(ctx, |ui| self.ui_register_manager_pane(ui, muted, primary));
                 }
                 // Scripts & interpreters.
                 PaneKind::ScriptManager => {
-                    win.default_size(egui::vec2(760.0, 480.0))
+                    win.default_size(WinTier::Lg.size(&d))
                         .show(ctx, |ui| self.ui_script_manager_pane(ui, muted, primary));
                 }
                 PaneKind::TextEditor => {
-                    win.default_size(egui::vec2(720.0, 520.0))
+                    win.default_size(WinTier::Lg.size(&d))
                         .show(ctx, |ui| self.ui_text_editor_pane(ui, muted, primary));
                 }
                 PaneKind::Python => {
-                    win.default_size(egui::vec2(640.0, 420.0))
+                    win.default_size(WinTier::Md.size(&d))
                         .show(ctx, |ui| self.ui_mcp_repl_pane(ui, muted, primary));
                 }
                 // Agent Friction Closure §13 — tool panes (real backends).
                 PaneKind::Il2cppMetadata => {
-                    win.default_size(egui::vec2(720.0, 560.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Lg.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_il2cpp_metadata(ui, &mut self.tool_panes.il2cpp_meta, muted);
                     });
                 }
                 PaneKind::Il2cppMethods => {
                     let prog = self.program.as_ref();
-                    win.default_size(egui::vec2(760.0, 560.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Xl.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_il2cpp_methods(
                             ui,
                             &mut self.tool_panes.il2cpp_methods,
@@ -231,7 +234,7 @@ impl GhidrustApp {
                 }
                 PaneKind::Il2cppIcalls => {
                     let prog = self.program.as_ref();
-                    win.default_size(egui::vec2(760.0, 560.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Xl.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_il2cpp_icalls(
                             ui,
                             &mut self.tool_panes.il2cpp_icalls,
@@ -242,7 +245,7 @@ impl GhidrustApp {
                 }
                 PaneKind::Il2cppTouchMap => {
                     let prog = self.program.as_ref();
-                    win.default_size(egui::vec2(760.0, 560.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Xl.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_il2cpp_touch_map(
                             ui,
                             &mut self.tool_panes.il2cpp_touch_map,
@@ -253,7 +256,7 @@ impl GhidrustApp {
                 }
                 PaneKind::Il2cppStubs => {
                     let prog = self.program.as_ref();
-                    win.default_size(egui::vec2(760.0, 560.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Xl.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_il2cpp_stubs(
                             ui,
                             &mut self.tool_panes.il2cpp_stubs,
@@ -263,7 +266,7 @@ impl GhidrustApp {
                     });
                 }
                 PaneKind::UnityInventory => {
-                    win.default_size(egui::vec2(760.0, 520.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Lg.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_unity_inventory(
                             ui,
                             &mut self.tool_panes.unity_inventory,
@@ -272,7 +275,7 @@ impl GhidrustApp {
                     });
                 }
                 PaneKind::InstallInventory => {
-                    win.default_size(egui::vec2(760.0, 520.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Lg.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_install_inventory(
                             ui,
                             &mut self.tool_panes.install_inventory,
@@ -281,7 +284,7 @@ impl GhidrustApp {
                     });
                 }
                 PaneKind::FileSystemBrowser => {
-                    win.default_size(egui::vec2(720.0, 520.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Lg.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_file_system_browser(
                             ui,
                             &mut self.tool_panes.fs_browser,
@@ -290,7 +293,7 @@ impl GhidrustApp {
                     });
                 }
                 PaneKind::AnalysisArtifacts => {
-                    win.default_size(egui::vec2(820.0, 520.0)).show(ctx, |ui| {
+                    win.default_size(WinTier::Xl.size(&d)).show(ctx, |ui| {
                         crate::tool_panes::ui_analysis_artifacts(
                             ui,
                             &mut self.tool_panes.artifacts,
@@ -554,7 +557,7 @@ impl GhidrustApp {
         let mut goto: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("calltrees_scroll")
-            .max_height(360.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 ui.columns(2, |cols| {
                     cols[0].label(egui::RichText::new("Incoming (callers / refs to)").strong());
@@ -634,7 +637,7 @@ impl GhidrustApp {
         ));
         let clicked_e =
             crate::entropy::render_entropy_strip(ui, &samples, muted, self.listing_focus_va, primary);
-        ui.add_space(6.0);
+        ui.add_space(ThemeDensity::FIB_DESKTOP.space_sm);
         ui.label(egui::RichText::new("Overview").strong().color(muted));
         let clicked_o = crate::entropy::render_overview_strip(
             ui,

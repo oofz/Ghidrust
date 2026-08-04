@@ -121,7 +121,11 @@ pub use rtti_catalog::{
     RttiQueryResult,
 };
 pub use section_notes::{section_notes_for, SectionNote};
-pub use theme::{m3_tokens, theme_tokens, AppearanceTheme, M3Tokens, ThemeMode};
+pub use theme::{
+    m3_tokens, theme_spec, theme_tokens, ActiveFg, ActiveFill, AppearanceTheme, ElevationShadow,
+    FibScale, HoverFill, M3Tokens, ThemeDensity, ThemeElevation, ThemeMode, ThemeMotion,
+    ThemeSemantics, ThemeSpec, ThemeStateLayers,
+};
 pub use tree_index::{list_tree, TreeEntry, TreeListOpts, TreeListResult};
 pub use xrefs::{
     calls_callees, instruction_targets, operand_addresses, rip_relative_targets, xrefs_from,

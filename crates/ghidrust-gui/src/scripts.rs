@@ -5,6 +5,8 @@
 //! - **Text Editor** — multi-tab in-memory editor for scripts on disk.
 //! - **MCP REPL** — line-oriented `tool_name` / `tool_name {json}` → MCP/CLI.
 
+use crate::layout_tokens::FieldWidth;
+use ghidrust_core::ThemeDensity;
 use crate::mcp_host::{
     invoke_tool, invoke_tool_with_session, parse_tool_line, McpStdioSession,
 };
@@ -470,7 +472,7 @@ pub fn render_script_manager(
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut state.filter)
-                .desired_width(220.0)
+                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("name / description"),
         );
         ui.label("Category:");
@@ -508,7 +510,7 @@ pub fn render_script_manager(
     let mut requested_run: Option<String> = None;
     egui::ScrollArea::vertical()
         .id_salt("scriptmgr_scroll")
-        .max_height(280.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
         .show(ui, |ui| {
             egui::Grid::new("scriptmgr_grid")
                 .num_columns(5)
@@ -570,7 +572,7 @@ pub fn render_script_manager(
         );
         egui::ScrollArea::vertical()
             .id_salt("scriptmgr_result")
-            .max_height(180.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
             .show(ui, |ui| {
                 ui.monospace(egui::RichText::new(&state.last_result).color(muted));
             });
@@ -669,7 +671,7 @@ pub fn render_text_editor(
     let before = tab.body.clone();
     egui::ScrollArea::vertical()
         .id_salt("texted_body")
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::multiline(&mut tab.body)
@@ -703,7 +705,7 @@ pub fn render_mcp_repl(
     egui::ScrollArea::vertical()
         .id_salt("mcp_repl_transcript")
         .stick_to_bottom(true)
-        .max_height(300.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             for line in &state.transcript {
                 if line.prompt {

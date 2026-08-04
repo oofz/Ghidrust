@@ -3,6 +3,8 @@
 //! Investigation-first: Connections → Capture/Flows → Alerts → Dig.
 //! Panes call `ghidrust-net-*` (same APIs as CLI/MCP). Not a packet browser.
 
+use crate::layout_tokens::{FieldWidth, WinTier};
+use ghidrust_core::ThemeDensity;
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_net_attr::{list_connections, owner_for_pid, ConnFilter};
 use ghidrust_net_capture::{
@@ -869,14 +871,19 @@ pub fn draw_host(ctx: &egui::Context, state: &mut NetworkState, muted: Color32) 
         ctx.request_repaint_after(Duration::from_millis(500));
     }
 
+    let dens = ThemeDensity::FIB_DESKTOP;
     let mut open = true;
     let title = state.window_title();
+    let frame = egui::Frame::window(&ctx.style()).inner_margin(egui::Margin::same(
+        dens.space_sm as i8,
+    ));
     egui::Window::new(title)
         .id(egui::Id::new(HOST_EGUI_ID))
         .open(&mut open)
         .resizable(true)
-        .default_size(egui::vec2(780.0, 560.0))
-        .min_size(egui::vec2(440.0, 300.0))
+        .frame(frame)
+        .default_size(WinTier::Xl.size(&dens))
+        .min_size(WinTier::Xl.min_size(&dens))
         .show(ctx, |ui| {
             let avail = ui.available_size();
             ui.set_min_size(avail);
@@ -888,40 +895,42 @@ pub fn draw_host(ctx: &egui::Context, state: &mut NetworkState, muted: Color32) 
 }
 
 fn render_host_body(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
+    let dens = ThemeDensity::FIB_DESKTOP;
+    // Content-first: shrink host chrome so tables keep vertical space.
+    {
+        let s = ui.spacing_mut();
+        s.item_spacing = egui::vec2(dens.space_sm, dens.space_xs);
+        s.button_padding = egui::vec2(dens.space_sm, dens.space_xs);
+        s.interact_size.y = dens.space_xl;
+    }
+
     let info = network_info();
     let inline_on = inline_block_allowed();
     ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(format!(
-                "Ghidnet · wave={} · native={} · capture={} · inline={}",
-                info.wave, info.native, info.capture, if inline_on { "on" } else { "off" }
-            ))
-            .strong(),
-        );
         ui.small(
-            RichText::new(format!("caps: {}", info.caps.join(",")))
-                .color(muted),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(state.status_line()).color(muted));
+            RichText::new(format!(
+                "w{} · n={} · cap={} · {}",
+                info.wave,
+                info.native,
+                info.capture,
+                if inline_on { "inline" } else { "inline off" }
+            ))
+            .color(muted),
+        )
+        .on_hover_text(format!("caps: {}", info.caps.join(",")));
+        ui.small(RichText::new(state.status_line()).color(muted));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let inline_resp = ui
-                .add_enabled(inline_on, egui::Button::new("Inline block").small())
+                .add_enabled(inline_on, egui::Button::new("Inline").small())
                 .on_hover_text(inline_block_reason());
             if inline_resp.clicked() {
                 state.status = inline_block_reason().into();
-            }
-            if !inline_on {
-                ui.small(RichText::new("inline off").color(muted))
-                    .on_hover_text(inline_block_reason());
             }
         });
     });
     if let Some(e) = state.last_error.clone() {
         ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), e);
     }
-    ui.separator();
 
     egui::ScrollArea::horizontal()
         .id_salt("net_tab_strip")
@@ -929,7 +938,11 @@ fn render_host_body(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
             ui.horizontal(|ui| {
                 for tab in NetworkPane::TAB_ORDER {
                     let selected = state.active_tab == *tab;
-                    if ui.selectable_label(selected, tab.short_title()).clicked() {
+                    if ui
+                        .selectable_label(selected, RichText::new(tab.short_title()).small())
+                        .on_hover_text(tab.plugin())
+                        .clicked()
+                    {
                         state.active_tab = *tab;
                     }
                 }
@@ -938,8 +951,6 @@ fn render_host_body(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
     ui.separator();
 
     let pane = state.active_tab;
-    ui.small(RichText::new(format!("Provider · {}", pane.plugin())).color(muted));
-    ui.separator();
     match pane {
         NetworkPane::Connections => render_connections(state, ui, muted),
         NetworkPane::Capture => render_capture(state, ui, muted),
@@ -950,42 +961,43 @@ fn render_host_body(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
 }
 
 fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
-    ui.small(
-        RichText::new("Owner-first sockets — Dig fills NetHint from the selected row.")
-            .color(muted),
-    );
+    let dens = ThemeDensity::FIB_DESKTOP;
     ui.horizontal(|ui| {
-        if ui.button("Refresh").clicked() {
+        if ui
+            .small_button("Refresh")
+            .on_hover_text("Owner-first sockets — Dig fills NetHint from the selected row.")
+            .clicked()
+        {
             state.refresh_connections();
         }
-        ui.label("pid");
+        ui.small("pid");
         ui.add(
             egui::TextEdit::singleline(&mut state.conn_filter_pid)
-                .desired_width(56.0)
+                .desired_width(FieldWidth::Micro.px(&dens))
                 .hint_text("any"),
         );
-        ui.label("path");
+        ui.small("path");
         ui.add(
             egui::TextEdit::singleline(&mut state.conn_filter_path)
-                .desired_width(120.0)
+                .desired_width(FieldWidth::Compact.px(&dens))
                 .hint_text("substr"),
         );
-        ui.label("proto");
+        ui.small("proto");
         ui.add(
             egui::TextEdit::singleline(&mut state.conn_filter_proto)
-                .desired_width(48.0)
+                .desired_width(FieldWidth::Micro.px(&dens))
                 .hint_text("tcp"),
         );
         ui.checkbox(&mut state.conn_listening_only, "listening");
-        ui.label("max");
+        ui.small("max");
         ui.add(
             egui::TextEdit::singleline(&mut state.conn_max)
-                .desired_width(40.0)
+                .desired_width(FieldWidth::Micro.px(&dens))
                 .hint_text("256"),
         );
         let dig_en = state.selected_conn.is_some();
         if ui
-            .add_enabled(dig_en, egui::Button::new("Dig"))
+            .add_enabled(dig_en, egui::Button::new("Dig").small())
             .on_hover_text("Compile dig hint from selection")
             .clicked()
         {
@@ -995,24 +1007,27 @@ fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         }
     });
 
+    // Leave a thin owner strip; give the rest of the host to the table.
+    let owner_reserve = dens.space_xl + dens.space_lg;
+    let table_h = (ui.available_height() - owner_reserve).max(dens.scroll_md);
     egui::ScrollArea::vertical()
         .id_salt("net_conn_table")
-        .max_height(280.0)
+        .max_height(table_h)
         .show(ui, |ui| {
             egui::Grid::new("net_conn_grid")
                 .num_columns(7)
                 .striped(true)
                 .show(ui, |ui| {
-                    ui.strong("Proto");
-                    ui.strong("Local");
-                    ui.strong("Remote");
-                    ui.strong("State");
-                    ui.strong("PID");
-                    ui.strong("Image");
-                    ui.strong("Conf");
+                    ui.small(RichText::new("Proto").strong());
+                    ui.small(RichText::new("Local").strong());
+                    ui.small(RichText::new("Remote").strong());
+                    ui.small(RichText::new("State").strong());
+                    ui.small(RichText::new("PID").strong());
+                    ui.small(RichText::new("Image").strong());
+                    ui.small(RichText::new("Conf").strong());
                     ui.end_row();
                     if state.connections.is_empty() {
-                        ui.label(RichText::new("(empty — Refresh)").color(muted));
+                        ui.label(RichText::new("(empty — Refresh)").small().color(muted));
                         ui.end_row();
                     }
                     let rows: Vec<(usize, ConnectionView)> = state
@@ -1023,15 +1038,17 @@ fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
                         .collect();
                     for (i, c) in rows {
                         let selected = state.selected_conn == Some(i);
-                        let resp = ui.selectable_label(selected, &c.proto);
+                        let resp = ui.selectable_label(selected, RichText::new(&c.proto).small());
                         if resp.clicked() {
                             state.select_connection(i);
                         }
-                        ui.monospace(&c.local);
-                        ui.monospace(&c.remote);
-                        ui.label(&c.state);
-                        ui.label(c.pid.to_string());
-                        ui.monospace(c.image_path.as_deref().unwrap_or("—"));
+                        ui.monospace(RichText::new(&c.local).small());
+                        ui.monospace(RichText::new(&c.remote).small());
+                        ui.small(&c.state);
+                        ui.small(c.pid.to_string());
+                        ui.monospace(
+                            RichText::new(c.image_path.as_deref().unwrap_or("—")).small(),
+                        );
                         ui.small(format!(
                             "{}/{}",
                             conf_badge(c.pid_confidence),
@@ -1043,17 +1060,16 @@ fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         });
 
     ui.separator();
-    ui.label(RichText::new("Owner detail").strong());
     if let Some(o) = &state.selected_owner {
-        ui.monospace(format!(
-            "pid={}  image={}  pid_conf={}  image_conf={}",
+        ui.small(format!(
+            "owner  pid={}  image={}  conf={}/{}",
             o.pid,
             o.image_path.as_deref().unwrap_or("—"),
             conf_badge(o.pid_confidence),
             conf_badge(o.image_confidence)
         ));
     } else {
-        ui.small(RichText::new("Select a connection row.").color(muted));
+        ui.small(RichText::new("Select a row for owner detail.").color(muted));
     }
 }
 
@@ -1079,13 +1095,13 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("filter");
         ui.add(
             egui::TextEdit::singleline(&mut state.capture_filter)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("optional"),
         );
         ui.label("pid");
         ui.add(
             egui::TextEdit::singleline(&mut state.capture_pid)
-                .desired_width(48.0)
+                .desired_width(FieldWidth::Micro.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("opt"),
         );
     });
@@ -1093,13 +1109,13 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("path");
         ui.add(
             egui::TextEdit::singleline(&mut state.capture_path_substr)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("owner substr"),
         );
         ui.label("replay");
         ui.add(
             egui::TextEdit::singleline(&mut state.capture_replay)
-                .desired_width(180.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("path.grncap"),
         );
         if ui.button("Browse…").clicked() {
@@ -1113,7 +1129,7 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("out");
         ui.add(
             egui::TextEdit::singleline(&mut state.capture_out_dir)
-                .desired_width(120.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("temp"),
         );
     });
@@ -1226,7 +1242,7 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
     ui.label(RichText::new("Flows").strong());
     egui::ScrollArea::vertical()
         .id_salt("net_flows_table")
-        .max_height(240.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
         .show(ui, |ui| {
             egui::Grid::new("net_flows_grid")
                 .num_columns(6)
@@ -1314,7 +1330,7 @@ fn render_alerts(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
 
     egui::ScrollArea::vertical()
         .id_salt("net_alerts_table")
-        .max_height(220.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
         .show(ui, |ui| {
             egui::Grid::new("net_alerts_grid")
                 .num_columns(6)
@@ -1364,7 +1380,7 @@ fn render_alerts(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         if let Some(a) = state.alerts.get(i) {
             egui::ScrollArea::vertical()
                 .id_salt("net_alert_detail")
-                .max_height(140.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.console_min)
                 .show(ui, |ui| {
                     ui.monospace(format!("id={} sid={} sev={}", a.id, a.sid, a.severity));
                     ui.label(&a.msg);
@@ -1407,7 +1423,7 @@ fn render_rules(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("path");
         ui.add(
             egui::TextEdit::singleline(&mut state.rules_path)
-                .desired_width(360.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("rules/ghidrust-minimal.rules"),
         );
         if ui.button("Browse…").clicked() {
@@ -1441,7 +1457,7 @@ fn render_rules(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label(RichText::new(format!("Rules ({})", rs.rules.len())).strong());
         egui::ScrollArea::vertical()
             .id_salt("net_rules_list")
-            .max_height(280.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
             .show(ui, |ui| {
                 for r in &rs.rules {
                     rule_row(ui, r, muted);
@@ -1468,7 +1484,7 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("path");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_path)
-                .desired_width(280.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("image path"),
         );
         if ui.button("Browse…").clicked() {
@@ -1482,7 +1498,7 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("pid");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_pid)
-                .desired_width(56.0)
+                .desired_width(FieldWidth::Micro.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("opt"),
         );
     });
@@ -1490,25 +1506,25 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("host");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_host)
-                .desired_width(140.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("dns/ip"),
         );
         ui.label("ioc");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_ioc)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("opt"),
         );
         ui.label("alert");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_alert_id)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("id"),
         );
         ui.label("flow");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_flow_ref)
-                .desired_width(80.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("ref"),
         );
     });
@@ -1537,7 +1553,7 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.small(RichText::new(&plan.rationale).color(muted));
         egui::ScrollArea::vertical()
             .id_salt("net_dig_steps")
-            .max_height(140.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.console_min)
             .show(ui, |ui| {
                 for (i, s) in plan.steps.iter().enumerate() {
                     ui.monospace(format!("{}. {} {}", i + 1, s.tool, s.args));
@@ -1556,7 +1572,7 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label(RichText::new(format!("Result · {}", result.status)).strong());
         egui::ScrollArea::vertical()
             .id_salt("net_dig_findings")
-            .max_height(160.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.panel_symbol_min)
             .show(ui, |ui| {
                 for f in &result.findings {
                     ui.label(format!("[{}] {}", f.kind, f.detail));

@@ -7,6 +7,7 @@
 //!
 //! Source anchors: see internal UI notes § 1.1 and § 1.2.
 
+use ghidrust_core::FibScale;
 use eframe::egui::{Color32, RichText, Ui};
 
 /// One provider (window / dockable pane).
@@ -134,6 +135,73 @@ impl PaneKind {
         PaneKind::FileSystemBrowser,
         PaneKind::AnalysisArtifacts,
     ];
+
+    /// Hover-submenu groups under Window → Providers (order = menu order).
+    pub const WINDOW_MENU_GROUPS: &'static [&'static str] = &[
+        "Program",
+        "Crypto",
+        "Graphs",
+        "Scripts",
+        "IL2CPP / Unity",
+        "Tools",
+    ];
+
+    /// Window → Providers submenu for floating panes. `None` = docked/center (listed separately).
+    pub const fn window_menu_group(self) -> Option<&'static str> {
+        match self {
+            PaneKind::ProjectTree
+            | PaneKind::ProgramTree
+            | PaneKind::SymbolTree
+            | PaneKind::Console
+            | PaneKind::Overview
+            | PaneKind::Listing
+            | PaneKind::DecompiledView
+            | PaneKind::DataTypeManager => None,
+
+            PaneKind::FunctionsWindow
+            | PaneKind::SymbolTable
+            | PaneKind::SymbolReferences
+            | PaneKind::MemoryMap
+            | PaneKind::DefinedStrings
+            | PaneKind::DefinedData
+            | PaneKind::Bytes
+            | PaneKind::CommentWindow
+            | PaneKind::Bookmarks
+            | PaneKind::RelocationTable
+            | PaneKind::EquatesTable
+            | PaneKind::FunctionTags
+            | PaneKind::DisassembledView
+            | PaneKind::ExternalPrograms
+            | PaneKind::DataTypePreview => Some("Program"),
+
+            PaneKind::Decrypt
+            | PaneKind::CryptoConstants
+            | PaneKind::CryptoCapabilities
+            | PaneKind::RecoveredStrings => Some("Crypto"),
+
+            PaneKind::FunctionGraph
+            | PaneKind::FunctionCallGraph
+            | PaneKind::FunctionCallTrees
+            | PaneKind::Entropy => Some("Graphs"),
+
+            PaneKind::ScriptManager
+            | PaneKind::TextEditor
+            | PaneKind::Python
+            | PaneKind::AgentConsole => Some("Scripts"),
+
+            PaneKind::Il2cppMetadata
+            | PaneKind::Il2cppMethods
+            | PaneKind::Il2cppIcalls
+            | PaneKind::Il2cppTouchMap
+            | PaneKind::Il2cppStubs
+            | PaneKind::UnityInventory
+            | PaneKind::InstallInventory
+            | PaneKind::FileSystemBrowser
+            | PaneKind::AnalysisArtifacts => Some("IL2CPP / Unity"),
+
+            PaneKind::ChecksumGenerator | PaneKind::RegisterManager => Some("Tools"),
+        }
+    }
 
     /// display title (Window menu label / provider `TITLE`).
     pub const fn title(self) -> &'static str {
@@ -398,13 +466,13 @@ pub fn empty_state(ui: &mut Ui, kind: PaneKind, muted: Color32) {
     ui.heading(kind.title());
     ui.small(RichText::new(format!("Provider · {}", kind.plugin())).color(muted));
     ui.separator();
-    ui.add_space(4.0);
+    ui.add_space(FibScale::XS);
     ui.label(
         RichText::new(backend_pending_message(kind))
             .color(muted)
             .italics(),
     );
-    ui.add_space(4.0);
+    ui.add_space(FibScale::XS);
     ui.small(
         RichText::new(
             "Pane is present in the shell catalog. Backing analysis \
@@ -477,6 +545,41 @@ mod tests {
             assert!(!k.title().is_empty(), "empty title for {:?}", k);
             assert!(!k.plugin().is_empty(), "empty plugin for {:?}", k);
             assert!(!k.egui_id().is_empty(), "empty egui_id for {:?}", k);
+        }
+    }
+
+    #[test]
+    fn window_menu_groups_cover_all_floating_providers() {
+        for k in PaneKind::ALL {
+            match k.window_menu_group() {
+                None => assert!(
+                    matches!(
+                        k,
+                        PaneKind::ProjectTree
+                            | PaneKind::ProgramTree
+                            | PaneKind::SymbolTree
+                            | PaneKind::Console
+                            | PaneKind::Overview
+                            | PaneKind::Listing
+                            | PaneKind::DecompiledView
+                            | PaneKind::DataTypeManager
+                    ),
+                    "{:?} missing Window menu group",
+                    k
+                ),
+                Some(g) => assert!(
+                    PaneKind::WINDOW_MENU_GROUPS.contains(&g),
+                    "{:?} group {:?} not in WINDOW_MENU_GROUPS",
+                    k,
+                    g
+                ),
+            }
+        }
+        for g in PaneKind::WINDOW_MENU_GROUPS {
+            assert!(
+                PaneKind::ALL.iter().any(|k| k.window_menu_group() == Some(*g)),
+                "empty Window menu group {g}"
+            );
         }
     }
 

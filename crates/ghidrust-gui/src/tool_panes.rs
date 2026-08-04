@@ -6,6 +6,8 @@
 //! though IL2CPP Methods / ICalls prefer the currently-loaded `Program`
 //! when the user hasn't pointed at a separate binary.
 
+use crate::layout_tokens::FieldWidth;
+use ghidrust_core::ThemeDensity;
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_core::{
     artifact_get, artifact_query, list_artifacts, ArtifactEnvelope, ArtifactMeta, PeInventory,
@@ -62,7 +64,7 @@ pub fn ui_il2cpp_metadata(ui: &mut Ui, s: &mut Il2cppMetaState, muted: Color32) 
         ui.label("Path:");
         ui.add(
             egui::TextEdit::singleline(&mut s.path_input)
-                .desired_width(360.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("global-metadata.dat"),
         );
         if ui.button("Browse…").clicked() {
@@ -108,14 +110,14 @@ pub fn ui_il2cpp_metadata(ui: &mut Ui, s: &mut Il2cppMetaState, muted: Color32) 
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut s.type_filter)
-                    .desired_width(280.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("filter Namespace.Type…"),
             );
             let rows = meta.filter_types(&s.type_filter);
             ui.small(format!("{} / {} types", rows.len(), meta.types.len()));
             egui::ScrollArea::vertical()
                 .id_salt("il2cpp_types_scroll")
-                .max_height(220.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
                 .show(ui, |ui| {
                     for t in rows.iter().take(2000) {
                         ui.monospace(format!(
@@ -133,14 +135,14 @@ pub fn ui_il2cpp_metadata(ui: &mut Ui, s: &mut Il2cppMetaState, muted: Color32) 
         .show(ui, |ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut s.method_filter)
-                    .desired_width(280.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("filter method name…"),
             );
             let rows = meta.filter_methods(&s.method_filter);
             ui.small(format!("{} / {} methods", rows.len(), meta.methods.len()));
             egui::ScrollArea::vertical()
                 .id_salt("il2cpp_methods_scroll_meta")
-                .max_height(220.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
                 .show(ui, |ui| {
                     for m in rows.iter().take(2000) {
                         ui.monospace(format!(
@@ -220,7 +222,7 @@ pub fn ui_il2cpp_methods(
             ui.label("Binary:");
             ui.add(
                 egui::TextEdit::singleline(&mut s.binary_path_input)
-                    .desired_width(320.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("GameAssembly.dll / binary path"),
             );
             if ui.button("Browse…").clicked() {
@@ -237,7 +239,7 @@ pub fn ui_il2cpp_methods(
         ui.label("Metadata:");
         ui.add(
             egui::TextEdit::singleline(&mut s.meta_path_input)
-                .desired_width(320.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("global-metadata.dat"),
         );
         if ui.button("Browse…").clicked() {
@@ -316,7 +318,7 @@ pub fn ui_il2cpp_methods(
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut s.filter)
-                .desired_width(280.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("method name…"),
         );
     });
@@ -331,7 +333,7 @@ pub fn ui_il2cpp_methods(
     egui::ScrollArea::vertical()
         .id_salt("il2cpp_methods_scroll")
         .auto_shrink([false, false])
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show_rows(ui, row_h, rows.len(), |ui, range| {
             for i in range {
                 let e = rows[i];
@@ -392,7 +394,7 @@ pub fn ui_il2cpp_icalls(
             ui.label("Binary:");
             ui.add(
                 egui::TextEdit::singleline(&mut s.binary_path_input)
-                    .desired_width(320.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("UnityPlayer.dll / engine binary path"),
             );
             if ui.button("Browse…").clicked() {
@@ -444,7 +446,7 @@ pub fn ui_il2cpp_icalls(
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut s.filter)
-                .desired_width(280.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("icall name…"),
         );
     });
@@ -454,7 +456,7 @@ pub fn ui_il2cpp_icalls(
     egui::ScrollArea::vertical()
         .id_salt("il2cpp_icalls_scroll")
         .auto_shrink([false, false])
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show_rows(ui, row_h, hits.len(), |ui, range| {
             for i in range {
                 let (ti, e) = &hits[i];
@@ -521,7 +523,7 @@ pub fn ui_il2cpp_touch_map(
         ui.label("Metadata:");
         ui.add(
             egui::TextEdit::singleline(&mut s.meta_path_input)
-                .desired_width(320.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("global-metadata.dat"),
         );
         if ui.button("Browse…").clicked() {
@@ -542,7 +544,7 @@ pub fn ui_il2cpp_touch_map(
             ui.label("Binary:");
             ui.add(
                 egui::TextEdit::singleline(&mut s.binary_path_input)
-                    .desired_width(320.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("GameAssembly.dll (optional)"),
             );
             if ui.button("Browse…").clicked() {
@@ -561,7 +563,7 @@ pub fn ui_il2cpp_touch_map(
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut s.filter)
-                .desired_width(240.0)
+                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("substring…"),
         );
         let can_run = !s.meta_path_input.trim().is_empty() && !s.filter.trim().is_empty();
@@ -614,7 +616,7 @@ pub fn ui_il2cpp_touch_map(
     egui::ScrollArea::vertical()
         .id_salt("il2cpp_touch_map_scroll")
         .auto_shrink([false, false])
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show_rows(ui, row_h, report.rows.len(), |ui, range| {
             for i in range {
                 let r = &report.rows[i];
@@ -682,7 +684,7 @@ pub fn ui_il2cpp_stubs(
             ui.label("Binary:");
             ui.add(
                 egui::TextEdit::singleline(&mut s.binary_path_input)
-                    .desired_width(320.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("GameAssembly.dll / il2cpp binary"),
             );
             if ui.button("Browse…").clicked() {
@@ -703,7 +705,7 @@ pub fn ui_il2cpp_stubs(
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut s.filter)
-                .desired_width(200.0)
+                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("icall name…"),
         );
         ui.label("Max scan:");
@@ -754,7 +756,7 @@ pub fn ui_il2cpp_stubs(
     egui::ScrollArea::vertical()
         .id_salt("il2cpp_stubs_scroll")
         .auto_shrink([false, false])
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show_rows(ui, row_h, s.stubs.len(), |ui, range| {
             for i in range {
                 let st = &s.stubs[i];
@@ -792,7 +794,7 @@ pub fn ui_unity_inventory(ui: &mut Ui, s: &mut UnityInventoryState, muted: Color
         ui.label("Game folder:");
         ui.add(
             egui::TextEdit::singleline(&mut s.root_input)
-                .desired_width(320.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("Unity player install root…"),
         );
         if ui.button("Browse…").clicked() {
@@ -902,7 +904,7 @@ pub fn ui_install_inventory(ui: &mut Ui, s: &mut InstallInventoryState, muted: C
         ui.label("Folder:");
         ui.add(
             egui::TextEdit::singleline(&mut s.root_input)
-                .desired_width(320.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("install folder…"),
         );
         if ui.button("Browse…").clicked() {
@@ -949,7 +951,7 @@ pub fn ui_install_inventory(ui: &mut Ui, s: &mut InstallInventoryState, muted: C
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut s.filter)
-                .desired_width(260.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("path / product name…"),
         );
     });
@@ -971,7 +973,7 @@ pub fn ui_install_inventory(ui: &mut Ui, s: &mut InstallInventoryState, muted: C
     ui.small(format!("{} / {} shown", rows.len(), inv.entries.len()));
     egui::ScrollArea::vertical()
         .id_salt("install_inventory_scroll")
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             egui::Grid::new("install_inventory_grid")
                 .num_columns(5)
@@ -1041,7 +1043,7 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
         ui.label("Folder:");
         ui.add(
             egui::TextEdit::singleline(&mut s.root_input)
-                .desired_width(320.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("folder to browse…"),
         );
         if ui.button("Browse…").clicked() {
@@ -1057,13 +1059,13 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
         ui.label("Extensions:");
         ui.add(
             egui::TextEdit::singleline(&mut s.extensions_input)
-                .desired_width(160.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("exe,dll (blank = all)"),
         );
         ui.label("Name glob:");
         ui.add(
             egui::TextEdit::singleline(&mut s.name_glob_input)
-                .desired_width(140.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("*.dll"),
         );
         ui.label("Max depth:");
@@ -1125,7 +1127,7 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut s.filter)
-                .desired_width(260.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("path substring…"),
         );
     });
@@ -1140,7 +1142,7 @@ pub fn ui_file_system_browser(ui: &mut Ui, s: &mut FileSystemBrowserState, muted
     egui::ScrollArea::vertical()
         .id_salt("fs_browser_scroll")
         .auto_shrink([false, false])
-        .max_height(380.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show_rows(ui, row_h, rows.len(), |ui, range| {
             for i in range {
                 let e = rows[i];
@@ -1221,7 +1223,7 @@ pub fn ui_analysis_artifacts(ui: &mut Ui, s: &mut AnalysisArtifactsState, muted:
         let mut clicked: Option<String> = None;
         egui::ScrollArea::vertical()
             .id_salt("artifacts_left_scroll")
-            .max_height(380.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(&mut cols[0], |ui| {
                 for a in &s.artifacts {
                     let sel = s.selected_id.as_deref() == Some(a.id.as_str());
@@ -1268,7 +1270,7 @@ pub fn ui_analysis_artifacts(ui: &mut Ui, s: &mut AnalysisArtifactsState, muted:
             );
             egui::ScrollArea::vertical()
                 .id_salt("artifacts_full_scroll")
-                .max_height(360.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
                 .show(&mut cols[1], |ui| {
                     ui.add(
                         egui::TextEdit::multiline(full)
@@ -1318,7 +1320,7 @@ pub fn ui_analysis_artifacts(ui: &mut Ui, s: &mut AnalysisArtifactsState, muted:
         }
         egui::ScrollArea::vertical()
             .id_salt("artifacts_right_scroll")
-            .max_height(320.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(&mut cols[1], |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut pretty)
@@ -1420,13 +1422,13 @@ pub fn ui_gpu_decompile_dialog_header(
         ui.label("Address:");
         ui.add(
             egui::TextEdit::singleline(&mut s.addr_input)
-                .desired_width(160.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x140001000 (blank = entry)"),
         );
         ui.label("Max bytes:");
         ui.add(
             egui::TextEdit::singleline(&mut s.max_bytes_input)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("256"),
         );
     });
@@ -1468,7 +1470,7 @@ pub fn ui_gpu_decompile_dialog_result(ui: &mut Ui, s: &GpuDecompileDialogState, 
             .default_open(true)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
-                    .max_height(220.0)
+                    .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
                     .show(ui, |ui| {
                         ui.monospace(&sum.pseudo_c_preview);
                     });

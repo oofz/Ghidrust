@@ -43,6 +43,8 @@ pub struct GrokPaneState {
     pub skill_wired_root: Option<PathBuf>,
     /// Fail-loud skill wire error (shown above the checklist when auto-install fails).
     pub skill_wire_error: Option<String>,
+    /// Start checklist drawer open (pre-session only; hidden once Grok runs).
+    pub checklist_drawer_open: bool,
 }
 
 impl GrokPaneState {
@@ -59,6 +61,7 @@ impl GrokPaneState {
             request_term_focus: false,
             skill_wired_root: None,
             skill_wire_error: None,
+            checklist_drawer_open: true,
         }
     }
 
@@ -190,7 +193,10 @@ pub fn render_grok_pane(
                     state.stop_session();
                     let (cols, rows) = (100u16, 28u16);
                     match on_start(cols, rows) {
-                        Ok(()) => state.status = None,
+                        Ok(()) => {
+                            state.status = None;
+                            state.checklist_drawer_open = false;
+                        }
                         Err(e) => {
                             state.last_error = Some(e);
                         }
@@ -206,6 +212,8 @@ pub fn render_grok_pane(
                         Ok(()) => {
                             state.last_error = None;
                             state.status = None;
+                            // Drawer vanishes with the session; keep it closed for Stop.
+                            state.checklist_drawer_open = false;
                         }
                         Err(e) => state.last_error = Some(e),
                     }
@@ -238,17 +246,19 @@ pub fn render_grok_pane(
 
     ui.separator();
 
-    // Start checklist — fail-loud rows for mcp/skill/agents/context so a
-    // broken setup is visible immediately instead of a silently toolless agent.
+    // Pre-session only: auto-wire skill + Start checklist drawer. Once Grok is
+    // running the drawer disappears so the TUI owns the pane.
     if let Some(root) = project_root {
         // Auto-place embedded skill as soon as a project is visible in the Grok
         // pane (not only on Start). Idempotent; fail-loud on write errors.
         ensure_skill_for_project(state, root, None);
-        if let Some(err) = &state.skill_wire_error {
-            ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
+        if state.session.is_none() {
+            if let Some(err) = &state.skill_wire_error {
+                ui.colored_label(Color32::from_rgb(0xE5, 0x39, 0x35), err);
+            }
+            render_start_checklist_drawer(ui, state, root, muted);
+            ui.separator();
         }
-        render_start_checklist(ui, root, muted);
-        ui.separator();
     }
 
     if state.session.is_none() {
@@ -342,23 +352,40 @@ pub fn ensure_skill_for_project(
     }
 }
 
-/// Render the Start checklist as fail-loud rows (red text + actionable detail
-/// on failure) so a broken Grok session setup is visible before the user
-/// wonders why the agent has no MCP tools.
-pub fn render_start_checklist(ui: &mut Ui, project_root: &Path, muted: Color32) {
-    ui.small(RichText::new("Start checklist").color(muted).strong());
-    for row in pane_start_checklist(project_root) {
-        let color = if row.ok {
-            Color32::from_rgb(0x66, 0xBB, 0x6A)
-        } else {
-            Color32::from_rgb(0xE5, 0x39, 0x35)
-        };
-        ui.horizontal(|ui| {
-            ui.label(if row.ok { "✓" } else { "✗" });
-            ui.label(RichText::new(&row.label).color(color));
-            ui.small(RichText::new(&row.detail).color(muted));
+/// Render the Start checklist as a collapsible drawer of fail-loud rows
+/// (red text + actionable detail on failure). Caller must only invoke this
+/// when no Grok session is running — the drawer disappears after Start.
+pub fn render_start_checklist_drawer(
+    ui: &mut Ui,
+    state: &mut GrokPaneState,
+    project_root: &Path,
+    muted: Color32,
+) {
+    let rows = pane_start_checklist(project_root);
+    let fail_n = rows.iter().filter(|r| !r.ok).count();
+    let title = if fail_n == 0 {
+        "Start checklist".to_string()
+    } else {
+        format!("Start checklist ({fail_n} failing)")
+    };
+    let resp = egui::CollapsingHeader::new(RichText::new(title).color(muted).strong())
+        .id_salt("grok_start_checklist_drawer")
+        .default_open(state.checklist_drawer_open)
+        .show(ui, |ui| {
+            for row in &rows {
+                let color = if row.ok {
+                    Color32::from_rgb(0x66, 0xBB, 0x6A)
+                } else {
+                    Color32::from_rgb(0xE5, 0x39, 0x35)
+                };
+                ui.horizontal(|ui| {
+                    ui.label(if row.ok { "✓" } else { "✗" });
+                    ui.label(RichText::new(&row.label).color(color));
+                    ui.small(RichText::new(&row.detail).color(muted));
+                });
+            }
         });
-    }
+    state.checklist_drawer_open = resp.fully_open();
 }
 
 /// Attempt to spawn the platform's official Grok Build installer.

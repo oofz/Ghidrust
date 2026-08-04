@@ -3,15 +3,17 @@
 //! Extracted per demonolith Wave 7. Nested under `app` for private field access.
 
 use super::{ConfigureSection, GhidrustApp};
+use crate::layout_tokens::{FieldWidth, WinTier};
 use crate::listing::ui_options_dialog;
 use crate::menu_actions::{parse_address, processor_info};
 use crate::panes::BookmarkKind;
 use eframe::egui::{self, Color32};
-use ghidrust_core::{analyzer_supports_gpu, AppearanceTheme, ThemeMode};
+use ghidrust_core::{analyzer_supports_gpu, AppearanceTheme, ThemeMode, ThemeDensity};
 
 impl GhidrustApp {
     /// Draw configure/layouts/goto/search/analysis/GPU dialogs.
     pub(crate) fn draw_shell_dialogs(&mut self, ctx: &egui::Context) {
+        let d = self.theme_spec().density;
 
         if self.show_search_address_tables_dialog {
             let mut open = true;
@@ -80,13 +82,13 @@ impl GhidrustApp {
             egui::Window::new("Configure")
                 .id(egui::Id::new("dialog_configure"))
                 .resizable(true)
-                .default_size(egui::vec2(760.0, 520.0))
+                .default_size(WinTier::Lg.size(&d))
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.set_min_width(140.0);
+                            ui.set_min_width(d.panel_symbol_min);
                             ui.strong("Configure");
-                            ui.add_space(6.0);
+                            ui.add_space(d.space_sm);
                             if ui
                                 .selectable_label(
                                     next_section == ConfigureSection::Appearance,
@@ -114,7 +116,7 @@ impl GhidrustApp {
                                     ui.label(
                                         "Select a theme family. Classic Ghidrust is the historical default.",
                                     );
-                                    ui.add_space(8.0);
+                                    ui.add_space(d.space_md);
                                     for theme in AppearanceTheme::ALL {
                                         let selected = next_appearance == *theme;
                                         if ui
@@ -131,7 +133,7 @@ impl GhidrustApp {
                                             });
                                         }
                                     }
-                                    ui.add_space(12.0);
+                                    ui.add_space(d.space_lg);
                                     ui.separator();
                                     ui.horizontal(|ui| {
                                         let mode_caption = match next_appearance {
@@ -182,7 +184,7 @@ impl GhidrustApp {
                                     ui.separator();
                                     egui::ScrollArea::vertical()
                                         .id_salt("configure_scroll")
-                                        .max_height(360.0)
+                                        .max_height(d.scroll_md)
                                         .show(ui, |ui| {
                                             egui::Grid::new("configure_grid")
                                                 .num_columns(4)
@@ -236,7 +238,7 @@ impl GhidrustApp {
             egui::Window::new("Tool Layouts")
                 .id(egui::Id::new("dialog_layouts"))
                 .resizable(true)
-                .default_size(egui::vec2(480.0, 360.0))
+                .default_size(WinTier::Md.size(&d))
                 .show(ctx, |ui| {
                     ui.label("Save / restore CodeBrowser tool layouts (pane visibility + docks).");
                     ui.small(
@@ -250,7 +252,7 @@ impl GhidrustApp {
                         ui.label("Name:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.layouts_new_name)
-                                .desired_width(200.0)
+                                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                                 .hint_text("MyCodeBrowser"),
                         );
                         if ui
@@ -270,7 +272,7 @@ impl GhidrustApp {
                     } else {
                         egui::ScrollArea::vertical()
                             .id_salt("layouts_scroll")
-                            .max_height(180.0)
+                            .max_height(d.scroll_sm)
                             .show(ui, |ui| {
                                 for name in &self.layouts_cached {
                                     ui.horizontal(|ui| {
@@ -412,7 +414,7 @@ impl GhidrustApp {
             egui::Window::new("Search Memory")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(WinTier::Sm.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label("Byte pattern (hex; ?? = wildcard):");
@@ -440,7 +442,7 @@ impl GhidrustApp {
             egui::Window::new("Search Program Text")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(WinTier::Sm.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.label("Query (listing / symbols / functions / memory text):");
@@ -501,7 +503,7 @@ impl GhidrustApp {
             egui::Window::new("Search Instruction Patterns")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(420.0)
+                .default_width(WinTier::Sm.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.small("Matches against decoded listing rows. Empty field = don't filter.");
@@ -601,7 +603,7 @@ impl GhidrustApp {
             egui::Window::new("Search Results")
                 .collapsible(true)
                 .resizable(true)
-                .default_width(480.0)
+                .default_width(WinTier::Md.width(&d))
                 .default_height(280.0)
                 .show(ctx, |ui| {
                     if ui.button("Close").clicked() {
@@ -653,7 +655,7 @@ impl GhidrustApp {
             egui::Window::new("Processor Options")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(440.0)
+                .default_width(WinTier::Sm.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     if let Some(prog) = &self.program {
@@ -675,7 +677,7 @@ impl GhidrustApp {
                         ui.separator();
                         ui.label("Sections:");
                         egui::ScrollArea::vertical()
-                            .max_height(160.0)
+                            .max_height(d.panel_symbol_min)
                             .show(ui, |ui| {
                                 for s in &prog.sections {
                                     ui.monospace(format!(
@@ -707,7 +709,7 @@ impl GhidrustApp {
             egui::Window::new("GPU Decompile")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(560.0)
+                .default_width(WinTier::Md.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     crate::tool_panes::ui_gpu_decompile_dialog_header(
@@ -744,7 +746,7 @@ impl GhidrustApp {
             egui::Window::new("Analysis options")
                 .collapsible(false)
                 .resizable(true)
-                .default_width(460.0)
+                .default_width(WinTier::Md.width(&d))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     if let Some(ref id) = self.pending_analyze_file_id {
@@ -759,7 +761,7 @@ impl GhidrustApp {
                                 .strong()
                                 .color(primary),
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(d.space_xs);
                     }
                     ui.label("Select analyzers (labels):");
                     ui.horizontal(|ui| {
@@ -780,7 +782,7 @@ impl GhidrustApp {
                         }
                     });
                     egui::ScrollArea::vertical()
-                        .max_height(320.0)
+                        .max_height(d.scroll_md)
                         .show(ui, |ui| {
                             for (i, info) in self.analyzer_infos.iter().enumerate() {
                                 ui.horizontal(|ui| {
@@ -841,7 +843,7 @@ impl GhidrustApp {
                          Large images are multi-dispatch chunked (≤65535 workgroups). \
  Falls back to CPU on failure. GPU decompile is a separate tool.",
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(d.space_md);
                     ui.horizontal(|ui| {
                         let can_run = self.analyzer_enabled.iter().any(|e| *e)
                             && (self.program.is_some() || self.pending_analyze_file_id.is_some());

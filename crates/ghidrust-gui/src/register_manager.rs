@@ -14,6 +14,9 @@
 //! Extracted per internal modularization notes — new UI panes land here
 //! instead of piling into `main.rs`.
 
+use crate::layout_tokens::FieldWidth;
+use ghidrust_core::FibScale;
+use ghidrust_core::ThemeDensity;
 use eframe::egui::{self, Color32, Ui};
 use ghidrust_core::process::RegisterSet;
 use std::collections::BTreeMap;
@@ -607,21 +610,21 @@ pub fn render(
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut state.filter)
-                .desired_width(220.0)
+                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("Register name…"),
         );
         if ui.button("Clear filter").clicked() {
             state.filter.clear();
         }
     });
-    ui.add_space(4.0);
+    ui.add_space(FibScale::XS);
 
     let filt = state.filter.to_ascii_lowercase();
     let groups = group_by_kind();
 
     egui::ScrollArea::vertical()
         .id_salt("regmgr_scroll")
-        .max_height(360.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
         .show(ui, |ui| {
             for kind in RegisterKind::ALL {
                 let Some(rs) = groups.get(kind) else {
@@ -658,19 +661,19 @@ pub fn render(
         ui.label("Start VA:");
         ui.add(
             egui::TextEdit::singleline(&mut state.input_start)
-                .desired_width(140.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x140001000"),
         );
         ui.label("End VA:");
         ui.add(
             egui::TextEdit::singleline(&mut state.input_end)
-                .desired_width(140.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x140001100"),
         );
         ui.label("Value:");
         ui.add(
             egui::TextEdit::singleline(&mut state.input_value)
-                .desired_width(140.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0"),
         );
         let can_add = state.selected.is_some()
@@ -698,7 +701,7 @@ pub fn render(
         }
     });
 
-    ui.add_space(6.0);
+    ui.add_space(FibScale::SM);
     ui.label(egui::RichText::new("Values").strong());
     if state.values.is_empty() {
         ui.weak("No user-set register values.");

@@ -3,6 +3,9 @@
 //! Extracted per demonolith Wave 7. New pane bodies land here (or provider_panes),
 //! not in `mod.rs`.
 
+use ghidrust_core::FibScale;
+use ghidrust_core::ThemeDensity;
+use crate::layout_tokens::{card_frame, chip_frame, sized_button_height, FieldWidth};
 use super::GhidrustApp;
 use crate::checksum::ChecksumMode;
 use crate::decrypt_ui::DecryptTab;
@@ -66,6 +69,7 @@ impl GhidrustApp {
 
     pub(crate) fn ui_startup_picker(&mut self, ctx: &egui::Context) {
         let t = self.tokens();
+        let d = self.theme_spec().density;
         let primary = Color32::from_rgb(t.primary[0], t.primary[1], t.primary[2]);
         let muted = Color32::from_rgb(
             t.on_surface_variant[0],
@@ -78,63 +82,74 @@ impl GhidrustApp {
             t.surface_container[2],
         );
 
-        // Fixed card size — never wider than the window, never stretch off-screen.
-        let card_w = 440.0_f32.min(ctx.screen_rect().width() - 48.0).max(280.0);
+        // Fib card width — clamp to viewport with Fib chrome insets.
+        let card_w = d
+            .field_wide
+            .min(ctx.screen_rect().width() - d.console_handle_w)
+            .max(d.scroll_sm);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
-                ui.add_space(32.0);
-                ui.heading(egui::RichText::new("Ghidrust").size(26.0).color(primary));
+                ui.add_space(FibScale::XL2);
+                ui.heading(
+                    egui::RichText::new("Ghidrust")
+                        .size(d.control_min_height - FibScale::MD)
+                        .color(primary),
+                );
                 if let Some(tex) = self.logo_texture.as_ref() {
-                    ui.add_space(10.0);
-                    let logo_h = 112.0_f32;
+                    ui.add_space(FibScale::LG);
+                    let logo_h = d.field_narrow + FibScale::XL2; // 89+34 = 123 ≈ prior 112
                     let size = tex.size_vec2();
-                    let logo_w = (logo_h * size.x / size.y).clamp(64.0, 160.0);
+                    let logo_w = (logo_h * size.x / size.y).clamp(d.field_micro + FibScale::SM, d.field_compact);
                     ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(logo_w, logo_h)));
-                    ui.add_space(8.0);
+                    ui.add_space(FibScale::MD);
                 } else {
-                    ui.add_space(8.0);
+                    ui.add_space(FibScale::MD);
                 }
                 ui.label(
                     egui::RichText::new("Open a project to reverse engineer")
                         .color(muted)
-                        .size(14.0),
+                        .size(FibScale::LG),
                 );
-                ui.add_space(20.0);
+                ui.add_space(FibScale::XL);
 
-                egui::Frame::group(ui.style())
+                card_frame(ui, &d)
                     .fill(surface)
-                    .inner_margin(egui::Margin::same(16))
-                    .corner_radius(egui::CornerRadius::same(8))
                     .show(ui, |ui| {
                         ui.set_width(card_w);
                         ui.set_max_width(card_w);
 
                         // ── Recent projects (IDE-style list) ──
-                        ui.label(egui::RichText::new("Recent projects").strong().size(13.0));
-                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new("Recent projects")
+                                .strong()
+                                .size(FibScale::LG),
+                        );
+                        ui.add_space(FibScale::SM);
 
                         let recents = self.recent_projects.clone();
-                        let list_h = if recents.is_empty() { 48.0 } else { 200.0 };
+                        let list_h = if recents.is_empty() {
+                            d.console_handle_w
+                        } else {
+                            d.field_std
+                        };
 
-                        egui::Frame::NONE
+                        chip_frame(ui, &d)
                             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                            .inner_margin(egui::Margin::same(4))
-                            .corner_radius(egui::CornerRadius::same(4))
                             .show(ui, |ui| {
-                                ui.set_width(card_w - 8.0);
+                                ui.set_width(card_w - d.space_md);
                                 egui::ScrollArea::vertical()
                                     .id_salt("startup_recent")
                                     .max_height(list_h)
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
-                                        ui.set_min_width(card_w - 24.0);
+                                        ui.set_min_width(card_w - FibScale::XL);
                                         if recents.is_empty() {
-                                            ui.add_space(8.0);
+                                            ui.add_space(FibScale::MD);
                                             ui.weak(
                                                 "No recent projects — open or create one below.",
                                             );
-                                            ui.add_space(8.0);
+                                            ui.add_space(FibScale::MD);
                                         } else {
                                             let mut open_path: Option<String> = None;
                                             for path in &recents {
@@ -143,8 +158,8 @@ impl GhidrustApp {
                                                     .map(|s| s.to_string_lossy().into_owned())
                                                     .unwrap_or_else(|| path.clone());
                                                 // IDE-style row: project name + path, full-width click
-                                                let row_w = (card_w - 24.0).max(200.0);
-                                                let row_h = 44.0;
+                                                let row_w = (card_w - FibScale::XL).max(d.field_std);
+                                                let row_h = sized_button_height(&d) + FibScale::LG;
                                                 let (rect, resp) = ui.allocate_exact_size(
                                                     egui::vec2(row_w, row_h),
                                                     egui::Sense::click(),
@@ -152,14 +167,14 @@ impl GhidrustApp {
                                                 if resp.hovered() || resp.has_focus() {
                                                     ui.painter().rect_filled(
                                                         rect,
-                                                        egui::CornerRadius::same(4),
+                                                        egui::CornerRadius::same(FibScale::SM as u8),
                                                         primary.gamma_multiply(0.15),
                                                     );
                                                 }
                                                 let mut child = ui.new_child(
                                                     egui::UiBuilder::new()
                                                         .max_rect(
-                                                            rect.shrink2(egui::vec2(10.0, 6.0)),
+                                                            rect.shrink2(egui::vec2(FibScale::LG, FibScale::SM)),
                                                         )
                                                         .layout(egui::Layout::top_down(
                                                             egui::Align::LEFT,
@@ -169,7 +184,7 @@ impl GhidrustApp {
                                                     egui::RichText::new(&name)
                                                         .strong()
                                                         .color(primary)
-                                                        .size(14.0),
+                                                        .size(FibScale::LG),
                                                 );
                                                 child.label(
                                                     egui::RichText::new(path).small().color(muted),
@@ -191,14 +206,15 @@ impl GhidrustApp {
                                     });
                             });
 
-                        ui.add_space(14.0);
+                        ui.add_space(FibScale::LG);
                         ui.separator();
-                        ui.add_space(10.0);
+                        ui.add_space(FibScale::LG);
 
                         // Buttons fit card width only (no off-screen stretch)
-                        let btn_w = card_w - 8.0;
+                        let btn_w = card_w - d.space_md;
+                        let btn_h = sized_button_height(&d);
                         if ui
-                            .add_sized([btn_w, 32.0], egui::Button::new("Open existing project…"))
+                            .add_sized([btn_w, btn_h], egui::Button::new("Open existing project…"))
                             .clicked()
                         {
                             self.browse_and_open_project();
@@ -206,18 +222,20 @@ impl GhidrustApp {
                                 self.show_startup_picker = true;
                             }
                         }
-                        ui.add_space(8.0);
+                        ui.add_space(FibScale::MD);
                         ui.horizontal(|ui| {
                             ui.label("Name:");
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.project_name_input)
-                                    .desired_width((btn_w - 56.0).max(120.0))
+                                    .desired_width(
+                                        (btn_w - d.field_micro).max(FieldWidth::Compact.px(&d)),
+                                    )
                                     .hint_text("MyProject"),
                             );
                         });
-                        ui.add_space(4.0);
+                        ui.add_space(FibScale::XS);
                         if ui
-                            .add_sized([btn_w, 32.0], egui::Button::new("Create new project…"))
+                            .add_sized([btn_w, btn_h], egui::Button::new("Create new project…"))
                             .clicked()
                         {
                             self.browse_and_create_project();
@@ -225,13 +243,14 @@ impl GhidrustApp {
                                 self.show_startup_picker = true;
                             }
                         }
-                        ui.add_space(12.0);
+                        ui.add_space(FibScale::LG);
                         if ui.link("Continue without a project").clicked() {
                             self.show_startup_picker = false;
                             self.status =
-                                "No project — Browse/Load a binary, or File → Open Project".into();
+                                "No project — File → Open / Load binary, or File → Open Project"
+                                    .into();
                         }
-                        ui.add_space(4.0);
+                        ui.add_space(FibScale::XS);
                         ui.small(
                             egui::RichText::new(
  "Click a recent project name to open it. Analysis uses analysis.bin for fast load.",
@@ -342,7 +361,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.bookmark_filter)
-                    .desired_width(200.0)
+                    .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("category or description"),
             );
             if ui
@@ -390,7 +409,7 @@ impl GhidrustApp {
 
         egui::ScrollArea::vertical()
             .id_salt("bookmarks_scroll")
-            .max_height(360.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("bookmarks_grid")
                     .num_columns(5)
@@ -455,17 +474,17 @@ impl GhidrustApp {
             ui.label("Add block:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.memory_map_new_name)
-                    .desired_width(120.0)
+                    .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("name"),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.memory_map_new_va)
-                    .desired_width(120.0)
+                    .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("VA (0x…)"),
             );
             ui.add(
                 egui::TextEdit::singleline(&mut self.memory_map_new_size)
-                    .desired_width(100.0)
+                    .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("size (0x…)"),
             );
             ui.checkbox(&mut self.memory_map_new_r, "R");
@@ -556,7 +575,7 @@ impl GhidrustApp {
                         for (i, (name, va, size, r, w, x)) in blocks.iter().enumerate() {
                             let mut editable = name.clone();
                             if ui
-                                .add(egui::TextEdit::singleline(&mut editable).desired_width(120.0))
+                                .add(egui::TextEdit::singleline(&mut editable).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)))
                                 .changed()
                             {
                                 rename = Some((i, editable));
@@ -651,7 +670,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.functions_window_filter)
-                    .desired_width(300.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Function name…"),
             );
         });
@@ -667,7 +686,7 @@ impl GhidrustApp {
         let focus = self.decomp_entry;
         egui::ScrollArea::vertical()
             .id_salt("fnwin_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("functions_window_grid")
                     .num_columns(4)
@@ -720,7 +739,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.symbol_table_filter)
-                    .desired_width(280.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Symbol name…"),
             );
         });
@@ -741,7 +760,7 @@ impl GhidrustApp {
         let mut show_refs: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("symtable_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("symbol_table_grid")
                     .num_columns(4)
@@ -925,7 +944,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.defined_strings_filter)
-                    .desired_width(280.0)
+                    .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Substring…"),
             );
             ui.label("Encoding:");
@@ -949,7 +968,7 @@ impl GhidrustApp {
         ui.small(format!("{} / {} strings", rows.len(), self.strings.len()));
         egui::ScrollArea::vertical()
             .id_salt("defstr_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("defined_strings_grid")
                     .num_columns(3)
@@ -1074,7 +1093,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.comment_window_filter)
-                    .desired_width(240.0)
+                    .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Text / address / kind…"),
             );
             ui.label("Kind:");
@@ -1138,7 +1157,7 @@ impl GhidrustApp {
         rows.sort_by_key(|(_, va, _)| *va);
         egui::ScrollArea::vertical()
             .id_salt("comment_window_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("comments_grid")
                     .num_columns(3)
@@ -1229,7 +1248,7 @@ impl GhidrustApp {
         let mut goto: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("defined_data_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("defined_data_grid")
                     .num_columns(3)
@@ -1295,7 +1314,7 @@ impl GhidrustApp {
         ui.horizontal(|ui| {
             ui.label("VA:");
             let mut input = format!("{base_va:#x}");
-            let resp = ui.add(egui::TextEdit::singleline(&mut input).desired_width(140.0));
+            let resp = ui.add(egui::TextEdit::singleline(&mut input).desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP)));
             if resp.lost_focus() {
                 if let Ok(v) = parse_address(&input) {
                     self.bytes_pane_va = Some(v);
@@ -1336,7 +1355,7 @@ impl GhidrustApp {
         let mut nav: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("bytes_scroll")
-            .max_height(420.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 for row in 0..self.bytes_pane_rows {
                     let row_va = base_va.wrapping_add((row * bpr) as u64);
@@ -1405,7 +1424,7 @@ impl GhidrustApp {
             ui.label("Target:");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut input)
-                    .desired_width(140.0)
+                    .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("VA…"),
             );
             if resp.lost_focus() {
@@ -1414,7 +1433,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.symbol_refs_filter)
-                    .desired_width(200.0)
+                    .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Substring…"),
             );
             if ui.button("Use cursor").clicked() {
@@ -1480,7 +1499,7 @@ impl GhidrustApp {
         let mut goto: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("symrefs_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 egui::Grid::new("symbol_refs_grid")
                     .num_columns(5)
@@ -1529,7 +1548,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.equates_filter)
-                    .desired_width(220.0)
+                    .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Name / value…"),
             );
             if ui.button("Add equate at cursor…").clicked() {
@@ -1562,7 +1581,7 @@ impl GhidrustApp {
             cols[0].separator();
             egui::ScrollArea::vertical()
                 .id_salt("equates_left_scroll")
-                .max_height(360.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
                 .show(&mut cols[0], |ui| {
                     egui::Grid::new("equates_groups_grid")
                         .num_columns(3)
@@ -1601,7 +1620,7 @@ impl GhidrustApp {
             };
             egui::ScrollArea::vertical()
                 .id_salt("equates_right_scroll")
-                .max_height(360.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
                 .show(&mut cols[1], |ui| {
                     if refs.is_empty() {
                         ui.weak("Select an equate on the left to see its references.");
@@ -1699,7 +1718,7 @@ impl GhidrustApp {
                 ui.label("New:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.function_tags_new_input)
-                        .desired_width(160.0)
+                        .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                         .hint_text("Tag name…"),
                 );
                 if ui.button("Add").clicked() {
@@ -1718,7 +1737,7 @@ impl GhidrustApp {
                 ui.label("Filter:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.function_tags_filter)
-                        .desired_width(180.0)
+                        .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                         .hint_text("Substring…"),
                 );
             });
@@ -1726,7 +1745,7 @@ impl GhidrustApp {
             let q = self.function_tags_filter.to_ascii_lowercase();
             egui::ScrollArea::vertical()
                 .id_salt("all_tags_scroll")
-                .max_height(320.0)
+                .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
                 .show(&mut cols[1], |ui| {
                     egui::Grid::new("all_tags_grid")
                         .num_columns(3)
@@ -1785,7 +1804,7 @@ impl GhidrustApp {
             ui.label("Filter:");
             ui.add(
                 egui::TextEdit::singleline(&mut self.external_programs_filter)
-                    .desired_width(220.0)
+                    .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                     .hint_text("Name / VA…"),
             );
         });
@@ -1800,7 +1819,7 @@ impl GhidrustApp {
         let mut goto: Option<u64> = None;
         egui::ScrollArea::vertical()
             .id_salt("ext_progs_scroll")
-            .max_height(400.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.scroll_md)
             .show(ui, |ui| {
                 ui.strong("Imports");
                 egui::Grid::new("ext_imports_grid")
@@ -1827,7 +1846,7 @@ impl GhidrustApp {
                             ui.end_row();
                         }
                     });
-                ui.add_space(8.0);
+                ui.add_space(FibScale::MD);
                 ui.strong("Exports");
                 egui::Grid::new("ext_exports_grid")
                     .num_columns(3)

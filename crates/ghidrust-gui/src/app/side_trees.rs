@@ -11,12 +11,13 @@ use std::collections::{BTreeMap, BTreeSet};
 impl GhidrustApp {
     /// Draw left/right tree side panels.
     pub(crate) fn draw_side_trees(&mut self, ctx: &egui::Context) {
+        let d = self.theme_spec().density;
 
         // Project Window–style dock: Project → binaries (upgraded badges + actions)
         if self.show_project_tree {
             egui::SidePanel::left("project_tree")
                 .resizable(true)
-                .default_width(240.0)
+                .default_width(d.panel_project)
                 .show(ctx, |ui| {
                     ui.heading("Project");
                     ui.small(
@@ -40,7 +41,7 @@ impl GhidrustApp {
                         );
                         let ok_green = Color32::from_rgb(0x4C, 0xAF, 0x50);
                         ui.horizontal(|ui| {
-                            m3_icon(ui, M3Icon::Folder, 18.0, primary);
+                            m3_icon(ui, M3Icon::Folder, d.icon_md, primary);
                             ui.strong(&model.project_name);
                         });
                         // Fill remaining panel height and scroll when files overflow
@@ -53,7 +54,7 @@ impl GhidrustApp {
                                     .default_open(self.project_tree_expanded)
                                     .show(ui, |ui| {
                                         ui.small(egui::RichText::new(&model.project_root).weak());
-                                        ui.add_space(4.0);
+                                        ui.add_space(d.space_xs);
                                         if model.files.is_empty() {
                                             ui.weak("Empty — Import a binary.");
                                         }
@@ -73,11 +74,11 @@ impl GhidrustApp {
                                                         m3_icon(
                                                             ui,
                                                             M3Icon::PlayArrow,
-                                                            14.0,
+                                                            d.icon_sm,
                                                             primary,
                                                         );
                                                     } else {
-                                                        ui.add_space(14.0);
+                                                        ui.add_space(d.icon_sm);
                                                     }
                                                     let resp = ui.selectable_label(
                                                         selected || viewing,
@@ -152,7 +153,7 @@ impl GhidrustApp {
                                                         .italics(),
                                                 );
                                             });
-                                            ui.add_space(2.0);
+                                            ui.add_space(d.space_xs);
                                         }
                                         (open_id, analyze_id, delete_id, select_id)
                                     })
@@ -198,7 +199,7 @@ impl GhidrustApp {
                          Deletes the imported copy and saved analysis for this file.\n\
  This cannot be undone."
                     ));
-                    ui.add_space(8.0);
+                    ui.add_space(d.space_md);
                     ui.horizontal(|ui| {
                         if ui.button("Cancel").clicked() {
                             self.cancel_delete_file();
@@ -223,7 +224,7 @@ impl GhidrustApp {
         if self.show_program_tree {
             egui::SidePanel::left("program_tree")
                 .resizable(true)
-                .default_width(220.0)
+                .default_width(d.panel_program)
                 .show(ctx, |ui| {
                     ui.heading("Program Trees");
                     ui.small(egui::RichText::new("ProgramTreePlugin · modules/fragments").weak());
@@ -257,7 +258,7 @@ impl GhidrustApp {
                             self.tokens().primary[1],
                             self.tokens().primary[2],
                         );
-                        m3_icon(ui, M3Icon::Folder, 16.0, primary);
+                        m3_icon(ui, M3Icon::Folder, d.icon_sm, primary);
                         ui.strong(&root_name);
                     });
                     ui.small(
@@ -417,8 +418,8 @@ impl GhidrustApp {
         if self.show_symbol_tree {
             egui::SidePanel::right("symbol_tree")
                 .resizable(true)
-                .default_width(280.0)
-                .min_width(200.0)
+                .default_width(d.panel_symbol)
+                .min_width(d.panel_symbol_min)
                 .show(ctx, |ui| {
                     let t = self.tokens();
                     let primary = Color32::from_rgb(t.primary[0], t.primary[1], t.primary[2]);
@@ -547,7 +548,7 @@ impl GhidrustApp {
                                         let mut clicked_fn: Option<u64> = None;
                                         egui::ScrollArea::vertical()
                                             .id_salt("fn_scroll")
-                                            .max_height(220.0)
+                                            .max_height(d.scroll_sm)
                                             .show_rows(ui, row_h, n, |ui, range| {
                                                 for i in range {
                                                     let (va, name) = &rows[i];
@@ -613,7 +614,7 @@ impl GhidrustApp {
                                         let mut clicked_va: Option<u64> = None;
                                         egui::ScrollArea::vertical()
                                             .id_salt("labels_scroll")
-                                            .max_height(220.0)
+                                            .max_height(d.scroll_sm)
                                             .show_rows(ui, row_h, n, |ui, range| {
                                                 for i in range {
                                                     let (va, name) = &labels[i];
@@ -687,7 +688,7 @@ impl GhidrustApp {
                             egui::ScrollArea::vertical()
  .id_salt("rtti_scroll")
                                 .auto_shrink([false, false])
-                                .max_height(220.0)
+                                .max_height(d.scroll_sm)
                                 .show_rows(ui, row_h, idxs.len(), |ui, range| {
                                     for i in range {
                                         let c = &self.rtti.classes[idxs[i]];
@@ -791,7 +792,7 @@ impl GhidrustApp {
                                     let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
                                     egui::ScrollArea::vertical()
                                         .id_salt("str_scroll")
-                                        .max_height(200.0)
+                                        .max_height(d.scroll_sm)
                                         .show_rows(ui, row_h, str_n.min(5000), |ui, range| {
                                             for i in range {
                                                 if let Some(s) = self.strings.get(i) {

@@ -1,5 +1,6 @@
 //! Full decode options dialog (arch/mode and engine options).
 
+use ghidrust_core::ThemeDensity;
 use super::model::DecodeUiOpts;
 use super::processor::ui_processor_selectors;
 use ghidrust_core::Program;
@@ -18,7 +19,7 @@ pub fn ui_options_dialog(
     egui::Window::new("Decode Options")
         .collapsible(false)
         .resizable(true)
-        .default_width(480.0)
+        .default_width(ThemeDensity::FIB_DESKTOP.win_md[0])
         .show(ctx, |ui| {
             ui_processor_selectors(ui, opts, prog);
             ui.separator();

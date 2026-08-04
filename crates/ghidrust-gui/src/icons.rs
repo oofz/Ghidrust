@@ -2,6 +2,7 @@
 //! Source paths: https://github.com/google/material-design-icons (Apache-2.0).
 //! No emoji. No extra icon crates — paths are inlined and stroked/filled via Painter.
 
+use ghidrust_core::FibScale;
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 /// Material Icons 24dp viewBox.
@@ -90,33 +91,34 @@ fn paint_icon(painter: &egui::Painter, rect: Rect, icon: M3Icon, color: Color32)
 
 /// Material 3 linear progress indicator (4dp track + primary fill).
 pub fn m3_linear_progress(ui: &mut Ui, fraction: f32, primary: Color32, track: Color32) {
-    let height = 4.0;
-    let width = ui.available_width().max(40.0);
+    let height = FibScale::SM;
+    let width = ui.available_width().max(FibScale::XL3);
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     ui.painter()
-        .rect_filled(rect, egui::CornerRadius::same(2), track);
+        .rect_filled(rect, egui::CornerRadius::same(FibScale::XXS as u8), track);
     let f = fraction.clamp(0.0, 1.0);
     if f > 0.0 {
         let mut fill = rect;
-        fill.set_width((rect.width() * f).max(if f > 0.0 { 2.0 } else { 0.0 }));
+        fill.set_width((rect.width() * f).max(if f > 0.0 { FibScale::XXS } else { 0.0 }));
         ui.painter()
-            .rect_filled(fill, egui::CornerRadius::same(2), primary);
+            .rect_filled(fill, egui::CornerRadius::same(FibScale::XXS as u8), primary);
     }
 }
 
 /// Status row: Material check_circle or radio_button_unchecked + label text (no emoji).
 pub fn status_badge(ui: &mut Ui, analyzed: bool, analyzed_color: Color32, muted: Color32) {
+    use ghidrust_core::FibScale;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.spacing_mut().item_spacing.x = FibScale::SM;
         if analyzed {
-            m3_icon(ui, M3Icon::CheckCircle, 14.0, analyzed_color);
+            m3_icon(ui, M3Icon::CheckCircle, FibScale::LG, analyzed_color);
             ui.label(
                 egui::RichText::new("Analyzed")
                     .small()
                     .color(analyzed_color),
             );
         } else {
-            m3_icon(ui, M3Icon::RadioUnchecked, 14.0, muted);
+            m3_icon(ui, M3Icon::RadioUnchecked, FibScale::LG, muted);
             ui.label(egui::RichText::new("Not analyzed").small().color(muted));
         }
     });

@@ -4,6 +4,8 @@
 //! (same APIs as MCP/CLI). Mode **observe** (default) = read-only; **debug**
 //! enables break/step/registers/stack.
 
+use crate::layout_tokens::{FieldWidth, WinTier};
+use ghidrust_core::ThemeDensity;
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_core::process::{
     process_attach_opts, process_break_clear, process_break_list, process_break_set,
@@ -1066,8 +1068,8 @@ pub fn draw_host(ctx: &egui::Context, state: &mut DebuggerState, muted: Color32)
             .id(egui::Id::new(HOST_EGUI_ID))
             .open(&mut open)
             .resizable(true)
-            .default_size(egui::vec2(720.0, 520.0))
-            .min_size(egui::vec2(420.0, 280.0))
+            .default_size(WinTier::Lg.size(&ThemeDensity::FIB_DESKTOP))
+            .min_size(WinTier::Lg.min_size(&ThemeDensity::FIB_DESKTOP))
             .show(ctx, |ui| {
                 // Fill the resized window so vertical growth isn't clamped by content.
                 let avail = ui.available_size();
@@ -1092,7 +1094,7 @@ pub fn draw_launch_dialog(ctx: &egui::Context, state: &mut DebuggerState, muted:
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_width(520.0)
+        .default_width(WinTier::Md.width(&ThemeDensity::FIB_DESKTOP))
         .show(ctx, |ui| {
             ui.small(
                 RichText::new(
@@ -1105,7 +1107,7 @@ pub fn draw_launch_dialog(ctx: &egui::Context, state: &mut DebuggerState, muted:
  ui.label("Image:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.launch_image)
-                        .desired_width(360.0)
+                        .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
  .hint_text(r"C:\path\to\app.exe"),
                 );
  if ui.button("Browse…").clicked() {
@@ -1126,7 +1128,7 @@ pub fn draw_launch_dialog(ctx: &egui::Context, state: &mut DebuggerState, muted:
  ui.label("Args:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.launch_args)
-                        .desired_width(400.0)
+                        .desired_width(FieldWidth::XWide.px(&ThemeDensity::FIB_DESKTOP))
  .hint_text("optional"),
                 );
             });
@@ -1134,7 +1136,7 @@ pub fn draw_launch_dialog(ctx: &egui::Context, state: &mut DebuggerState, muted:
                 ui.label("Cwd:");
                 ui.add(
                     egui::TextEdit::singleline(&mut state.launch_cwd)
-                        .desired_width(360.0)
+                        .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                         .hint_text("optional working directory"),
                 );
                 if ui.button("Browse…").clicked() {
@@ -1342,7 +1344,7 @@ fn render_targets(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut state.targets_filter)
-                .desired_width(160.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("process name…"),
         );
     });
@@ -1357,7 +1359,7 @@ fn render_targets(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("PID:");
         ui.add(
             egui::TextEdit::singleline(&mut state.attach_pid_input)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("1234"),
         );
         if ui
@@ -1445,7 +1447,7 @@ fn render_modules(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("Filter:");
         ui.add(
             egui::TextEdit::singleline(&mut state.modules_filter)
-                .desired_width(180.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("module name…"),
         );
     });
@@ -1534,13 +1536,13 @@ fn render_modules(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("Module:");
         ui.add(
             egui::TextEdit::singleline(&mut state.static_map_module_input)
-                .desired_width(160.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("game.exe"),
         );
         ui.label("RVA:");
         ui.add(
             egui::TextEdit::singleline(&mut state.static_map_rva_input)
-                .desired_width(120.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x1000"),
         );
         if ui.button("Resolve").clicked() {
@@ -1616,13 +1618,13 @@ fn render_memory_bytes(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("VA:");
         ui.add(
             egui::TextEdit::singleline(&mut state.mem_bytes_va_input)
-                .desired_width(160.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x140001000"),
         );
         ui.label("Size:");
         ui.add(
             egui::TextEdit::singleline(&mut state.mem_bytes_size_input)
-                .desired_width(100.0)
+                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("256"),
         );
         if ui.button("Read").clicked() {
@@ -1711,7 +1713,7 @@ fn render_breakpoints(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("Address:");
         ui.add(
             egui::TextEdit::singleline(&mut state.bp_input)
-                .desired_width(160.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("0x7ff…"),
         );
         ui.checkbox(&mut state.bp_oneshot, "oneshot");
@@ -1791,7 +1793,7 @@ fn render_watches(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("Expr:");
         ui.add(
             egui::TextEdit::singleline(&mut state.watch_input)
-                .desired_width(280.0)
+                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("game.exe+0x1234->*+0x10"),
         );
         ui.checkbox(&mut state.watch_matrix_heuristic, "matrix heuristic");
@@ -1812,13 +1814,13 @@ fn render_watches(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         ui.label("AOB:");
         ui.add(
             egui::TextEdit::singleline(&mut state.scan_aob)
-                .desired_width(200.0)
+                .desired_width(FieldWidth::Std.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("48 8b ?? 90"),
         );
         ui.label("String:");
         ui.add(
             egui::TextEdit::singleline(&mut state.scan_string)
-                .desired_width(120.0)
+                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                 .hint_text("Camera"),
         );
         if ui.button("Scan").clicked() {
@@ -1861,7 +1863,7 @@ fn render_watches(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
         let mut goto = None;
         egui::ScrollArea::vertical()
             .id_salt("dbg_scan_hits")
-            .max_height(100.0)
+            .max_height(ThemeDensity::FIB_DESKTOP.field_narrow)
             .show(ui, |ui| {
                 for h in state.scan_hits.iter().take(64) {
                     if ui
@@ -2033,7 +2035,7 @@ fn render_registers(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
                             .or_insert_with(String::new);
                         let resp = ui.add(
                             egui::TextEdit::singleline(entry)
-                                .desired_width(160.0)
+                                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
                                 .font(egui::TextStyle::Monospace),
                         );
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -2140,7 +2142,7 @@ fn render_console(state: &mut DebuggerState, ui: &mut Ui, muted: Color32) {
     egui::ScrollArea::vertical()
         .id_salt("dbg_console")
         .stick_to_bottom(true)
-        .max_height(280.0)
+        .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
         .show(ui, |ui| {
             if state.console_log.is_empty() {
                 ui.weak("No events yet — type a command below.");
