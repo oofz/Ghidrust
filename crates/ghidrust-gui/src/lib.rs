@@ -8,6 +8,7 @@ mod branding;
 mod checksum;
 mod debugger;
 mod network;
+mod network_job;
 mod decomp_tokens;
 mod decrypt_ui;
 mod dock_tabs;

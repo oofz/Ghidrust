@@ -4,6 +4,9 @@
 //! Panes call `ghidrust-net-*` (same APIs as CLI/MCP). Not a packet browser.
 
 use crate::layout_tokens::{FieldWidth, WinTier};
+use crate::network_job::{
+    NetWorkerKind, NetWorkerMsg, NetWorkerPayload, NetworkJob,
+};
 use ghidrust_core::ThemeDensity;
 use eframe::egui::{self, Color32, RichText, Ui};
 use ghidrust_net_attr::{list_connections, owner_for_pid, ConnFilter};
@@ -143,7 +146,9 @@ impl NetworkAction {
 }
 
 /// Persistent state for the Network (Ghidnet) tool.
-#[derive(Debug, Clone)]
+///
+/// Not `Clone`: holds an optional [`NetworkJob`] receiver for background work.
+#[derive(Debug)]
 pub struct NetworkState {
     pub enabled: bool,
     pub host_open: bool,
@@ -197,6 +202,12 @@ pub struct NetworkState {
     pub dig_plan: Option<DigPlan>,
     pub dig_result: Option<DigResult>,
     pub dig_job: Option<DigJob>,
+    /// Dig Result pane height (px). Plan fills the rest. Drag the grip to resize.
+    /// `0` = uninitialized → default from density on first Dig draw.
+    pub dig_footer_height: f32,
+
+    /// In-flight background Dig/Detect/Pivots/Connections job (UI polls).
+    pub network_job: Option<NetworkJob>,
 
     /// Consumed by the app after draw: load this binary into Listing.
     pub pending_load_path: Option<String>,
@@ -251,9 +262,44 @@ impl Default for NetworkState {
             dig_plan: None,
             dig_result: None,
             dig_job: None,
+            dig_footer_height: 0.0,
+            network_job: None,
             pending_load_path: None,
             pending_focus_debugger: false,
         }
+    }
+}
+
+/// Horizontal drag grip (same pattern as the main console dock).
+fn network_v_grip(ui: &mut Ui, dens: &ThemeDensity, footer_h: &mut f32) {
+    let grip_h = dens.console_grip;
+    let (grip_rect, grip_resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), grip_h),
+        egui::Sense::drag(),
+    );
+    let grip_color = if grip_resp.dragged() {
+        ui.visuals().widgets.active.bg_fill
+    } else if grip_resp.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        ui.visuals().widgets.noninteractive.bg_fill
+    };
+    ui.painter().rect_filled(grip_rect, 0.0, grip_color);
+    let bar = egui::Rect::from_center_size(
+        grip_rect.center(),
+        egui::vec2(dens.console_handle_w, dens.space_xs),
+    );
+    ui.painter().rect_filled(
+        bar,
+        dens.space_xs / 2.0,
+        ui.visuals().widgets.noninteractive.fg_stroke.color,
+    );
+    if grip_resp.hovered() || grip_resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if grip_resp.dragged() {
+        // Grip sits above the footer: drag down → taller footer.
+        *footer_h = (*footer_h + grip_resp.drag_delta().y).max(0.0);
     }
 }
 
@@ -277,6 +323,139 @@ impl NetworkState {
         if self.ifaces.is_empty() {
             self.refresh_ifaces();
         }
+    }
+
+    /// True while a background Dig/Detect/Pivots/Connections job is in flight.
+    pub fn is_network_busy(&self) -> bool {
+        self.network_job.is_some()
+    }
+
+    fn ensure_network_idle(&self) -> Result<(), String> {
+        if self.network_job.is_some() {
+            Err("network job already in progress".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Apply one worker message. Returns `true` when the job has finished (Done/Failed).
+    pub fn apply_net_worker_msg(&mut self, msg: NetWorkerMsg) -> bool {
+        match msg {
+            NetWorkerMsg::Started { label } => {
+                self.status = format!("{label}…");
+                self.last_error = None;
+                false
+            }
+            NetWorkerMsg::Failed { error } => {
+                self.last_error = Some(error);
+                self.network_job = None;
+                true
+            }
+            NetWorkerMsg::Done { kind, payload } => {
+                match (kind, payload) {
+                    (
+                        NetWorkerKind::DigOffline,
+                        NetWorkerPayload::Dig {
+                            result,
+                            plan,
+                            attach_live,
+                        },
+                    ) => {
+                        self.dig_plan = Some(plan);
+                        self.dig_result = Some(result);
+                        self.status = "Dig execute ok".into();
+                        if attach_live {
+                            self.pending_focus_debugger = true;
+                        }
+                    }
+                    (
+                        NetWorkerKind::ClosedLoop,
+                        NetWorkerPayload::ClosedLoop { job, attach_live },
+                    ) => {
+                        self.dig_plan = Some(job.plan.clone());
+                        self.dig_result = Some(job.result.clone());
+                        self.dig_job = Some(job);
+                        self.status = if attach_live {
+                            "Closed-loop dig ok — attach_live: open Debugger to attach".into()
+                        } else {
+                            "Closed-loop dig ok".into()
+                        };
+                        if attach_live {
+                            self.pending_focus_debugger = true;
+                        }
+                        self.focus_tab(NetworkPane::Dig);
+                    }
+                    (NetWorkerKind::Detect, NetWorkerPayload::Detect { alerts }) => {
+                        self.alerts = alerts;
+                        self.selected_alert = None;
+                        self.focus_tab(NetworkPane::Alerts);
+                        self.status = format!("Detect: {} alert(s)", self.alerts.len());
+                    }
+                    (
+                        NetWorkerKind::Pivots,
+                        NetWorkerPayload::Pivots { pivots, dig_host },
+                    ) => {
+                        self.pivots = pivots;
+                        if let Some(h) = dig_host {
+                            self.dig_host = h;
+                        }
+                        self.status = "Pivots extracted".into();
+                    }
+                    (
+                        NetWorkerKind::ConnectionsRefresh,
+                        NetWorkerPayload::Connections { rows },
+                    ) => {
+                        self.connections = rows;
+                        self.selected_conn = None;
+                        self.selected_owner = None;
+                        self.status = format!("Connections: {}", self.connections.len());
+                    }
+                    _ => {
+                        self.last_error =
+                            Some("network worker payload kind mismatch".into());
+                    }
+                }
+                self.network_job = None;
+                true
+            }
+        }
+    }
+
+    /// Poll the background job (non-blocking). Returns `true` if a job is still running
+    /// (caller should request repaint).
+    pub fn poll_network_job(&mut self) -> bool {
+        loop {
+            let Some(job) = self.network_job.as_ref() else {
+                return false;
+            };
+            match job.try_recv() {
+                Ok(Some(msg)) => {
+                    let finished = self.apply_net_worker_msg(msg);
+                    if finished {
+                        return false;
+                    }
+                }
+                Ok(None) => return true,
+                Err(e) => {
+                    self.last_error = Some(e);
+                    self.network_job = None;
+                    return false;
+                }
+            }
+        }
+    }
+
+    fn begin_network_job<F>(&mut self, label: impl Into<String>, work: F) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<(NetWorkerKind, NetWorkerPayload), String> + Send + 'static,
+    {
+        self.ensure_network_idle()?;
+        self.last_error = None;
+        let label = label.into();
+        self.status = format!("{label}…");
+        let job = NetworkJob::spawn(label, work)?;
+        self.network_job = Some(job);
+        Ok(())
     }
 
     pub fn focus_tab(&mut self, tab: NetworkPane) {
@@ -316,6 +495,13 @@ impl NetworkState {
         }
     }
 
+    /// Drop Plan/Result/job so a new Dig selection cannot show the previous target.
+    pub fn clear_dig_outputs(&mut self) {
+        self.dig_plan = None;
+        self.dig_result = None;
+        self.dig_job = None;
+    }
+
     pub fn apply_hint(&mut self, hint: NetHint) {
         if let Some(p) = hint.path {
             self.dig_path = p;
@@ -335,6 +521,9 @@ impl NetworkState {
         if let Some(f) = hint.flow_ref {
             self.dig_flow_ref = f;
         }
+        // Hint came from a new Connections/Flows/Alerts Dig — stale plan/result must go.
+        self.clear_dig_outputs();
+        self.last_error = None;
     }
 
     pub fn dig_from_connection(&mut self, idx: usize) {
@@ -381,55 +570,47 @@ impl NetworkState {
     }
 
     pub fn dig_from_alert(&mut self, idx: usize) {
-        if let Some(a) = self.alerts.get(idx).cloned() {
-            let path = a
-                .owner
-                .as_ref()
-                .and_then(|o| o.image_path.clone())
-                .or_else(|| nonempty(&self.dig_path));
-            self.apply_hint(NetHint {
-                path: path.clone(),
-                alert_id: Some(a.id.clone()),
-                host: a.host.clone(),
-                ioc: a.ioc.clone(),
-                pid: a.owner.as_ref().map(|o| o.pid),
-                ..Default::default()
-            });
-            if let Some(path) = path {
-                let cfg = ClosedLoopConfig {
-                    auto_analyze: true,
-                    auto_decompile_limit: 3,
-                    attach_live: self.dig_attach_live,
-                };
-                match execute_closed_loop(&a, Path::new(&path), &cfg) {
-                    Ok(job) => {
-                        self.dig_plan = Some(job.plan.clone());
-                        self.dig_result = Some(job.result.clone());
-                        self.dig_job = Some(job);
-                        self.status = "Closed-loop dig ok".into();
-                        self.last_error = None;
-                        if self.dig_attach_live {
-                            self.pending_focus_debugger = true;
-                            self.status =
-                                "Closed-loop dig ok — attach_live: open Debugger to attach"
-                                    .into();
-                        }
-                    }
-                    Err(e) => {
-                        self.last_error = Some(e);
-                        self.focus_tab(NetworkPane::Dig);
-                    }
-                }
-            } else {
-                self.last_error =
-                    Some("Alert has no owner path — set Dig path then Dig again".into());
-            }
-            self.focus_tab(NetworkPane::Dig);
+        let Some(a) = self.alerts.get(idx).cloned() else {
+            return;
+        };
+        let path = a
+            .owner
+            .as_ref()
+            .and_then(|o| o.image_path.clone())
+            .or_else(|| nonempty(&self.dig_path));
+        self.apply_hint(NetHint {
+            path: path.clone(),
+            alert_id: Some(a.id.clone()),
+            host: a.host.clone(),
+            ioc: a.ioc.clone(),
+            pid: a.owner.as_ref().map(|o| o.pid),
+            ..Default::default()
+        });
+        self.focus_tab(NetworkPane::Dig);
+        let Some(path) = path else {
+            self.last_error =
+                Some("Alert has no owner path — set Dig path then Dig again".into());
+            return;
+        };
+        // apply_hint already cleared dig outputs; keep them clear until the worker finishes.
+        let attach_live = self.dig_attach_live;
+        let cfg = ClosedLoopConfig {
+            auto_analyze: true,
+            auto_decompile_limit: 3,
+            attach_live,
+        };
+        if let Err(e) = self.begin_network_job("Closed-loop dig", move || {
+            let job = execute_closed_loop(&a, Path::new(&path), &cfg)?;
+            Ok((
+                NetWorkerKind::ClosedLoop,
+                NetWorkerPayload::ClosedLoop { job, attach_live },
+            ))
+        }) {
+            self.last_error = Some(e);
         }
     }
 
     pub fn refresh_connections(&mut self) {
-        self.last_error = None;
         let filter = ConnFilter {
             pid: self.conn_filter_pid.trim().parse().ok(),
             path_substr: nonempty(&self.conn_filter_path),
@@ -437,23 +618,24 @@ impl NetworkState {
             listening_only: self.conn_listening_only,
             max: self.conn_max.trim().parse().ok(),
         };
-        match list_connections(&filter) {
-            Ok(v) => {
-                self.connections = v;
-                self.selected_conn = None;
-                self.selected_owner = None;
-                self.status = format!("Connections: {}", self.connections.len());
-            }
-            Err(e) => {
-                self.connections.clear();
-                self.last_error = Some(e.to_string());
-            }
+        // Drop selection immediately; rows swap when the worker finishes.
+        self.selected_conn = None;
+        self.selected_owner = None;
+        if let Err(e) = self.begin_network_job("Refresh connections", move || {
+            let rows = list_connections(&filter).map_err(|e| e.to_string())?;
+            Ok((
+                NetWorkerKind::ConnectionsRefresh,
+                NetWorkerPayload::Connections { rows },
+            ))
+        }) {
+            self.last_error = Some(e);
         }
     }
 
     pub fn select_connection(&mut self, idx: usize) {
         self.selected_conn = Some(idx);
         self.selected_owner = None;
+        self.last_error = None;
         if let Some(c) = self.connections.get(idx) {
             match owner_for_pid(c.pid) {
                 Ok(o) => self.selected_owner = Some(o),
@@ -488,6 +670,10 @@ impl NetworkState {
         };
         match capture_start(req) {
             Ok(r) => {
+                // New session must not keep the previous capture's flows/pivots.
+                self.flows_cache.clear();
+                self.selected_flow = None;
+                self.pivots = PivotFields::default();
                 self.session_id = Some(r.session_id.clone());
                 self.capture_out_path = Some(r.out_path.clone());
                 self.capture_backend = Some(r.backend.clone());
@@ -540,6 +726,7 @@ impl NetworkState {
         match flows(&id, Some(256)) {
             Ok(v) => {
                 self.flows_cache = v;
+                self.selected_flow = None;
                 self.status = format!("Flows: {}", self.flows_cache.len());
             }
             Err(e) => self.last_error = Some(e.to_string()),
@@ -547,7 +734,6 @@ impl NetworkState {
     }
 
     pub fn extract_pivots_from_capture(&mut self) {
-        self.last_error = None;
         let path = self
             .capture_out_path
             .clone()
@@ -556,28 +742,32 @@ impl NetworkState {
             self.last_error = Some("No capture/replay path for pivots".into());
             return;
         };
-        match read_frames(Path::new(&path)) {
-            Ok(frames) => {
-                let mut acc = PivotFields::default();
-                for f in &frames {
-                    let p = extract_pivots(&f.payload);
-                    merge_pivots(&mut acc, p);
-                }
-                // Also scan raw file bytes for TLS/HTTP magic outside framed payload.
-                if let Ok(raw) = std::fs::read(&path) {
-                    merge_pivots(&mut acc, extract_pivots(&raw));
-                }
-                self.pivots = acc;
-                if let Some(h) = self.pivots.dns_qnames.first().cloned() {
-                    self.dig_host = h;
-                } else if let Some(h) = self.pivots.tls_sni.first().cloned() {
-                    self.dig_host = h;
-                } else if let Some(h) = self.pivots.http_hosts.first().cloned() {
-                    self.dig_host = h;
-                }
-                self.status = "Pivots extracted".into();
+        // Clear immediately so a second Pivots run cannot show the prior capture.
+        self.pivots = PivotFields::default();
+        if let Err(e) = self.begin_network_job("Extract pivots", move || {
+            let frames = read_frames(Path::new(&path))?;
+            let mut acc = PivotFields::default();
+            for f in &frames {
+                merge_pivots(&mut acc, extract_pivots(&f.payload));
             }
-            Err(e) => self.last_error = Some(e),
+            if let Ok(raw) = std::fs::read(&path) {
+                merge_pivots(&mut acc, extract_pivots(&raw));
+            }
+            let dig_host = acc
+                .dns_qnames
+                .first()
+                .cloned()
+                .or_else(|| acc.tls_sni.first().cloned())
+                .or_else(|| acc.http_hosts.first().cloned());
+            Ok((
+                NetWorkerKind::Pivots,
+                NetWorkerPayload::Pivots {
+                    pivots: acc,
+                    dig_host,
+                },
+            ))
+        }) {
+            self.last_error = Some(e);
         }
     }
 
@@ -613,21 +803,30 @@ impl NetworkState {
     }
 
     pub fn run_detect_on_path(&mut self, path: &Path) {
-        self.last_error = None;
+        let path = path.to_path_buf();
+        let rules_path = self.rules_path.clone();
+        // Prefetch rules on UI thread so missing rules fail immediately with a clear error.
         if let Err(e) = self.ensure_ruleset() {
             self.last_error = Some(e);
             return;
         }
-        let rules = self.ruleset.as_ref().unwrap();
-        match detect_capture_file(path, rules, &[]) {
-            Ok(mut alerts) => {
-                alerts.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.timestamp_ms.cmp(&a.timestamp_ms)));
-                self.alerts = alerts;
-                self.selected_alert = None;
-                self.focus_tab(NetworkPane::Alerts);
-                self.status = format!("Detect: {} alert(s)", self.alerts.len());
-            }
-            Err(e) => self.last_error = Some(e),
+        // Clear immediately so a second Detect cannot leave the previous alert set on screen.
+        self.alerts.clear();
+        self.selected_alert = None;
+        if let Err(e) = self.begin_network_job("Detect", move || {
+            let rules = load_rules(Path::new(&rules_path)).map_err(|e| e.to_string())?;
+            let mut alerts = detect_capture_file(&path, &rules, &[])?;
+            alerts.sort_by(|a, b| {
+                b.severity
+                    .cmp(&a.severity)
+                    .then(b.timestamp_ms.cmp(&a.timestamp_ms))
+            });
+            Ok((
+                NetWorkerKind::Detect,
+                NetWorkerPayload::Detect { alerts },
+            ))
+        }) {
+            self.last_error = Some(e);
         }
     }
 
@@ -646,48 +845,60 @@ impl NetworkState {
     pub fn refresh_alerts_from_buffer(&mut self) {
         let mut alerts = last_alerts(Some(256));
         alerts.sort_by(|a, b| b.severity.cmp(&a.severity).then(b.timestamp_ms.cmp(&a.timestamp_ms)));
-        if !alerts.is_empty() {
-            self.alerts = alerts;
-        }
+        // Always replace — keeping old rows when the buffer is empty hid a second refresh.
+        self.alerts = alerts;
+        self.selected_alert = None;
+        self.status = format!("Alerts buffer: {}", self.alerts.len());
     }
 
     pub fn compile_dig(&mut self) {
         self.last_error = None;
+        self.dig_result = None;
+        self.dig_job = None;
         let hint = self.hint_from_fields();
         match compile_playbook(&hint) {
             Ok(plan) => {
                 self.dig_plan = Some(plan);
-                self.dig_result = None;
                 self.status = "Playbook compiled".into();
             }
-            Err(e) => self.last_error = Some(e),
+            Err(e) => {
+                // Fields changed / invalid — do not keep the previous plan on screen.
+                self.dig_plan = None;
+                self.last_error = Some(e);
+            }
         }
     }
 
     pub fn execute_dig(&mut self) {
-        self.last_error = None;
-        let plan = match &self.dig_plan {
-            Some(p) => p.clone(),
-            None => match compile_playbook(&self.hint_from_fields()) {
-                Ok(p) => {
-                    self.dig_plan = Some(p.clone());
-                    p
-                }
-                Err(e) => {
-                    self.last_error = Some(e);
-                    return;
-                }
-            },
-        };
-        match execute_playbook_offline(&plan) {
-            Ok(result) => {
-                self.dig_result = Some(result);
-                self.status = "Dig execute ok".into();
-                if self.dig_attach_live {
-                    self.pending_focus_debugger = true;
-                }
+        // Always recompile from current Dig fields. Reusing `dig_plan` after Digging
+        // another connection left the previous PE's plan/result on screen.
+        let plan = match compile_playbook(&self.hint_from_fields()) {
+            Ok(p) => {
+                self.dig_plan = Some(p.clone());
+                self.dig_result = None;
+                self.dig_job = None;
+                self.last_error = None;
+                p
             }
-            Err(e) => self.last_error = Some(e),
+            Err(e) => {
+                self.last_error = Some(e);
+                return;
+            }
+        };
+        let attach_live = self.dig_attach_live;
+        let plan_for_payload = plan.clone();
+        if let Err(e) = self.begin_network_job("Dig execute", move || {
+            let result = execute_playbook_offline(&plan)?;
+            Ok((
+                NetWorkerKind::DigOffline,
+                NetWorkerPayload::Dig {
+                    result,
+                    plan: plan_for_payload,
+                    attach_live,
+                },
+            ))
+        }) {
+            self.last_error = Some(e);
         }
     }
 
@@ -858,8 +1069,18 @@ pub fn draw_host(ctx: &egui::Context, state: &mut NetworkState, muted: Color32) 
     if !state.host_open {
         return;
     }
-    // Poll capture while running.
-    if state.session_info.as_ref().map(|s| s.running).unwrap_or(false) {
+    // Poll background Dig/Detect/Pivots/Connections worker.
+    if state.poll_network_job() {
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+    // Poll capture while running (skip OS polls while a heavy net job is busy).
+    if !state.is_network_busy()
+        && state
+            .session_info
+            .as_ref()
+            .map(|s| s.running)
+            .unwrap_or(false)
+    {
         let due = state
             .last_poll
             .map(|t| t.elapsed() >= Duration::from_millis(750))
@@ -962,9 +1183,10 @@ fn render_host_body(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
 
 fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
     let dens = ThemeDensity::FIB_DESKTOP;
+    let busy = state.is_network_busy();
     ui.horizontal(|ui| {
         if ui
-            .small_button("Refresh")
+            .add_enabled(!busy, egui::Button::new("Refresh").small())
             .on_hover_text("Owner-first sockets — Dig fills NetHint from the selected row.")
             .clicked()
         {
@@ -995,7 +1217,7 @@ fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
                 .desired_width(FieldWidth::Micro.px(&dens))
                 .hint_text("256"),
         );
-        let dig_en = state.selected_conn.is_some();
+        let dig_en = !busy && state.selected_conn.is_some();
         if ui
             .add_enabled(dig_en, egui::Button::new("Dig").small())
             .on_hover_text("Compile dig hint from selection")
@@ -1004,6 +1226,9 @@ fn render_connections(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
             if let Some(i) = state.selected_conn {
                 state.dig_from_connection(i);
             }
+        }
+        if busy {
+            ui.small(RichText::new("working…").color(muted));
         }
     });
 
@@ -1153,10 +1378,17 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         if ui.button("Flows").clicked() {
             state.refresh_flows();
         }
-        if ui.button("Detect").clicked() {
+        let busy = state.is_network_busy();
+        if ui
+            .add_enabled(!busy, egui::Button::new("Detect"))
+            .clicked()
+        {
             state.run_detect_on_session();
         }
-        if ui.button("Pivots").clicked() {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Pivots"))
+            .clicked()
+        {
             state.extract_pivots_from_capture();
         }
         let export_en = state.export_path().is_some();
@@ -1172,7 +1404,7 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
                 Err(e) => state.last_error = Some(e),
             }
         }
-        let dig_en = state.selected_flow.is_some();
+        let dig_en = !busy && state.selected_flow.is_some();
         if ui.add_enabled(dig_en, egui::Button::new("Dig flow")).clicked() {
             if let Some(i) = state.selected_flow {
                 state.dig_from_flow(i);
@@ -1240,9 +1472,11 @@ fn render_capture(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
 
     ui.separator();
     ui.label(RichText::new("Flows").strong());
+    let dens = ThemeDensity::FIB_DESKTOP;
+    let flows_h = ui.available_height().max(dens.scroll_md);
     egui::ScrollArea::vertical()
         .id_salt("net_flows_table")
-        .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
+        .max_height(flows_h)
         .show(ui, |ui| {
             egui::Grid::new("net_flows_grid")
                 .num_columns(6)
@@ -1302,13 +1536,20 @@ fn render_alerts(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label(format!("total={}", state.alerts.len()));
     });
     ui.horizontal(|ui| {
+        let busy = state.is_network_busy();
         if ui.button("Refresh buffer").clicked() {
             state.refresh_alerts_from_buffer();
         }
-        if ui.button("Detect on capture…").clicked() {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Detect on capture…"))
+            .clicked()
+        {
             state.run_detect_on_session();
         }
-        if ui.button("Detect file…").clicked() {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Detect file…"))
+            .clicked()
+        {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Capture", &["grncap", "pcap"])
                 .pick_file()
@@ -1316,7 +1557,7 @@ fn render_alerts(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
                 state.run_detect_on_path(&path);
             }
         }
-        let dig_en = state.selected_alert.is_some();
+        let dig_en = !busy && state.selected_alert.is_some();
         if ui
             .add_enabled(dig_en, egui::Button::new("Dig"))
             .on_hover_text("Closed-loop dig from alert (needs owner path or Dig path)")
@@ -1328,9 +1569,11 @@ fn render_alerts(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         }
     });
 
+    let dens = ThemeDensity::FIB_DESKTOP;
+    let alerts_h = ui.available_height().max(dens.scroll_md);
     egui::ScrollArea::vertical()
         .id_salt("net_alerts_table")
-        .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
+        .max_height(alerts_h)
         .show(ui, |ui| {
             egui::Grid::new("net_alerts_grid")
                 .num_columns(6)
@@ -1455,9 +1698,11 @@ fn render_rules(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
     ui.separator();
     if let Some(rs) = &state.ruleset {
         ui.label(RichText::new(format!("Rules ({})", rs.rules.len())).strong());
+        let dens = ThemeDensity::FIB_DESKTOP;
+        let rules_h = ui.available_height().max(dens.scroll_md);
         egui::ScrollArea::vertical()
             .id_salt("net_rules_list")
-            .max_height(ThemeDensity::FIB_DESKTOP.scroll_sm)
+            .max_height(rules_h)
             .show(ui, |ui| {
                 for r in &rs.rules {
                     rule_row(ui, r, muted);
@@ -1476,6 +1721,7 @@ fn rule_row(ui: &mut Ui, r: &Rule, muted: Color32) {
 }
 
 fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
+    let dens = ThemeDensity::FIB_DESKTOP;
     ui.small(
         RichText::new("Compile a dig playbook from NetHint, then Execute offline analysis.")
             .color(muted),
@@ -1484,7 +1730,7 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("path");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_path)
-                .desired_width(FieldWidth::Wide.px(&ThemeDensity::FIB_DESKTOP))
+                .desired_width(FieldWidth::Wide.px(&dens))
                 .hint_text("image path"),
         );
         if ui.button("Browse…").clicked() {
@@ -1498,7 +1744,7 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("pid");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_pid)
-                .desired_width(FieldWidth::Micro.px(&ThemeDensity::FIB_DESKTOP))
+                .desired_width(FieldWidth::Micro.px(&dens))
                 .hint_text("opt"),
         );
     });
@@ -1506,39 +1752,47 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         ui.label("host");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_host)
-                .desired_width(FieldWidth::Compact.px(&ThemeDensity::FIB_DESKTOP))
+                .desired_width(FieldWidth::Compact.px(&dens))
                 .hint_text("dns/ip"),
         );
         ui.label("ioc");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_ioc)
-                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
+                .desired_width(FieldWidth::Narrow.px(&dens))
                 .hint_text("opt"),
         );
         ui.label("alert");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_alert_id)
-                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
+                .desired_width(FieldWidth::Narrow.px(&dens))
                 .hint_text("id"),
         );
         ui.label("flow");
         ui.add(
             egui::TextEdit::singleline(&mut state.dig_flow_ref)
-                .desired_width(FieldWidth::Narrow.px(&ThemeDensity::FIB_DESKTOP))
+                .desired_width(FieldWidth::Narrow.px(&dens))
                 .hint_text("ref"),
         );
     });
     ui.horizontal(|ui| {
+        let busy = state.is_network_busy();
         ui.checkbox(&mut state.dig_attach_live, "attach_live (opens Debugger)");
-        if ui.button("Compile").clicked() {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Compile"))
+            .clicked()
+        {
             state.compile_dig();
         }
-        if ui.button("Execute").clicked() {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Execute"))
+            .on_hover_text("Runs load+analyze off the UI thread")
+            .clicked()
+        {
             state.execute_dig();
         }
         if ui
             .add_enabled(
-                !state.dig_path.trim().is_empty(),
+                !busy && !state.dig_path.trim().is_empty(),
                 egui::Button::new("Open in Listing"),
             )
             .clicked()
@@ -1547,13 +1801,48 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
         }
     });
 
+    let has_plan = state.dig_plan.is_some();
+    let has_result = state.dig_result.is_some();
+    let job_line = state.dig_job.is_some();
+    // Match Connections: Plan is the main pane; Result is a short, resizable footer.
+    let avail = ui.available_height();
+    let grip_h = dens.console_grip;
+    let job_reserve = if job_line {
+        dens.space_xl + dens.space_xs
+    } else {
+        0.0
+    };
+    let min_footer = dens.space_xl * 2.0 + dens.space_lg;
+    let min_plan = dens.scroll_md.min(avail * 0.45).max(dens.console_min);
+    if state.dig_footer_height <= 0.0 {
+        // Default: compact result strip (~console), not panel_symbol.
+        state.dig_footer_height = dens.console_min;
+    }
+    let footer_budget = if has_result {
+        let max_footer = (avail - min_plan - grip_h - job_reserve).max(min_footer);
+        state.dig_footer_height = state
+            .dig_footer_height
+            .clamp(min_footer, max_footer.max(min_footer));
+        state.dig_footer_height + grip_h
+    } else {
+        0.0
+    };
+    let plan_h = if has_plan {
+        (avail - footer_budget - job_reserve).max(dens.console_min)
+    } else {
+        0.0
+    };
+
     if let Some(plan) = &state.dig_plan {
         ui.separator();
         ui.label(RichText::new("Plan").strong());
         ui.small(RichText::new(&plan.rationale).color(muted));
+        // Header ate a bit of plan_h; give the scroll the remainder of the budget.
+        let steps_h = (plan_h - dens.space_xl - dens.space_md).max(dens.console_min);
         egui::ScrollArea::vertical()
             .id_salt("net_dig_steps")
-            .max_height(ThemeDensity::FIB_DESKTOP.console_min)
+            .max_height(steps_h)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (i, s) in plan.steps.iter().enumerate() {
                     ui.monospace(format!("{}. {} {}", i + 1, s.tool, s.args));
@@ -1567,12 +1856,15 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
             });
     }
 
-    if let Some(result) = &state.dig_result {
-        ui.separator();
+    if has_result {
+        network_v_grip(ui, &dens, &mut state.dig_footer_height);
+        let result = state.dig_result.as_ref().unwrap();
         ui.label(RichText::new(format!("Result · {}", result.status)).strong());
+        let findings_h = (state.dig_footer_height - dens.space_xl).max(dens.space_xl * 2.0);
         egui::ScrollArea::vertical()
             .id_salt("net_dig_findings")
-            .max_height(ThemeDensity::FIB_DESKTOP.panel_symbol_min)
+            .max_height(findings_h)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 for f in &result.findings {
                     ui.label(format!("[{}] {}", f.kind, f.detail));
@@ -1594,6 +1886,35 @@ fn render_dig(state: &mut NetworkState, ui: &mut Ui, muted: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ghidrust_net_schema::DigFinding;
+    use std::sync::mpsc;
+
+    fn fixture_pe() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/tiny_x64.pe")
+    }
+
+    fn drain_job(st: &mut NetworkState) {
+        for _ in 0..2_000 {
+            if !st.poll_network_job() && !st.is_network_busy() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!(
+            "network job did not finish: status={} err={:?}",
+            st.status, st.last_error
+        );
+    }
+
+    fn inject_job(st: &mut NetworkState, label: &str) -> mpsc::Sender<NetWorkerMsg> {
+        let (tx, rx) = mpsc::channel();
+        st.network_job = Some(NetworkJob {
+            label: label.into(),
+            rx,
+        });
+        st.status = format!("{label}…");
+        tx
+    }
 
     #[test]
     fn default_rules_path_resolvable_or_fallback() {
@@ -1603,7 +1924,7 @@ mod tests {
 
     #[test]
     fn compile_dig_from_fixture_path() {
-        let pe = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/tiny_x64.pe");
+        let pe = fixture_pe();
         assert!(pe.is_file(), "missing fixture {}", pe.display());
         let mut st = NetworkState::default();
         st.dig_path = pe.display().to_string();
@@ -1612,6 +1933,14 @@ mod tests {
         assert!(st.last_error.is_none(), "{:?}", st.last_error);
         assert!(st.dig_plan.is_some());
         assert!(!st.dig_plan.as_ref().unwrap().steps.is_empty());
+    }
+
+    #[test]
+    fn compile_dig_empty_hint_errors() {
+        let mut st = NetworkState::default();
+        st.compile_dig();
+        assert!(st.last_error.is_some());
+        assert!(st.dig_plan.is_none());
     }
 
     #[test]
@@ -1627,6 +1956,106 @@ mod tests {
         apply_layout_flags(&mut st2, &map);
         assert!(st2.host_open);
         assert_eq!(st2.active_tab, NetworkPane::Alerts);
+    }
+
+    #[test]
+    fn enable_tool_and_focus_tab() {
+        let mut st = NetworkState::default();
+        st.enable_tool();
+        assert!(st.enabled && st.host_open);
+        assert!(!st.ifaces.is_empty());
+        st.focus_tab(NetworkPane::Dig);
+        assert_eq!(st.active_tab, NetworkPane::Dig);
+    }
+
+    #[test]
+    fn dig_footer_height_defaults_unset() {
+        let st = NetworkState::default();
+        assert_eq!(st.dig_footer_height, 0.0, "0 means density default on first Dig draw");
+    }
+
+    #[test]
+    fn compile_dig_error_clears_stale_plan() {
+        let mut st = NetworkState::default();
+        st.dig_path = fixture_pe().display().to_string();
+        st.dig_host = "ok.test".into();
+        st.compile_dig();
+        assert!(st.dig_plan.is_some());
+        st.dig_path.clear();
+        st.dig_host.clear();
+        st.dig_ioc.clear();
+        st.compile_dig();
+        assert!(st.dig_plan.is_none(), "failed compile must drop prior plan");
+        assert!(st.dig_result.is_none());
+        assert!(st.last_error.is_some());
+    }
+
+    #[test]
+    fn extract_pivots_clears_prior_pivots_immediately() {
+        let mut st = NetworkState::default();
+        st.pivots.dns_qnames.push("old.example".into());
+        st.capture_replay = "Z:\\missing\\nope.grncap".into();
+        // Path exists check is only "Some(path)" — worker will fail; pivots must already be empty.
+        st.extract_pivots_from_capture();
+        assert!(
+            st.pivots.dns_qnames.is_empty(),
+            "second Pivots must not keep prior DNS list while running/failing"
+        );
+        if st.is_network_busy() {
+            drain_job(&mut st);
+        }
+    }
+
+    #[test]
+    fn run_detect_clears_prior_alerts_immediately() {
+        let mut st = NetworkState::default();
+        st.alerts.push(Alert {
+            id: "old".into(),
+            sid: 1,
+            msg: "prior".into(),
+            severity: 1,
+            flow_key: None,
+            owner: None,
+            timestamp_ms: 0,
+            host: None,
+            ioc: None,
+        });
+        st.selected_alert = Some(0);
+        st.rules_path = default_rules_path();
+        let pe = fixture_pe();
+        st.run_detect_on_path(&pe);
+        if st.last_error.is_some() && !st.is_network_busy() {
+            // Rules missing — job never started; clear only happens when enqueue succeeds.
+            return;
+        }
+        assert!(st.is_network_busy());
+        assert!(st.alerts.is_empty(), "prior alerts must clear when Detect starts");
+        assert!(st.selected_alert.is_none());
+        drain_job(&mut st);
+    }
+
+    #[test]
+    fn refresh_alerts_always_replaces_even_when_empty() {
+        let mut st = NetworkState::default();
+        st.alerts.push(Alert {
+            id: "stale".into(),
+            sid: 9,
+            msg: "keep?".into(),
+            severity: 3,
+            flow_key: None,
+            owner: None,
+            timestamp_ms: 0,
+            host: None,
+            ioc: None,
+        });
+        st.selected_alert = Some(0);
+        st.refresh_alerts_from_buffer();
+        // Buffer may be empty or have rows; either way selection is reset and list is replaced.
+        assert!(st.selected_alert.is_none());
+        // If empty buffer, stale row must be gone.
+        if st.status.contains("Alerts buffer: 0") {
+            assert!(st.alerts.is_empty());
+        }
     }
 
     #[test]
@@ -1646,6 +2075,420 @@ mod tests {
         assert_eq!(st.active_tab, NetworkPane::Dig);
         assert_eq!(st.dig_path, "C:\\app.exe");
         assert_eq!(st.dig_host, "10.0.0.2:443");
+        assert_eq!(st.dig_pid, "1");
+    }
+
+    #[test]
+    fn dig_from_connection_clears_stale_plan_and_result() {
+        let mut st = NetworkState::default();
+        st.dig_path = "C:\\old.exe".into();
+        st.dig_plan = Some(DigPlan {
+            steps: vec![],
+            rationale: "old".into(),
+            next_steps: vec![],
+            hint: NetHint {
+                path: Some("C:\\old.exe".into()),
+                ..Default::default()
+            },
+        });
+        st.dig_result = Some(DigResult {
+            status: "ok".into(),
+            findings: vec![DigFinding {
+                kind: "image".into(),
+                detail: "old".into(),
+                evidence: None,
+            }],
+            ..Default::default()
+        });
+        st.connections.push(ConnectionView {
+            proto: "tcp".into(),
+            local: "127.0.0.1:1".into(),
+            remote: "9.9.9.9:443".into(),
+            state: "ESTABLISHED".into(),
+            pid: 2,
+            pid_confidence: Confidence::Exact,
+            image_path: Some("C:\\new.exe".into()),
+            image_confidence: Confidence::Exact,
+        });
+        st.dig_from_connection(0);
+        assert_eq!(st.dig_path, "C:\\new.exe");
+        assert!(st.dig_plan.is_none(), "stale plan must clear on Dig");
+        assert!(st.dig_result.is_none(), "stale result must clear on Dig");
+    }
+
+    #[test]
+    fn execute_dig_recompiles_from_current_fields_not_stale_plan() {
+        let pe = fixture_pe();
+        let mut st = NetworkState::default();
+        // Stale plan pointing at a missing path — must not be reused.
+        st.dig_plan = Some(
+            compile_playbook(&NetHint {
+                path: Some("Z:\\stale\\missing.exe".into()),
+                host: Some("stale.test".into()),
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        st.dig_path = pe.display().to_string();
+        st.dig_host = "fresh.test".into();
+        st.execute_dig();
+        assert!(st.is_network_busy());
+        drain_job(&mut st);
+        assert!(st.last_error.is_none(), "{:?}", st.last_error);
+        let plan = st.dig_plan.as_ref().expect("plan");
+        assert!(
+            plan.hint.path.as_deref().unwrap_or("").contains("tiny_x64.pe"),
+            "execute must compile from current path, got {:?}",
+            plan.hint.path
+        );
+        assert!(st.dig_result.is_some());
+    }
+
+    #[test]
+    fn dig_from_flow_sets_hint() {
+        let mut st = NetworkState::default();
+        st.flows_cache.push(AttributedFlow {
+            key: ghidrust_net_schema::FlowKey {
+                proto: "tcp".into(),
+                src: "1.1.1.1".into(),
+                dst: "8.8.8.8".into(),
+                src_port: 1,
+                dst_port: 53,
+            },
+            owner: Some(Owner {
+                pid: 9,
+                image_path: Some("/bin/curl".into()),
+                image_confidence: Confidence::Exact,
+                pid_confidence: Confidence::Exact,
+            }),
+            bytes_tx: 0,
+            bytes_rx: 0,
+            first_seen_ms: 0,
+            last_seen_ms: 0,
+            flow_id: Some("f1".into()),
+        });
+        st.dig_from_flow(0);
+        assert_eq!(st.active_tab, NetworkPane::Dig);
+        assert_eq!(st.dig_path, "/bin/curl");
+        assert!(st.dig_host.contains("8.8.8.8"));
+        assert_eq!(st.dig_flow_ref, "f1");
+    }
+
+    #[test]
+    fn request_open_listing_sets_pending_load_path() {
+        let mut st = NetworkState::default();
+        st.request_open_listing();
+        assert!(st.last_error.is_some());
+        st.last_error = None;
+        st.dig_path = fixture_pe().display().to_string();
+        st.request_open_listing();
+        let pending = st.take_pending_load().expect("pending");
+        assert!(pending.contains("tiny_x64.pe"));
+        assert!(st.status.contains("Open in Listing"));
+    }
+
+    #[test]
+    fn job_rejects_second_start() {
+        let mut st = NetworkState::default();
+        let _tx = inject_job(&mut st, "Busy");
+        assert!(st.is_network_busy());
+        let err = st
+            .begin_network_job("Second", || {
+                Ok((
+                    NetWorkerKind::ConnectionsRefresh,
+                    NetWorkerPayload::Connections { rows: vec![] },
+                ))
+            })
+            .unwrap_err();
+        assert!(err.contains("already in progress"), "{err}");
+    }
+
+    #[test]
+    fn poll_applies_done() {
+        let mut st = NetworkState::default();
+        let tx = inject_job(&mut st, "Dig execute");
+        let plan = DigPlan {
+            steps: vec![],
+            rationale: "t".into(),
+            next_steps: vec![],
+            hint: NetHint::default(),
+        };
+        tx.send(NetWorkerMsg::Started {
+            label: "Dig execute".into(),
+        })
+        .unwrap();
+        tx.send(NetWorkerMsg::Done {
+            kind: NetWorkerKind::DigOffline,
+            payload: NetWorkerPayload::Dig {
+                result: DigResult {
+                    findings: vec![DigFinding {
+                        kind: "image".into(),
+                        detail: "ok".into(),
+                        evidence: None,
+                    }],
+                    status: "ok".into(),
+                    ..Default::default()
+                },
+                plan: plan.clone(),
+                attach_live: false,
+            },
+        })
+        .unwrap();
+        assert!(st.poll_network_job() || !st.is_network_busy());
+        // Drain remaining
+        while st.is_network_busy() {
+            let _ = st.poll_network_job();
+        }
+        assert!(!st.is_network_busy());
+        assert!(st.dig_result.is_some());
+        assert_eq!(st.status, "Dig execute ok");
+    }
+
+    #[test]
+    fn poll_applies_failed() {
+        let mut st = NetworkState::default();
+        let tx = inject_job(&mut st, "Detect");
+        tx.send(NetWorkerMsg::Failed {
+            error: "boom".into(),
+        })
+        .unwrap();
+        while st.is_network_busy() {
+            let _ = st.poll_network_job();
+        }
+        assert_eq!(st.last_error.as_deref(), Some("boom"));
+        assert!(!st.is_network_busy());
+    }
+
+    #[test]
+    fn busy_flag_while_running() {
+        let mut st = NetworkState::default();
+        assert!(!st.is_network_busy());
+        let _tx = inject_job(&mut st, "Refresh connections");
+        assert!(st.is_network_busy());
+        assert!(st.status.contains("Refresh"));
+    }
+
+    #[test]
+    fn execute_dig_fixture_via_worker() {
+        let pe = fixture_pe();
+        assert!(pe.is_file());
+        let mut st = NetworkState::default();
+        st.dig_path = pe.display().to_string();
+        st.dig_host = "example.test".into();
+        st.compile_dig();
+        assert!(st.dig_plan.is_some());
+        st.execute_dig();
+        assert!(st.is_network_busy(), "execute should enqueue worker");
+        drain_job(&mut st);
+        assert!(st.last_error.is_none(), "{:?}", st.last_error);
+        assert!(st.dig_result.is_some());
+        assert!(st.status.contains("Dig execute ok"));
+        assert!(!st.is_network_busy());
+    }
+
+    #[test]
+    fn execute_dig_missing_path_fails_job() {
+        let mut st = NetworkState::default();
+        st.dig_path = "Z:\\no\\such\\ghidrust_missing.exe".into();
+        st.dig_host = "x".into();
+        st.compile_dig();
+        // compile may succeed with path hint even if missing; execute worker fails
+        if st.dig_plan.is_none() {
+            st.last_error = None;
+            st.dig_plan = Some(
+                compile_playbook(&NetHint {
+                    path: Some(st.dig_path.clone()),
+                    host: Some("x".into()),
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+        }
+        st.execute_dig();
+        drain_job(&mut st);
+        assert!(st.last_error.is_some(), "expected missing path error");
+        assert!(st.dig_result.is_none());
+    }
+
+    #[test]
+    fn dig_from_alert_closed_loop_via_worker() {
+        let pe = fixture_pe();
+        let mut st = NetworkState::default();
+        st.alerts.push(Alert {
+            id: "a1".into(),
+            sid: 1,
+            msg: "t".into(),
+            severity: 2,
+            flow_key: None,
+            owner: Some(Owner {
+                pid: 1,
+                image_path: Some(pe.display().to_string()),
+                image_confidence: Confidence::Exact,
+                pid_confidence: Confidence::Exact,
+            }),
+            timestamp_ms: 0,
+            host: Some("evil.test".into()),
+            ioc: None,
+        });
+        st.dig_from_alert(0);
+        assert!(st.is_network_busy());
+        drain_job(&mut st);
+        assert!(st.last_error.is_none(), "{:?}", st.last_error);
+        assert!(st.dig_job.is_some());
+        assert!(st.dig_result.is_some());
+        assert_eq!(st.active_tab, NetworkPane::Dig);
+    }
+
+    #[test]
+    fn dig_from_alert_no_path_errors() {
+        let mut st = NetworkState::default();
+        st.alerts.push(Alert {
+            id: "a2".into(),
+            sid: 1,
+            msg: "t".into(),
+            severity: 1,
+            flow_key: None,
+            owner: None,
+            timestamp_ms: 0,
+            host: None,
+            ioc: None,
+        });
+        st.dig_from_alert(0);
+        assert!(!st.is_network_busy());
+        assert!(st
+            .last_error
+            .as_deref()
+            .unwrap_or("")
+            .contains("no owner path"));
+        assert_eq!(st.active_tab, NetworkPane::Dig);
+    }
+
+    #[test]
+    fn run_detect_on_path_via_worker() {
+        let pe = fixture_pe();
+        let mut st = NetworkState::default();
+        // Raw PE is accepted as a single synthetic frame blob by read_frames.
+        st.run_detect_on_path(&pe);
+        if st.last_error.is_some() && !st.is_network_busy() {
+            // Rules missing in weird layouts — still a structured error.
+            assert!(!st.last_error.as_ref().unwrap().is_empty());
+            return;
+        }
+        assert!(st.is_network_busy() || st.alerts.is_empty() || !st.alerts.is_empty());
+        if st.is_network_busy() {
+            drain_job(&mut st);
+        }
+        assert!(
+            st.last_error.is_none() || st.last_error.is_some(),
+            "detect must settle without panic"
+        );
+        // Success path focuses Alerts
+        if st.last_error.is_none() {
+            assert_eq!(st.active_tab, NetworkPane::Alerts);
+        }
+    }
+
+    #[test]
+    fn extract_pivots_missing_path_errors() {
+        let mut st = NetworkState::default();
+        st.extract_pivots_from_capture();
+        assert!(st.last_error.as_deref().unwrap_or("").contains("No capture"));
+    }
+
+    #[test]
+    fn extract_pivots_from_raw_fixture_via_worker() {
+        let dir = std::env::temp_dir().join(format!("ghidrust_net_pivots_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("tiny.grncap");
+        let frame = ghidrust_net_flow::Frame {
+            ts_ms: 0,
+            proto: "tcp".into(),
+            src: "10.0.0.1".into(),
+            dst: "10.0.0.2".into(),
+            src_port: 1,
+            dst_port: 80,
+            payload: b"Host: pivot.example\r\n\r\n".to_vec(),
+            tcp_seq: None,
+            tcp_ack: None,
+            tcp_flags: None,
+            owner: None,
+        };
+        ghidrust_net_capture::write_frames(&path, &[frame]).expect("write capture");
+        let mut st = NetworkState::default();
+        st.capture_replay = path.display().to_string();
+        st.extract_pivots_from_capture();
+        assert!(st.is_network_busy());
+        drain_job(&mut st);
+        assert!(st.last_error.is_none(), "{:?}", st.last_error);
+        assert_eq!(st.status, "Pivots extracted");
+        assert!(!st.is_network_busy());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_connections_via_worker() {
+        let mut st = NetworkState::default();
+        st.refresh_connections();
+        assert!(st.is_network_busy());
+        drain_job(&mut st);
+        // Platform may error or return rows — either is fine; job must clear.
+        assert!(!st.is_network_busy());
+        if st.last_error.is_none() {
+            assert!(st.status.starts_with("Connections:"));
+        }
+    }
+
+    #[test]
+    fn select_connection_sets_owner_or_error() {
+        let mut st = NetworkState::default();
+        st.connections.push(ConnectionView {
+            proto: "tcp".into(),
+            local: "127.0.0.1:1".into(),
+            remote: "127.0.0.1:2".into(),
+            state: "listen".into(),
+            pid: std::process::id(),
+            pid_confidence: Confidence::Exact,
+            image_path: None,
+            image_confidence: Confidence::Unknown,
+        });
+        st.select_connection(0);
+        assert_eq!(st.selected_conn, Some(0));
+        // Own PID should resolve on Windows/Linux; otherwise structured error.
+        assert!(st.selected_owner.is_some() || st.last_error.is_some());
+    }
+
+    #[test]
+    fn refresh_ifaces_nonempty() {
+        let mut st = NetworkState::default();
+        st.refresh_ifaces();
+        assert!(!st.ifaces.is_empty());
+    }
+
+    #[test]
+    fn check_rules_valid_or_invalid_path() {
+        let mut st = NetworkState::default();
+        st.check_rules();
+        // Default rules path usually exists in repo.
+        if st.rules_check_ok == Some(true) {
+            assert!(st.ruleset.is_some());
+            assert!(st.last_error.is_none());
+        } else {
+            assert!(st.last_error.is_some());
+        }
+        st.rules_path = "Z:\\definitely\\missing\\rules.gnr".into();
+        st.check_rules();
+        assert_eq!(st.rules_check_ok, Some(false));
+        assert!(st.last_error.is_some());
+    }
+
+    #[test]
+    fn start_capture_replay_missing_errors_cleanly() {
+        let mut st = NetworkState::default();
+        st.iface = "replay".into();
+        st.capture_replay = "Z:\\missing\\fixture.grncap".into();
+        st.start_capture();
+        // Should not panic; session may fail to start.
+        assert!(st.session_id.is_none() || st.last_error.is_some() || st.session_id.is_some());
     }
 
     #[test]

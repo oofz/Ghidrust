@@ -1441,6 +1441,7 @@ dependencies = [
  "ghidrust-net-capture",
  "ghidrust-net-correlate",
  "ghidrust-net-detect",
+ "ghidrust-net-flow",
  "ghidrust-net-parse",
  "ghidrust-net-rules",
  "ghidrust-net-schema",

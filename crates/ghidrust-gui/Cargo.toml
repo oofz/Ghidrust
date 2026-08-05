@@ -27,6 +27,7 @@ ghidrust-agent = { workspace = true }
 ghidrust-net-schema = { workspace = true }
 ghidrust-net-attr = { workspace = true }
 ghidrust-net-capture = { workspace = true }
+ghidrust-net-flow = { workspace = true }
 ghidrust-net-detect = { workspace = true }
 ghidrust-net-rules = { workspace = true }
 ghidrust-net-parse = { workspace = true }
