@@ -86,6 +86,20 @@ class MemoryGuardFailureTests(unittest.TestCase):
         self.assertGreater(committed, 0)
         self.assertGreaterEqual(limit, committed)
 
+    def test_timeout_kills_supervised_process_group(self) -> None:
+        args = run_args([sys.executable, "-c", "import time; time.sleep(10)"])
+        args.timeout = 0.1
+        self.assertEqual(guard.run(args), 0xE002)
+
+    def test_system_commit_preflight_refuses_to_start_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            marker = pathlib.Path(temp, "must-not-start")
+            code = f"open({str(marker)!r}, 'w', encoding='utf-8').write('bad')"
+            args = run_args([sys.executable, "-c", code])
+            args.system_commit_fraction = 0.01
+            self.assertEqual(guard.run(args), 0xE001)
+            self.assertFalse(marker.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
