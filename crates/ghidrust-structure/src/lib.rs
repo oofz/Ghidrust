@@ -392,6 +392,32 @@ pub fn structure_function_with_hints(
     };
     let mut visited: HashSet<u32> = HashSet::new();
     let raw = ctx.build_region_from(ENTRY_BLOCK, None, &mut visited, 0);
+    // The depth fallback intentionally leaves an edge as `Goto`. Keep a
+    // concrete region for every otherwise-unemitted block reachable from
+    // entry, so the emitter can provide a body and label for each target.
+    let mut reachable = BTreeSet::new();
+    let mut pending = VecDeque::from([ENTRY_BLOCK]);
+    while let Some(block) = pending.pop_front() {
+        if !reachable.insert(block) {
+            continue;
+        }
+        if let Some(cfg_block) = cfg.blocks.get(block as usize) {
+            pending.extend(cfg_block.successors.iter().copied());
+        }
+    }
+    let mut fallback_blocks = Vec::new();
+    for block in reachable {
+        if visited.insert(block) {
+            fallback_blocks.push(Region::Block(block));
+        }
+    }
+    let raw = if fallback_blocks.is_empty() {
+        raw
+    } else {
+        let mut regions = vec![raw];
+        regions.extend(fallback_blocks);
+        Region::Seq(regions)
+    };
     let flattened = flatten_short_circuit(raw, ssa);
     // R3: `if (cond) goto return_block` → `if (cond) return` when the
     // target leaf is a Return region (early-exit polish).
@@ -1644,6 +1670,71 @@ mod tests {
     use ghidrust_lift::lift_instructions;
     use ghidrust_ssa::{build_cfg, build_ssa};
 
+    fn collect_concrete_blocks(region: &Region, out: &mut BTreeSet<u32>) {
+        match region {
+            Region::Block(b) | Region::Return(b) => {
+                out.insert(*b);
+            }
+            Region::Goto(_) | Region::Break | Region::Continue => {}
+            Region::Seq(children) => children
+                .iter()
+                .for_each(|r| collect_concrete_blocks(r, out)),
+            Region::IfThen {
+                header,
+                then_branch,
+            } => {
+                out.insert(*header);
+                collect_concrete_blocks(then_branch, out);
+            }
+            Region::IfThenElse {
+                header,
+                then_branch,
+                else_branch,
+            } => {
+                out.insert(*header);
+                collect_concrete_blocks(then_branch, out);
+                collect_concrete_blocks(else_branch, out);
+            }
+            Region::While { header, body } | Region::Loop { header, body } => {
+                out.insert(*header);
+                collect_concrete_blocks(body, out);
+            }
+            Region::DoWhile {
+                header,
+                body,
+                latch,
+            } => {
+                out.insert(*header);
+                out.insert(*latch);
+                collect_concrete_blocks(body, out);
+            }
+            Region::Switch {
+                header,
+                cases,
+                default,
+            } => {
+                out.insert(*header);
+                for case in cases {
+                    collect_concrete_blocks(&case.body, out);
+                }
+                if let Some(default) = default {
+                    collect_concrete_blocks(default, out);
+                }
+            }
+            Region::ShortCircuit {
+                parts,
+                then_branch,
+                else_branch,
+            } => {
+                out.extend(parts.iter().map(|part| part.header));
+                collect_concrete_blocks(then_branch, out);
+                if let Some(else_branch) = else_branch {
+                    collect_concrete_blocks(else_branch, out);
+                }
+            }
+        }
+    }
+
     fn structure_bytes(bytes: &[u8], base: u64) -> StructureReport {
         let insns = decode_bytes(bytes, base, 64).unwrap();
         let last = insns.last().unwrap();
@@ -2090,8 +2181,15 @@ mod tests {
                 let text = dump_region(&rep.region);
                 // Must have gotos from the depth limit:
                 assert!(text.contains("goto"), "expected goto fallbacks in deep CFG");
-                // Must not lose blocks:
-                assert!(rep.region.block_count() > 0);
+                // Every entry-reachable CFG block has a concrete emitted body
+                // or structured header; a Goto reference alone is insufficient.
+                let mut concrete = BTreeSet::new();
+                collect_concrete_blocks(&rep.region, &mut concrete);
+                assert_eq!(
+                    concrete.len(),
+                    cfg.blocks.len(),
+                    "missing reachable block bodies"
+                );
             })
             .expect("spawn")
             .join();

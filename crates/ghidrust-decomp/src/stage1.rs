@@ -25,6 +25,7 @@ use ghidrust_structure::{
     StructureHints, StructureReport, SwitchCase,
 };
 use ghidrust_types::{recover_with_name, CallConv, ParamList, RustType, StackLocal, TypeRecovery};
+use std::collections::HashSet;
 
 /// Everything Stage-1 produces alongside the C text: SSA, structure, types
 /// so callers (bench, GUI, MCP) can display the intermediate views without
@@ -251,6 +252,7 @@ fn render_function(
         fold,
         emit_hints,
         sink: &mut sink,
+        rendered_blocks: HashSet::new(),
     };
     render_region_iter(&structure.region, 1, &mut ctx, &mut out);
 
@@ -265,6 +267,7 @@ struct RenderCtx<'a> {
     fold: &'a FoldPlan,
     emit_hints: &'a EmitHints,
     sink: &'a mut TokenSink,
+    rendered_blocks: HashSet<u32>,
 }
 
 fn indent(n: usize) -> String {
@@ -496,6 +499,12 @@ fn render_block_body(
     let Some(block) = ctx.ssa.block(b) else {
         return;
     };
+    if ctx.rendered_blocks.insert(b) {
+        out.push_str(&format!("{}block_{b}:\n", indent(ind)));
+        if let Some(start) = block.start {
+            out.push_str(&format!("{}L_{start:x}:\n", indent(ind)));
+        }
+    }
     // Phi nodes are emitted only when they carry a real def (version > 0).
     // Trivial live-in passthroughs get elided so Stage-1 doesn't clutter
     // every join with a phi header comment.
@@ -1388,6 +1397,7 @@ mod tests {
             fold: &FoldPlan::default(),
             emit_hints: &EmitHints::default(),
             sink: &mut sink,
+            rendered_blocks: HashSet::new(),
         };
         let mut output = String::new();
         render_region_iter(&region, 1, &mut ctx, &mut output);
@@ -1396,5 +1406,33 @@ mod tests {
         assert_eq!(output.matches("}\n").count(), 300);
         assert!(output.contains("goto block_57005;"));
         assert!(!output.contains("render depth limit"));
+    }
+
+    #[test]
+    fn goto_destinations_have_valid_block_and_address_labels() {
+        let ssa = SsaFunction {
+            entry: 0,
+            blocks: vec![SsaBlock {
+                id: 0,
+                start: Some(0x1234),
+                ..SsaBlock::default()
+            }],
+            versions: Default::default(),
+        };
+        let mut sink = crate::emit_tokens::TokenSink::default();
+        let mut ctx = RenderCtx {
+            ssa: &ssa,
+            types: &TypeRecovery::default(),
+            fold: &FoldPlan::default(),
+            emit_hints: &EmitHints::default(),
+            sink: &mut sink,
+            rendered_blocks: HashSet::new(),
+        };
+        let region = Region::Seq(vec![Region::Goto(0), Region::Block(0)]);
+        let mut output = String::new();
+        render_region_iter(&region, 1, &mut ctx, &mut output);
+        assert!(output.contains("goto block_0;"));
+        assert!(output.contains("block_0:"));
+        assert!(output.contains("L_1234:"));
     }
 }

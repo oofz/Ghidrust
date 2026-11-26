@@ -17,6 +17,7 @@ if os.name != "nt":
     raise SystemExit("memory_guard.py requires Windows")
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+psapi = ctypes.WinDLL("psapi", use_last_error=True)
 
 CREATE_SUSPENDED = 0x00000004
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
@@ -63,6 +64,25 @@ class MEMORYSTATUSEX(ctypes.Structure):
         ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
         ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
         ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+class PERFORMANCE_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("cb", wintypes.DWORD),
+        ("CommitTotal", ctypes.c_size_t),
+        ("CommitLimit", ctypes.c_size_t),
+        ("CommitPeak", ctypes.c_size_t),
+        ("PhysicalTotal", ctypes.c_size_t),
+        ("PhysicalAvailable", ctypes.c_size_t),
+        ("SystemCache", ctypes.c_size_t),
+        ("KernelTotal", ctypes.c_size_t),
+        ("KernelPaged", ctypes.c_size_t),
+        ("KernelNonpaged", ctypes.c_size_t),
+        ("PageSize", ctypes.c_size_t),
+        ("HandleCount", wintypes.DWORD),
+        ("ProcessCount", wintypes.DWORD),
+        ("ThreadCount", wintypes.DWORD),
     ]
 
 
@@ -114,6 +134,8 @@ kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.CloseHandle.restype = wintypes.BOOL
 kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.c_void_p]
 kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+psapi.GetPerformanceInfo.argtypes = [ctypes.POINTER(PERFORMANCE_INFORMATION), wintypes.DWORD]
+psapi.GetPerformanceInfo.restype = wintypes.BOOL
 
 
 def wincheck(ok: int, operation: str) -> None:
@@ -122,12 +144,11 @@ def wincheck(ok: int, operation: str) -> None:
 
 
 def system_commit() -> tuple[int, int]:
-    status = MEMORYSTATUSEX()
-    status.dwLength = ctypes.sizeof(status)
-    wincheck(kernel32.GlobalMemoryStatusEx(ctypes.byref(status)), "GlobalMemoryStatusEx")
-    total = int(status.ullTotalPageFile)
-    available = int(status.ullAvailPageFile)
-    return total - available, total
+    info = PERFORMANCE_INFORMATION()
+    info.cb = ctypes.sizeof(info)
+    wincheck(psapi.GetPerformanceInfo(ctypes.byref(info), info.cb), "GetPerformanceInfo")
+    page_size = int(info.PageSize)
+    return int(info.CommitTotal) * page_size, int(info.CommitLimit) * page_size
 
 
 def job_peak(job: wintypes.HANDLE) -> int:
@@ -169,6 +190,7 @@ def run(args: argparse.Namespace) -> int:
     wincheck(bool(job), "CreateJobObjectW")
     process_info = PROCESS_INFORMATION()
     proc_created = False
+    assigned = False
     started = time.monotonic()
     peak_system_commit = 0
     system_commit_limit = total_commit
@@ -195,6 +217,7 @@ def run(args: argparse.Namespace) -> int:
         # The primary thread is still suspended: children cannot escape assignment.
         wincheck(kernel32.AssignProcessToJobObject(job, process_info.hProcess),
                  "AssignProcessToJobObject")
+        assigned = True
         resume_result = kernel32.ResumeThread(process_info.hThread)
         wincheck(resume_result != 0xFFFFFFFF, "ResumeThread")
 
@@ -228,33 +251,46 @@ def run(args: argparse.Namespace) -> int:
             kernel32.TerminateJobObject(job, 0xE003)
         raise
     finally:
-        peak = 0
-        if job:
+        try:
+            # If assignment failed, the suspended process is outside the Job;
+            # terminate it explicitly before releasing its handles.
+            if proc_created and not assigned:
+                kernel32.TerminateProcess(process_info.hProcess, 0xE004)
+                kernel32.WaitForSingleObject(process_info.hProcess, 5000)
+            peak = 0
+            if job:
+                try:
+                    peak = job_peak(job)
+                except OSError:
+                    pass
+            record = {
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "reason": reason,
+                "exit_code": rc,
+                "job_peak_committed_bytes": peak,
+                "job_limit_bytes": limit,
+                "requested_budget_bytes": requested_limit,
+                "peak_system_commit_bytes": peak_system_commit,
+                "system_commit_limit_bytes": system_commit_limit,
+                "timeout_seconds": args.timeout,
+            }
+            line = json.dumps(record, sort_keys=True)
             try:
-                peak = job_peak(job)
-            except OSError:
-                pass
-        record = {
-            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "reason": reason,
-            "exit_code": rc,
-            "job_peak_committed_bytes": peak,
-            "job_limit_bytes": limit,
-            "requested_budget_bytes": requested_limit,
-            "peak_system_commit_bytes": peak_system_commit,
-            "system_commit_limit_bytes": system_commit_limit,
-            "timeout_seconds": args.timeout,
-        }
-        line = json.dumps(record, sort_keys=True)
-        print(line, flush=True)
-        if args.log:
-            with open(args.log, "a", encoding="utf-8") as log:
-                log.write(line + "\n")
-        if proc_created:
-            kernel32.CloseHandle(process_info.hThread)
-            kernel32.CloseHandle(process_info.hProcess)
-        # KILL_ON_JOB_CLOSE is the final cleanup guarantee.
-        kernel32.CloseHandle(job)
+                print(line, flush=True)
+                if args.log:
+                    with open(args.log, "a", encoding="utf-8") as log:
+                        log.write(line + "\n")
+            except Exception as log_error:
+                print(f"memory_guard: failed to write run log: {log_error}", file=sys.stderr)
+        finally:
+            try:
+                if proc_created:
+                    kernel32.CloseHandle(process_info.hThread)
+                    kernel32.CloseHandle(process_info.hProcess)
+            finally:
+                # KILL_ON_JOB_CLOSE is the final cleanup guarantee.
+                if job:
+                    kernel32.CloseHandle(job)
     return rc
 
 
