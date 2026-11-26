@@ -8,6 +8,7 @@ description = "CFG + dominators + SSA scaffolding over ghidrust-ir (Ghidra Decom
 [dependencies]
 ghidrust-ir = { workspace = true }
 serde = { version = "1", features = ["derive"] }
+stacker = "0.1"
 
 [dev-dependencies]
 ghidrust-decode = { workspace = true }

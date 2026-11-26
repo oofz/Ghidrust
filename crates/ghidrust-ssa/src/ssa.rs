@@ -225,6 +225,20 @@ fn rename_block(
     versions: &mut BTreeMap<(AddrSpace, u64), u32>,
     stacks: &mut HashMap<(AddrSpace, u64), Vec<u32>>,
 ) {
+    // Guard against deep dominator trees overflowing the stack.
+    stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+        rename_block_inner(b, cfg, ssa_blocks, dom_children, versions, stacks)
+    })
+}
+
+fn rename_block_inner(
+    b: u32,
+    cfg: &Cfg,
+    ssa_blocks: &mut [SsaBlock],
+    dom_children: &[Vec<u32>],
+    versions: &mut BTreeMap<(AddrSpace, u64), u32>,
+    stacks: &mut HashMap<(AddrSpace, u64), Vec<u32>>,
+) {
     // Track keys we push so we can pop them at the end (Cytron style).
     let mut pushed: Vec<(AddrSpace, u64)> = Vec::new();
 

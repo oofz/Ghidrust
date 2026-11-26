@@ -137,10 +137,12 @@ pub fn fold_expr_for(
     format_leaf: &dyn Fn(&SsaOperand) -> String,
     format_value: &dyn Fn(SsaValue) -> String,
 ) -> Option<String> {
-    let site = plan.def_of.get(&val)?;
-    let block = ssa.block(site.block)?;
-    let op = block.ops.get(site.op_idx)?;
-    Some(expr_from_op(op, ssa, plan, format_leaf, format_value))
+    stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+        let site = plan.def_of.get(&val)?;
+        let block = ssa.block(site.block)?;
+        let op = block.ops.get(site.op_idx)?;
+        Some(expr_from_op(op, ssa, plan, format_leaf, format_value))
+    })
 }
 
 fn expr_from_op(

@@ -188,6 +188,16 @@ pub fn bench_program_stage1_parallel(
     conv: CallConv,
 ) -> BenchReport {
     use rayon::prelude::*;
+    // Build a custom thread pool with a generous stack size so that
+    // deeply-nested CFG structuring (which uses `stacker::maybe_grow`
+    // as a secondary safety net) starts with enough headroom. The
+    // default rayon pool inherits the platform default (~2 MB on
+    // Windows spawned threads) which is insufficient for large binaries.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .stack_size(64 * 1024 * 1024) // 64 MiB per worker thread
+        .build()
+        .expect("failed to build rayon thread pool");
+
     let mut targets: Vec<(String, u64)> = if let Some(es) = entries {
         es.iter()
             .map(|&e| {
@@ -223,10 +233,12 @@ pub fn bench_program_stage1_parallel(
             Some((name, entry, insns))
         })
         .collect();
-    let per_function: Vec<FunctionBench> = prepared
-        .par_iter()
-        .map(|(name, entry, insns)| bench_one_stage1(name, *entry, insns, conv))
-        .collect();
+    let per_function: Vec<FunctionBench> = pool.install(|| {
+        prepared
+            .par_iter()
+            .map(|(name, entry, insns)| bench_one_stage1(name, *entry, insns, conv))
+            .collect()
+    });
     finalize(prog.name.clone(), per_function)
 }
 

@@ -273,7 +273,14 @@ fn indent(n: usize) -> String {
     "    ".repeat(n)
 }
 
+/// Stack-safe recursive rendering of a [`Region`] tree.
 fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) {
+    stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+        render_region_inner(r, ind, ctx, out)
+    })
+}
+
+fn render_region_inner(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) {
     match r {
         Region::Block(b) => render_block_body(*b, ind, ctx, out, /*skip_terminator=*/ false),
         Region::Return(b) => {
@@ -1041,7 +1048,8 @@ mod tests {
         // hand-building the instruction sequence, then wrap in a Stage-0
         // decomp. We call emit_stage1 through the front door.
         use ghidrust_decode::Instruction;
-        let mnem = |m: &str, o: &str, l: u8| Instruction::with_text(0, vec![0; l as usize], m, o, l);
+        let mnem =
+            |m: &str, o: &str, l: u8| Instruction::with_text(0, vec![0; l as usize], m, o, l);
         // jmp 0x2; test eax,eax; je 0x8; jmp 0x2; ret
         let mut insns = vec![
             mnem("jmp", "0x2", 2),
