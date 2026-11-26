@@ -53,13 +53,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 /// Beyond this limit, remaining blocks are emitted as `Goto` nodes
 /// to prevent stack overflow on functions with deeply nested CFGs
 /// (e.g. compiler-generated state machines, switch cascades).
-const MAX_STRUCTURE_DEPTH: usize = 512;
+const MAX_STRUCTURE_DEPTH: usize = 256;
 
-/// Red-zone size in bytes for `stacker::maybe_grow`. When the
-/// remaining stack drops below this, the closure runs on a fresh
-/// stack segment of `STACK_GROW_SIZE` bytes.
-const STACK_RED_ZONE: usize = 128 * 1024; // 128 KiB
-const STACK_GROW_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
+// stacker removed: all recursive walks are bounded by MAX_STRUCTURE_DEPTH
+// (the Region tree cannot exceed that depth).
 
 /// Optional analysis hints supplied by the caller: switch-table data (from
 /// `Decompiler Switch Analysis`) and any other future joins between the
@@ -199,10 +196,6 @@ pub enum ShortCircuitKind {
 impl Region {
     /// Structural leaf count — helpful for tests and diagnostics.
     pub fn block_count(&self) -> usize {
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.block_count_inner())
-    }
-
-    fn block_count_inner(&self) -> usize {
         match self {
             Region::Block(_) | Region::Return(_) | Region::Goto(_) => 1,
             Region::Break | Region::Continue => 1,
@@ -233,10 +226,6 @@ impl Region {
 
     /// Depth of nested control-flow constructs.
     pub fn depth(&self) -> usize {
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || self.depth_inner())
-    }
-
-    fn depth_inner(&self) -> usize {
         match self {
             Region::Block(_) | Region::Return(_) | Region::Goto(_) => 0,
             Region::Break | Region::Continue => 0,
@@ -279,12 +268,6 @@ impl Region {
     }
 
     fn collect_blocks(&self, set: &mut BTreeSet<u32>) {
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-            self.collect_blocks_inner(set)
-        })
-    }
-
-    fn collect_blocks_inner(&self, set: &mut BTreeSet<u32>) {
         match self {
             Region::Block(b) | Region::Return(b) | Region::Goto(b) => {
                 set.insert(*b);
@@ -424,12 +407,6 @@ pub fn structure_function_with_hints(
 /// block `t` is a return terminator. Reduces unstructured gotos on early-exit
 /// patterns common in real binaries.
 pub fn promote_early_returns(r: Region, ssa: &SsaFunction) -> Region {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        promote_early_returns_inner(r, ssa)
-    })
-}
-
-fn promote_early_returns_inner(r: Region, ssa: &SsaFunction) -> Region {
     match r {
         Region::Seq(rs) => Region::Seq(
             rs.into_iter()
@@ -669,11 +646,7 @@ impl<'a> StructCtx<'a> {
         visited: &mut HashSet<u32>,
         depth: usize,
     ) -> Region {
-        // Guard against stack overflow: use stacker to grow the stack
-        // on demand, and bail to Goto when nesting is excessively deep.
-        stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-            self.build_region_from_inner(start, stop_at, visited, depth)
-        })
+        self.build_region_from_inner(start, stop_at, visited, depth)
     }
 
     fn build_region_from_inner(
@@ -1217,12 +1190,6 @@ pub fn dump_region(r: &Region) -> String {
 }
 
 fn render(r: &Region, indent: usize, out: &mut String) {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        render_inner(r, indent, out)
-    })
-}
-
-fn render_inner(r: &Region, indent: usize, out: &mut String) {
     let pad = "  ".repeat(indent);
     match r {
         Region::Block(b) => out.push_str(&format!("{pad}block_{b};\n")),
@@ -1338,14 +1305,6 @@ fn render_inner(r: &Region, indent: usize, out: &mut String) {
 /// side effects other than the CBranch itself). Anything richer is
 /// preserved verbatim.
 pub fn flatten_short_circuit(r: Region, ssa: &SsaFunction) -> Region {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        flatten_short_circuit_inner(r, ssa)
-    })
-}
-
-fn flatten_short_circuit_inner(r: Region, ssa: &SsaFunction) -> Region {
-    // All recursive calls go through the public `flatten_short_circuit`
-    // which wraps with `stacker::maybe_grow`.
     match r {
         Region::Seq(rs) => Region::Seq(
             rs.into_iter()
@@ -1548,10 +1507,6 @@ pub fn loop_count(report: &StructureReport) -> usize {
 /// (they're structured escapes). Combined with [`region_leaf_count`] this
 /// yields the `goto_rate` metric.
 pub fn goto_count(region: &Region) -> usize {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || goto_count_inner(region))
-}
-
-fn goto_count_inner(region: &Region) -> usize {
     match region {
         Region::Goto(_) => 1,
         Region::Seq(rs) => rs.iter().map(goto_count).sum(),
@@ -1581,12 +1536,6 @@ fn goto_count_inner(region: &Region) -> usize {
 /// for the `goto_rate` metric. Every terminal region (Block, Return, Goto,
 /// Break, Continue) counts as one leaf.
 pub fn region_leaf_count(region: &Region) -> usize {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || {
-        region_leaf_count_inner(region)
-    })
-}
-
-fn region_leaf_count_inner(region: &Region) -> usize {
     match region {
         Region::Block(_)
         | Region::Return(_)
@@ -1646,10 +1595,6 @@ pub fn header_index(region: &Region) -> BTreeMap<u32, Region> {
 }
 
 fn walk(r: &Region, map: &mut BTreeMap<u32, Region>) {
-    stacker::maybe_grow(STACK_RED_ZONE, STACK_GROW_SIZE, || walk_inner(r, map))
-}
-
-fn walk_inner(r: &Region, map: &mut BTreeMap<u32, Region>) {
     match r {
         Region::IfThen { header, .. }
         | Region::IfThenElse { header, .. }
@@ -2011,39 +1956,147 @@ mod tests {
     /// instead of crashing.
     #[test]
     fn deep_if_chain_no_stack_overflow() {
-        // Build a synthetic CFG: a chain of N CBranch blocks, each with
-        // then → next_block and else → return_block. This creates a
-        // right-leaning if-chain of depth N.
-        let depth = MAX_STRUCTURE_DEPTH + 100; // exceed the limit
-        let ret_block = depth as u64 * 2; // return block address
+        // Run on a thread with an 8 MiB stack since debug-mode frames
+        // are large and the depth-limited recursion (256 levels + post-
+        // processing passes) can exceed the default 1 MiB test stack.
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                // Build a synthetic CFG: a chain of N CBranch blocks, each with
+                // then -> next_block and else -> return_block. This creates a
+                // right-leaning if-chain of depth N.
+                let depth = MAX_STRUCTURE_DEPTH + 100; // exceed the limit
+                let ret_block = depth as u64 * 2; // return block address
+                let mut seq = IrSequence::new();
+                for i in 0..depth {
+                    let addr = i as u64 * 2;
+                    let next = (i + 1) as u64 * 2;
+                    let target = if i + 1 < depth { next } else { ret_block };
+                    seq.push_addressed(
+                        addr,
+                        2,
+                        PcodeOp::new(
+                            OpCode::CBranch,
+                            None,
+                            vec![Varnode::unique(0, 1), Varnode::constant(target, 8)],
+                        ),
+                    );
+                }
+                seq.push_addressed(ret_block, 1, PcodeOp::new(OpCode::Return, None, vec![]));
+
+                let end = ret_block + 1;
+                let cfg = build_cfg(&seq, 0, end);
+                let ssa = build_ssa(&cfg);
+                // This should NOT overflow the stack.
+                let rep = structure_function(&cfg, &ssa);
+                // The region tree should contain some Goto fallbacks due to the
+                // depth limit, proving the limiter kicked in.
+                let text = dump_region(&rep.region);
+                assert!(
+                    text.contains("goto") || text.contains("return") || text.contains("if"),
+                    "deep chain should produce some output: {text}"
+                );
+            })
+            .expect("failed to spawn thread")
+            .join();
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    /// Deep dominator tree: verify SSA rename is iterative and doesn't
+    /// overflow on a chain of 10,000 blocks.
+    #[test]
+    fn deep_dominator_tree_ssa_rename() {
+        // Linear chain of 10000 blocks — each dominates the next.
+        let n = 10_000usize;
         let mut seq = IrSequence::new();
-        for i in 0..depth {
+        for i in 0..n {
             let addr = i as u64 * 2;
             let next = (i + 1) as u64 * 2;
-            let target = if i + 1 < depth { next } else { ret_block };
-            seq.push_addressed(
-                addr,
-                2,
-                PcodeOp::new(
-                    OpCode::CBranch,
-                    None,
-                    vec![Varnode::unique(0, 1), Varnode::constant(target, 8)],
-                ),
-            );
+            if i + 1 < n {
+                seq.push_addressed(
+                    addr,
+                    2,
+                    PcodeOp::new(OpCode::Branch, None, vec![Varnode::constant(next, 8)]),
+                );
+            } else {
+                seq.push_addressed(addr, 1, PcodeOp::new(OpCode::Return, None, vec![]));
+            }
         }
-        seq.push_addressed(ret_block, 1, PcodeOp::new(OpCode::Return, None, vec![]));
-
-        let end = ret_block + 1;
+        let end = n as u64 * 2;
         let cfg = build_cfg(&seq, 0, end);
+        // This would overflow with recursive rename_block; iterative is fine.
         let ssa = build_ssa(&cfg);
-        // This should NOT overflow the stack.
-        let rep = structure_function(&cfg, &ssa);
-        // The region tree should contain some Goto fallbacks due to the
-        // depth limit, proving the limiter kicked in.
-        let text = dump_region(&rep.region);
-        assert!(
-            text.contains("goto") || text.contains("return") || text.contains("if"),
-            "deep chain should produce some output: {text}"
-        );
+        assert_eq!(ssa.blocks.len(), n);
+    }
+
+    /// Region tree metric functions must handle deep trees without overflow.
+    #[test]
+    fn region_metrics_on_deep_tree() {
+        // Build a region tree of depth MAX_STRUCTURE_DEPTH by nesting IfThen.
+        let mut r = Region::Return(0);
+        for i in (1..=MAX_STRUCTURE_DEPTH).rev() {
+            r = Region::IfThen {
+                header: i as u32,
+                then_branch: Box::new(r),
+            };
+        }
+        // These calls would overflow without bounded depth.
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                assert_eq!(goto_count(&r), 0);
+                assert!(region_leaf_count(&r) > 0);
+                assert!(r.block_count() > 0);
+                assert!(r.depth() > 0);
+            })
+            .expect("spawn")
+            .join();
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
+    }
+
+    /// Deeply nested CFG should produce Goto fallbacks without panicking.
+    #[test]
+    fn deeply_nested_cfg_produces_gotos() {
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                // 500 nested if-blocks, well beyond MAX_STRUCTURE_DEPTH.
+                let depth = 500usize;
+                let ret_block = depth as u64 * 2;
+                let mut seq = IrSequence::new();
+                for i in 0..depth {
+                    let addr = i as u64 * 2;
+                    let next = (i + 1) as u64 * 2;
+                    let target = if i + 1 < depth { next } else { ret_block };
+                    seq.push_addressed(
+                        addr,
+                        2,
+                        PcodeOp::new(
+                            OpCode::CBranch,
+                            None,
+                            vec![Varnode::unique(0, 1), Varnode::constant(target, 8)],
+                        ),
+                    );
+                }
+                seq.push_addressed(ret_block, 1, PcodeOp::new(OpCode::Return, None, vec![]));
+                let end = ret_block + 1;
+                let cfg = build_cfg(&seq, 0, end);
+                let ssa = build_ssa(&cfg);
+                let rep = structure_function(&cfg, &ssa);
+                let text = dump_region(&rep.region);
+                // Must have gotos from the depth limit:
+                assert!(text.contains("goto"), "expected goto fallbacks in deep CFG");
+                // Must not lose blocks:
+                assert!(rep.region.block_count() > 0);
+            })
+            .expect("spawn")
+            .join();
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 }

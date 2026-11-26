@@ -188,13 +188,9 @@ pub fn bench_program_stage1_parallel(
     conv: CallConv,
 ) -> BenchReport {
     use rayon::prelude::*;
-    // Build a custom thread pool with a generous stack size so that
-    // deeply-nested CFG structuring (which uses `stacker::maybe_grow`
-    // as a secondary safety net) starts with enough headroom. The
-    // default rayon pool inherits the platform default (~2 MB on
-    // Windows spawned threads) which is insufficient for large binaries.
+    // Use Rayon’s normal worker stacks; recursive passes are depth-bounded
+    // and Region rendering uses an explicit work stack.
     let pool = rayon::ThreadPoolBuilder::new()
-        .stack_size(64 * 1024 * 1024) // 64 MiB per worker thread
         .build()
         .expect("failed to build rayon thread pool");
 

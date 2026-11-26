@@ -247,13 +247,12 @@ fn render_function(
     // Render structured body.
     let mut ctx = RenderCtx {
         ssa,
-        structure,
         types,
         fold,
         emit_hints,
         sink: &mut sink,
     };
-    render_region(&structure.region, 1, &mut ctx, &mut out);
+    render_region_iter(&structure.region, 1, &mut ctx, &mut out);
 
     out.push_str("}\n");
     sink.text("}\n");
@@ -262,7 +261,6 @@ fn render_function(
 
 struct RenderCtx<'a> {
     ssa: &'a SsaFunction,
-    structure: &'a StructureReport,
     types: &'a TypeRecovery,
     fold: &'a FoldPlan,
     emit_hints: &'a EmitHints,
@@ -271,135 +269,6 @@ struct RenderCtx<'a> {
 
 fn indent(n: usize) -> String {
     "    ".repeat(n)
-}
-
-/// Stack-safe recursive rendering of a [`Region`] tree.
-fn render_region(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) {
-    stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
-        render_region_inner(r, ind, ctx, out)
-    })
-}
-
-fn render_region_inner(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) {
-    match r {
-        Region::Block(b) => render_block_body(*b, ind, ctx, out, /*skip_terminator=*/ false),
-        Region::Return(b) => {
-            render_block_body(*b, ind, ctx, out, /*skip_terminator=*/ false);
-        }
-        Region::Goto(b) => {
-            out.push_str(&format!("{}goto block_{};\n", indent(ind), b));
-        }
-        Region::Break => {
-            out.push_str(&format!("{}break;\n", indent(ind)));
-        }
-        Region::Continue => {
-            out.push_str(&format!("{}continue;\n", indent(ind)));
-        }
-        Region::Seq(rs) => {
-            for r in rs {
-                render_region(r, ind, ctx, out);
-            }
-        }
-        Region::IfThen {
-            header,
-            then_branch,
-        } => {
-            render_block_body(*header, ind, ctx, out, /*skip_terminator=*/ true);
-            let cond = branch_condition(ctx.ssa, *header);
-            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
-            render_region(then_branch, ind + 1, ctx, out);
-            out.push_str(&format!("{}}}\n", indent(ind)));
-        }
-        Region::IfThenElse {
-            header,
-            then_branch,
-            else_branch,
-        } => {
-            render_block_body(*header, ind, ctx, out, /*skip_terminator=*/ true);
-            let cond = branch_condition(ctx.ssa, *header);
-            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
-            render_region(then_branch, ind + 1, ctx, out);
-            out.push_str(&format!("{}}} else {{\n", indent(ind)));
-            render_region(else_branch, ind + 1, ctx, out);
-            out.push_str(&format!("{}}}\n", indent(ind)));
-        }
-        Region::While { header, body } => {
-            let cond = branch_condition(ctx.ssa, *header);
-            out.push_str(&format!("{}while ({cond}) {{\n", indent(ind)));
-            render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ true);
-            render_region(body, ind + 1, ctx, out);
-            out.push_str(&format!("{}}}\n", indent(ind)));
-        }
-        Region::DoWhile {
-            header,
-            body,
-            latch,
-        } => {
-            out.push_str(&format!("{}do {{\n", indent(ind)));
-            render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ false);
-            render_region(body, ind + 1, ctx, out);
-            let cond = branch_condition(ctx.ssa, *latch);
-            out.push_str(&format!("{}}} while ({cond});\n", indent(ind)));
-        }
-        Region::Loop { header, body } => {
-            out.push_str(&format!("{}for (;;) {{\n", indent(ind)));
-            render_block_body(*header, ind + 1, ctx, out, /*skip_terminator=*/ false);
-            render_region(body, ind + 1, ctx, out);
-            out.push_str(&format!("{}}}\n", indent(ind)));
-        }
-        Region::Switch {
-            header,
-            cases,
-            default,
-        } => {
-            render_switch(*header, cases, default.as_deref(), ind, ctx, out);
-        }
-        Region::ShortCircuit {
-            parts,
-            then_branch,
-            else_branch,
-        } => {
-            let cond = compound_condition(parts, ctx);
-            out.push_str(&format!("{}if ({cond}) {{\n", indent(ind)));
-            render_region(then_branch, ind + 1, ctx, out);
-            if let Some(e) = else_branch {
-                out.push_str(&format!("{}}} else {{\n", indent(ind)));
-                render_region(e, ind + 1, ctx, out);
-            }
-            out.push_str(&format!("{}}}\n", indent(ind)));
-        }
-    }
-    let _ = &ctx.structure;
-    let _ = &ctx.types;
-}
-
-fn render_switch(
-    header: u32,
-    cases: &[SwitchCase],
-    default: Option<&Region>,
-    ind: usize,
-    ctx: &mut RenderCtx,
-    out: &mut String,
-) {
-    render_block_body(header, ind, ctx, out, /*skip_terminator=*/ true);
-    let selector = switch_selector(ctx.ssa, header);
-    out.push_str(&format!("{}switch ({selector}) {{\n", indent(ind)));
-    for c in cases {
-        out.push_str(&format!(
-            "{}case {}: /* → block_{} */\n",
-            indent(ind + 1),
-            c.selector,
-            c.target
-        ));
-        render_region(&c.body, ind + 2, ctx, out);
-        out.push_str(&format!("{}break;\n", indent(ind + 2)));
-    }
-    if let Some(d) = default {
-        out.push_str(&format!("{}default:\n", indent(ind + 1)));
-        render_region(d, ind + 2, ctx, out);
-        out.push_str(&format!("{}break;\n", indent(ind + 2)));
-    }
-    out.push_str(&format!("{}}}\n", indent(ind)));
 }
 
 fn switch_selector(ssa: &SsaFunction, block: u32) -> String {
@@ -416,6 +285,182 @@ fn switch_selector(ssa: &SsaFunction, block: u32) -> String {
         .first()
         .map(|v| format_operand_bare(v, &TypeRecovery::default()))
         .unwrap_or_else(|| format!("switch_of_{block}"))
+}
+
+enum RenderTask<'a> {
+    Region(&'a Region, usize),
+    Text(String),
+    Seq {
+        regions: &'a [Region],
+        next: usize,
+        level: usize,
+    },
+    SwitchCases {
+        cases: &'a [SwitchCase],
+        next: usize,
+        default: Option<&'a Region>,
+        level: usize,
+    },
+}
+
+/// Render every Region with an explicit work stack. Indentation is capped as
+/// presentation detail; nested control flow and leaf pseudocode are retained.
+fn render_region_iter(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut String) {
+    const MAX_INDENT: usize = 64;
+    let mut tasks = vec![RenderTask::Region(r, ind)];
+    while let Some(task) = tasks.pop() {
+        let (region, level) = match task {
+            RenderTask::Text(text) => {
+                out.push_str(&text);
+                continue;
+            }
+            RenderTask::Region(region, level) => (region, level),
+            RenderTask::Seq {
+                regions,
+                next,
+                level,
+            } => {
+                if let Some(region) = regions.get(next) {
+                    tasks.push(RenderTask::Seq {
+                        regions,
+                        next: next + 1,
+                        level,
+                    });
+                    tasks.push(RenderTask::Region(region, level));
+                }
+                continue;
+            }
+            RenderTask::SwitchCases {
+                cases,
+                next,
+                default,
+                level,
+            } => {
+                let pad = |n: usize| "    ".repeat(n.min(MAX_INDENT));
+                if let Some(case) = cases.get(next) {
+                    tasks.push(RenderTask::SwitchCases {
+                        cases,
+                        next: next + 1,
+                        default,
+                        level,
+                    });
+                    tasks.push(RenderTask::Text(format!("{}break;\n", pad(level + 2))));
+                    tasks.push(RenderTask::Region(&case.body, level + 2));
+                    tasks.push(RenderTask::Text(format!(
+                        "{}case {}: /* → block_{} */\n",
+                        pad(level + 1),
+                        case.selector,
+                        case.target
+                    )));
+                } else if let Some(default) = default {
+                    tasks.push(RenderTask::Text(format!("{}break;\n", pad(level + 2))));
+                    tasks.push(RenderTask::Region(default, level + 2));
+                    tasks.push(RenderTask::Text(format!("{}default:\n", pad(level + 1))));
+                }
+                continue;
+            }
+        };
+        let pad = |n: usize| "    ".repeat(n.min(MAX_INDENT));
+        match region {
+            Region::Block(block) | Region::Return(block) => {
+                render_block_body(*block, level, ctx, out, false);
+            }
+            Region::Goto(block) => out.push_str(&format!("{}goto block_{block};\n", pad(level))),
+            Region::Break => out.push_str(&format!("{}break;\n", pad(level))),
+            Region::Continue => out.push_str(&format!("{}continue;\n", pad(level))),
+            Region::Seq(regions) => {
+                if !regions.is_empty() {
+                    tasks.push(RenderTask::Seq {
+                        regions,
+                        next: 0,
+                        level,
+                    });
+                }
+            }
+            Region::IfThen {
+                header,
+                then_branch,
+            } => {
+                render_block_body(*header, level, ctx, out, true);
+                let cond = branch_condition(ctx.ssa, *header);
+                out.push_str(&format!("{}if ({cond}) {{\n", pad(level)));
+                tasks.push(RenderTask::Text(format!("{}}}\n", pad(level))));
+                tasks.push(RenderTask::Region(then_branch, level + 1));
+            }
+            Region::IfThenElse {
+                header,
+                then_branch,
+                else_branch,
+            } => {
+                render_block_body(*header, level, ctx, out, true);
+                let cond = branch_condition(ctx.ssa, *header);
+                out.push_str(&format!("{}if ({cond}) {{\n", pad(level)));
+                tasks.push(RenderTask::Text(format!("{}}}\n", pad(level))));
+                tasks.push(RenderTask::Region(else_branch, level + 1));
+                tasks.push(RenderTask::Text(format!("{}}} else {{\n", pad(level))));
+                tasks.push(RenderTask::Region(then_branch, level + 1));
+            }
+            Region::While { header, body } => {
+                let cond = branch_condition(ctx.ssa, *header);
+                out.push_str(&format!("{}while ({cond}) {{\n", pad(level)));
+                render_block_body(*header, level + 1, ctx, out, true);
+                tasks.push(RenderTask::Text(format!("{}}}\n", pad(level))));
+                tasks.push(RenderTask::Region(body, level + 1));
+            }
+            Region::DoWhile {
+                header,
+                body,
+                latch,
+            } => {
+                out.push_str(&format!("{}do {{\n", pad(level)));
+                render_block_body(*header, level + 1, ctx, out, false);
+                let cond = branch_condition(ctx.ssa, *latch);
+                tasks.push(RenderTask::Text(format!(
+                    "{}}} while ({cond});\n",
+                    pad(level)
+                )));
+                tasks.push(RenderTask::Region(body, level + 1));
+            }
+            Region::Loop { header, body } => {
+                out.push_str(&format!("{}for (;;) {{\n", pad(level)));
+                render_block_body(*header, level + 1, ctx, out, false);
+                tasks.push(RenderTask::Text(format!("{}}}\n", pad(level))));
+                tasks.push(RenderTask::Region(body, level + 1));
+            }
+            Region::Switch {
+                header,
+                cases,
+                default,
+            } => {
+                render_block_body(*header, level, ctx, out, true);
+                let selector = switch_selector(ctx.ssa, *header);
+                out.push_str(&format!("{}switch ({selector}) {{\n", pad(level)));
+                tasks.push(RenderTask::Text(format!("{}}}\n", pad(level))));
+                if !cases.is_empty() || default.is_some() {
+                    tasks.push(RenderTask::SwitchCases {
+                        cases,
+                        next: 0,
+                        default: default.as_deref(),
+                        level,
+                    });
+                }
+            }
+            Region::ShortCircuit {
+                parts,
+                then_branch,
+                else_branch,
+            } => {
+                let cond = compound_condition(parts, ctx);
+                out.push_str(&format!("{}if ({cond}) {{\n", pad(level)));
+                tasks.push(RenderTask::Text(format!("{}}}\n", pad(level))));
+                if let Some(else_branch) = else_branch {
+                    tasks.push(RenderTask::Region(else_branch, level + 1));
+                    tasks.push(RenderTask::Text(format!("{}}} else {{\n", pad(level))));
+                }
+                tasks.push(RenderTask::Region(then_branch, level + 1));
+            }
+        }
+    }
 }
 
 fn compound_condition(parts: &[ShortCircuitClause], ctx: &mut RenderCtx) -> String {
@@ -1319,5 +1364,37 @@ mod tests {
             "R1: folded_temps reported in header:\n{}",
             rep.pseudo_c
         );
+    }
+
+    #[test]
+    fn iterative_renderer_preserves_deep_region_contents() {
+        let mut region = Region::Goto(0xdead);
+        for _ in 0..300 {
+            region = Region::IfThen {
+                header: 0,
+                then_branch: Box::new(region),
+            };
+        }
+
+        let ssa = SsaFunction {
+            entry: 0,
+            blocks: Vec::new(),
+            versions: Default::default(),
+        };
+        let mut sink = crate::emit_tokens::TokenSink::default();
+        let mut ctx = RenderCtx {
+            ssa: &ssa,
+            types: &TypeRecovery::default(),
+            fold: &FoldPlan::default(),
+            emit_hints: &EmitHints::default(),
+            sink: &mut sink,
+        };
+        let mut output = String::new();
+        render_region_iter(&region, 1, &mut ctx, &mut output);
+
+        assert_eq!(output.matches("if (").count(), 300);
+        assert_eq!(output.matches("}\n").count(), 300);
+        assert!(output.contains("goto block_57005;"));
+        assert!(!output.contains("render depth limit"));
     }
 }

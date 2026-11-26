@@ -259,8 +259,7 @@ pub fn build_cfg_with_leaders(
     }
     let instruction_starts: BTreeSet<u64> = seq.addressed.iter().map(|a| a.address).collect();
 
-    for i in 0..seq.addressed.len() {
-        let aop = &seq.addressed[i];
+    for aop in &seq.addressed {
         if is_terminator(&aop.op) {
             // fall-through address = last op of source instruction + length
             let after = aop.address.wrapping_add(aop.length as u64);
@@ -319,13 +318,12 @@ pub fn build_cfg_with_leaders(
 
     // 3. Wire successors.
     let mut external_exits = Vec::new();
-    for bi in 0..blocks.len() {
+    for (bi, block) in blocks.iter_mut().enumerate() {
         // Look at the last *addressed* op that came from this block's address
         // range to decide edges. We recover it by pulling the source address
         // of the block's last op.
-        let last_op = blocks[bi].ops.last().cloned();
-        let last_addr = block_last_source_address(seq, &blocks[bi]);
-        let fallthrough = blocks[bi].end;
+        let last_op = block.ops.last().cloned();
+        let fallthrough = block.end;
 
         let mut successors: Vec<u32> = Vec::new();
         match last_op.as_ref().map(|o| o.opcode) {
@@ -381,8 +379,7 @@ pub fn build_cfg_with_leaders(
                 }
             }
         }
-        let _ = last_addr;
-        blocks[bi].successors = successors;
+        block.successors = successors;
     }
 
     // 4. Populate predecessors.
@@ -403,18 +400,6 @@ pub fn build_cfg_with_leaders(
         block_of_addr,
         external_exits,
     }
-}
-
-fn block_last_source_address(seq: &IrSequence, bb: &BasicBlock) -> Option<u64> {
-    let start = bb.start?;
-    let end = bb.end.unwrap_or(u64::MAX);
-    let mut last = None;
-    for a in &seq.addressed {
-        if a.address >= start && a.address < end {
-            last = Some(a.address);
-        }
-    }
-    last
 }
 
 /// Convenience: the set of varnodes written by each block (`defs[i]`) — input
