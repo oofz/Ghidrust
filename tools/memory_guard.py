@@ -200,18 +200,28 @@ def run(args: argparse.Namespace) -> int:
         limits.BasicLimitInformation.LimitFlags = (
             JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
         limits.JobMemoryLimit = limit
+        # Descendants such as cargo test and its worker processes need a
+        # stable way to locate and validate their inherited Job Object.
+        job_name = f"Local\\GhidrustMemoryGuard-{os.getpid()}"
+        previous_job_name = os.environ.get("GHIDRUST_MEMORY_GUARD_JOB")
+        os.environ["GHIDRUST_MEMORY_GUARD_JOB"] = job_name
         command = subprocess.list2cmdline(args.command)
         startup = STARTUPINFO()
         startup.cb = ctypes.sizeof(startup)
         flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT
-        wincheck(kernel32.CreateProcessW(
-            None, ctypes.create_unicode_buffer(command), None, None, False, flags,
-            None, args.cwd, ctypes.byref(startup), ctypes.byref(process_info)),
-            "CreateProcessW")
+        try:
+            created = kernel32.CreateProcessW(
+                None, ctypes.create_unicode_buffer(command), None, None, False, flags,
+                None, args.cwd, ctypes.byref(startup), ctypes.byref(process_info))
+        finally:
+            if previous_job_name is None:
+                os.environ.pop("GHIDRUST_MEMORY_GUARD_JOB", None)
+            else:
+                os.environ["GHIDRUST_MEMORY_GUARD_JOB"] = previous_job_name
+        wincheck(created, "CreateProcessW")
         proc_created = True
         # Name the job with the suspended target PID so the batch engine can
         # verify that its hard, aggregate budget is present before starting.
-        job_name = f"Local\\GhidrustMemoryGuard-{process_info.dwProcessId}"
         job = kernel32.CreateJobObjectW(None, job_name)
         wincheck(bool(job), "CreateJobObjectW")
         wincheck(kernel32.SetInformationJobObject(
