@@ -57,16 +57,6 @@ class EXTENDED_LIMIT(ctypes.Structure):
     ]
 
 
-class MEMORYSTATUSEX(ctypes.Structure):
-    _fields_ = [
-        ("dwLength", wintypes.DWORD), ("dwMemoryLoad", wintypes.DWORD),
-        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-    ]
-
-
 class PERFORMANCE_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("cb", wintypes.DWORD),
@@ -132,8 +122,6 @@ kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
 kernel32.TerminateJobObject.restype = wintypes.BOOL
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 kernel32.CloseHandle.restype = wintypes.BOOL
-kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.c_void_p]
-kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
 psapi.GetPerformanceInfo.argtypes = [ctypes.POINTER(PERFORMANCE_INFORMATION), wintypes.DWORD]
 psapi.GetPerformanceInfo.restype = wintypes.BOOL
 
@@ -264,12 +252,15 @@ def run(args: argparse.Namespace) -> int:
             kernel32.TerminateJobObject(job, 0xE003)
         raise
     finally:
+        cleanup_error = None
         try:
             # If assignment failed, the suspended process is outside the Job;
             # terminate it explicitly before releasing its handles.
             if proc_created and not assigned:
                 kernel32.TerminateProcess(process_info.hProcess, 0xE004)
-                kernel32.WaitForSingleObject(process_info.hProcess, 5000)
+                wait = kernel32.WaitForSingleObject(process_info.hProcess, 5000)
+                if wait != 0:
+                    cleanup_error = "could not confirm termination of suspended unassigned process"
             peak = 0
             if job:
                 try:
@@ -304,6 +295,8 @@ def run(args: argparse.Namespace) -> int:
                 # KILL_ON_JOB_CLOSE is the final cleanup guarantee.
                 if job:
                     kernel32.CloseHandle(job)
+        if cleanup_error:
+            raise RuntimeError(cleanup_error)
     return rc
 
 
