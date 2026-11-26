@@ -33,6 +33,21 @@ def run_args(command: list[str], *, log: str | None = None) -> argparse.Namespac
 
 
 class MemoryGuardFailureTests(unittest.TestCase):
+    def test_job_is_named_by_suspended_target_pid(self) -> None:
+        kernel32 = guard.kernel32
+        kernel32.GetCurrentProcessId.restype = guard.wintypes.DWORD
+        kernel32.OpenJobObjectW.argtypes = [
+            guard.wintypes.DWORD, guard.wintypes.BOOL, guard.wintypes.LPCWSTR
+        ]
+        kernel32.OpenJobObjectW.restype = guard.wintypes.HANDLE
+        handle = kernel32.OpenJobObjectW(
+            0x0004,
+            False,
+            f"Local\\GhidrustMemoryGuard-{kernel32.GetCurrentProcessId()}",
+        )
+        self.assertTrue(handle, "memory_guard must publish its named hard-limit job")
+        self.assertTrue(kernel32.CloseHandle(handle))
+
     def test_assignment_failure_terminates_suspended_process(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             marker = pathlib.Path(temp, "started")

@@ -186,8 +186,7 @@ def run(args: argparse.Namespace) -> int:
             with open(args.log, "a", encoding="utf-8") as log:
                 log.write(line + "\n")
         return 0xE001
-    job = kernel32.CreateJobObjectW(None, None)
-    wincheck(bool(job), "CreateJobObjectW")
+    job = None
     process_info = PROCESS_INFORMATION()
     proc_created = False
     assigned = False
@@ -201,10 +200,6 @@ def run(args: argparse.Namespace) -> int:
         limits.BasicLimitInformation.LimitFlags = (
             JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)
         limits.JobMemoryLimit = limit
-        wincheck(kernel32.SetInformationJobObject(
-            job, JobObjectExtendedLimitInformation, ctypes.byref(limits),
-            ctypes.sizeof(limits)), "SetInformationJobObject")
-
         command = subprocess.list2cmdline(args.command)
         startup = STARTUPINFO()
         startup.cb = ctypes.sizeof(startup)
@@ -214,6 +209,14 @@ def run(args: argparse.Namespace) -> int:
             None, args.cwd, ctypes.byref(startup), ctypes.byref(process_info)),
             "CreateProcessW")
         proc_created = True
+        # Name the job with the suspended target PID so the batch engine can
+        # verify that its hard, aggregate budget is present before starting.
+        job_name = f"Local\\GhidrustMemoryGuard-{process_info.dwProcessId}"
+        job = kernel32.CreateJobObjectW(None, job_name)
+        wincheck(bool(job), "CreateJobObjectW")
+        wincheck(kernel32.SetInformationJobObject(
+            job, JobObjectExtendedLimitInformation, ctypes.byref(limits),
+            ctypes.sizeof(limits)), "SetInformationJobObject")
         # The primary thread is still suspended: children cannot escape assignment.
         wincheck(kernel32.AssignProcessToJobObject(job, process_info.hProcess),
                  "AssignProcessToJobObject")
@@ -247,7 +250,7 @@ def run(args: argparse.Namespace) -> int:
             wincheck(wait == 0x102, "WaitForSingleObject")
     except Exception as exc:
         reason = f"watchdog_error: {exc}"
-        if proc_created:
+        if proc_created and job:
             kernel32.TerminateJobObject(job, 0xE003)
         raise
     finally:
