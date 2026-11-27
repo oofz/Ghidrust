@@ -471,6 +471,24 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                 format!("{}, {imm:#x}", byte_reg_name(r, pfx.has_rex)),
             )
         }
+        // TEST AL, imm8 / TEST AX/EAX/RAX, imm16/imm32.
+        0xA8 | 0xA9 => {
+            let (accumulator, immediate) = if op == 0xA8 {
+                ("al", cur.take_imm(1)? as u8 as i8 as i64)
+            } else {
+                let width = gp_width(pfx);
+                let immediate = if width == 2 {
+                    cur.take_imm(2)? as u16 as i16 as i64
+                } else {
+                    cur.take_imm(4)? as u32 as i32 as i64
+                };
+                (gp_name(0, pfx), immediate)
+            };
+            (
+                "test".into(),
+                format!("{accumulator}, {}", sign_hex(immediate)),
+            )
+        }
         // ADD r/m8, r8 / AND r8, r/m8.
         0x00 | 0x22 => {
             let modrm = cur.get()?;
@@ -948,6 +966,28 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                         ("movaps".into(), format!("{rm}, {xmm}"))
                     }
                 }
+                // MOVLPS/MOVLPD store the low 64 bits and require memory.
+                0x13 if !pfx.rep && !pfx.repne => {
+                    let modrm = cur.get()?;
+                    if modrm >> 6 == 3 {
+                        return Err(Error::Decode(
+                            "MOVLPS/MOVLPD requires memory destination".into(),
+                        ));
+                    }
+                    let xmm = xmm_name(((modrm >> 3) & 7) | if pfx.rex_r { 8 } else { 0 });
+                    let (_, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, 8)?;
+                    let mnemonic = if pfx.op_size { "movlpd" } else { "movlps" };
+                    (mnemonic.into(), format!("{rm}, {xmm}"))
+                }
+                // MOVDQU xmm <-> xmm/m128.
+                0x6F | 0x7F if pfx.rep && !pfx.repne && !pfx.op_size => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    if op2 == 0x6F {
+                        ("movdqu".into(), format!("{xmm}, {rm}"))
+                    } else {
+                        ("movdqu".into(), format!("{rm}, {xmm}"))
+                    }
+                }
                 // MOVDQA xmm, xmm/m128 / MOVDQA xmm/m128, xmm (66 0F 6F / 7F)
                 0x6F | 0x7F if pfx.op_size => {
                     let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
@@ -1098,6 +1138,47 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                     let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
                     ("pand".into(), format!("{xmm}, {rm}"))
                 }
+                // PUNPCKLBW and PCMPEQB, XMM forms (SSE2 mandatory 66 prefix).
+                0x60 | 0x74 if pfx.op_size && !pfx.rep && !pfx.repne => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    let mnemonic = if op2 == 0x60 { "punpcklbw" } else { "pcmpeqb" };
+                    (mnemonic.into(), format!("{xmm}, {rm}"))
+                }
+                // PMOVMSKB r32, xmm (register source only).
+                0xD7 if pfx.op_size && !pfx.rep && !pfx.repne => {
+                    let modrm = cur.get()?;
+                    if modrm >> 6 != 3 {
+                        return Err(Error::Decode(
+                            "PMOVMSKB requires an XMM register source".into(),
+                        ));
+                    }
+                    let dst = ((modrm >> 3) & 7) | if pfx.rex_r { 8 } else { 0 };
+                    let src = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+                    (
+                        "pmovmskb".into(),
+                        format!("{}, {}", reg_name(dst, false, false, false), xmm_name(src)),
+                    )
+                }
+                // PSHUFD xmm, xmm/m128, imm8.
+                0x70 if pfx.op_size && !pfx.rep && !pfx.repne => {
+                    let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
+                    let imm = cur.take_imm(1)?;
+                    ("pshufd".into(), format!("{xmm}, {rm}, {imm:#x}"))
+                }
+                // PINSRW xmm, r/m16, imm8.
+                0xC4 if pfx.op_size && !pfx.rep && !pfx.repne => {
+                    let modrm = cur.get()?;
+                    let xmm = xmm_name(((modrm >> 3) & 7) | if pfx.rex_r { 8 } else { 0 });
+                    let src = if modrm >> 6 == 3 {
+                        let index = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+                        REGS16[index as usize].to_string()
+                    } else {
+                        let (_, operand) = decode_modrm_sized(&mut cur, modrm, pfx, false, 2)?;
+                        operand
+                    };
+                    let imm = cur.take_imm(1)?;
+                    ("pinsrw".into(), format!("{xmm}, {src}, {imm:#x}"))
+                }
                 // BSR r, r/m; F3 selects LZCNT.
                 0xBD if !pfx.repne => {
                     let modrm = cur.get()?;
@@ -1111,8 +1192,69 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                     let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, gp_width(pfx))?;
                     ("shld".into(), format!("{rm}, {}, cl", gp_name(reg, pfx)))
                 }
+                // BT/BTS/BTR/BTC r/m, r.
+                0xA3 | 0xAB | 0xB3 | 0xBB => {
+                    let modrm = cur.get()?;
+                    let mnemonic = match op2 {
+                        0xA3 => "bt",
+                        0xAB => "bts",
+                        0xB3 => "btr",
+                        _ => "btc",
+                    };
+                    if pfx.lock && (op2 == 0xA3 || modrm >> 6 == 3) {
+                        return Err(Error::Decode(
+                            "LOCK bit operation requires a modifying memory form".into(),
+                        ));
+                    }
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, gp_width(pfx))?;
+                    let mnemonic = if pfx.lock {
+                        format!("lock {mnemonic}")
+                    } else {
+                        mnemonic.to_string()
+                    };
+                    (mnemonic, format!("{rm}, {}", gp_name(reg, pfx)))
+                }
+                // BT/BTS/BTR/BTC r/m, imm8 (group 0F BA /4-/7).
+                0xBA => {
+                    let modrm = cur.get()?;
+                    let group = (modrm >> 3) & 7;
+                    let mnemonic = match group {
+                        4 => "bt",
+                        5 => "bts",
+                        6 => "btr",
+                        7 => "btc",
+                        _ => return Err(Error::Decode(format!("unhandled 0F BA /{group}"))),
+                    };
+                    if pfx.lock && (group == 4 || modrm >> 6 == 3) {
+                        return Err(Error::Decode(
+                            "LOCK bit operation requires a modifying memory form".into(),
+                        ));
+                    }
+                    let (_, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, gp_width(pfx))?;
+                    let imm = cur.take_imm(1)?;
+                    let mnemonic = if pfx.lock {
+                        format!("lock {mnemonic}")
+                    } else {
+                        mnemonic.to_string()
+                    };
+                    (mnemonic, format!("{rm}, {imm:#x}"))
+                }
                 // CMPXCHG r/m, r. Preserve LOCK in the mnemonic because the
                 // instruction representation has no separate prefix field.
+                0xB0 => {
+                    let modrm = cur.get()?;
+                    if pfx.lock && modrm >> 6 == 3 {
+                        return Err(Error::Decode(
+                            "LOCK CMPXCHG requires a memory operand".into(),
+                        ));
+                    }
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+                    let mnemonic = if pfx.lock { "lock cmpxchg" } else { "cmpxchg" };
+                    (
+                        mnemonic.into(),
+                        format!("{rm}, {}", byte_reg_name(reg, pfx.has_rex)),
+                    )
+                }
                 0xB1 => {
                     let modrm = cur.get()?;
                     if pfx.lock && modrm >> 6 == 3 {
@@ -1123,6 +1265,23 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                     let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, gp_width(pfx))?;
                     let mnemonic = if pfx.lock { "lock cmpxchg" } else { "cmpxchg" };
                     (mnemonic.into(), format!("{rm}, {}", gp_name(reg, pfx)))
+                }
+                // XADD r/m, r. Preserve LOCK where valid.
+                0xC1 => {
+                    let modrm = cur.get()?;
+                    if pfx.lock && modrm >> 6 == 3 {
+                        return Err(Error::Decode("LOCK XADD requires a memory operand".into()));
+                    }
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, gp_width(pfx))?;
+                    let mnemonic = if pfx.lock { "lock xadd" } else { "xadd" };
+                    (mnemonic.into(), format!("{rm}, {}", gp_name(reg, pfx)))
+                }
+                // BSF r, r/m; F3 selects TZCNT.
+                0xBC if !pfx.repne => {
+                    let modrm = cur.get()?;
+                    let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, false, gp_width(pfx))?;
+                    let mnemonic = if pfx.rep { "tzcnt" } else { "bsf" };
+                    (mnemonic.into(), format!("{}, {rm}", gp_name(reg, pfx)))
                 }
                 // SHRD r/m, r, imm8.
                 0xAC => {
@@ -1361,16 +1520,39 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             };
             (mnemonic, String::new())
         }
+        // FE /0 INC and /1 DEC r/m8.
+        0xFE => {
+            let modrm = cur.get()?;
+            let group = (modrm >> 3) & 7;
+            let mnemonic = match group {
+                0 => "inc",
+                1 => "dec",
+                _ => return Err(Error::Decode(format!("unhandled FE /{group}"))),
+            };
+            if pfx.lock && modrm >> 6 == 3 {
+                return Err(Error::Decode("LOCK FE requires a memory operand".into()));
+            }
+            let (_, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+            let mnemonic = if pfx.lock {
+                format!("lock {mnemonic}")
+            } else {
+                mnemonic.to_string()
+            };
+            (mnemonic, rm)
+        }
+        // Software interrupt vector.
+        0xCD => ("int".into(), format!("{:#x}", cur.get()?)),
         // OR/XOR r8,r8 forms used with and without a REX prefix.
-        0x08 | 0x0A | 0x2A | 0x30 | 0x32 => {
+        0x08 | 0x0A | 0x20 | 0x28 | 0x2A | 0x30 | 0x32 => {
             let modrm = cur.get()?;
             let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
             let mnem = match op {
                 0x08 | 0x0A => "or",
-                0x2A => "sub",
+                0x20 => "and",
+                0x28 | 0x2A => "sub",
                 _ => "xor",
             };
-            if op == 0x08 || op == 0x30 {
+            if op == 0x08 || op == 0x20 || op == 0x28 || op == 0x30 {
                 (
                     mnem.into(),
                     format!("{rm}, {}", byte_reg_name(reg, pfx.has_rex)),
@@ -1835,5 +2017,116 @@ mod tests {
         // DB E3 is FNINIT. Keep it a decode failure until the lifter can
         // preserve its FPU state effect instead of accepting then dropping it.
         assert!(decode_one(&[0xdb, 0xe3], 0x1000).is_err());
+    }
+
+    #[test]
+    fn decode_ripgrep_test_accumulator_and_byte_arithmetic() {
+        let test_al = decode_one(&[0xa8, 0x01], 0x1000).unwrap();
+        assert_eq!(test_al.mnemonic, "test");
+        assert_eq!(test_al.operands, "al, 0x1");
+        assert_eq!(test_al.length, 2);
+
+        let test_rax = decode_one(&[0x48, 0xa9, 0xff, 0xff, 0xff, 0xff], 0x1000).unwrap();
+        assert_eq!(test_rax.mnemonic, "test");
+        assert_eq!(test_rax.operands, "rax, -0x1");
+        assert_eq!(test_rax.length, 6);
+
+        let and = decode_one(&[0x20, 0xd3], 0x1000).unwrap();
+        assert_eq!(and.mnemonic, "and");
+        assert_eq!(and.operands, "bl, dl");
+
+        let sub = decode_one(&[0x2a, 0x85, 0xef, 0x08, 0, 0], 0x1000).unwrap();
+        assert_eq!(sub.mnemonic, "sub");
+        assert_eq!(sub.operands, "al, byte ptr [rbp+0x8ef]");
+
+        let sub_store = decode_one(&[0x28, 0xc8], 0x1000).unwrap();
+        assert_eq!(sub_store.operands, "al, cl");
+    }
+
+    #[test]
+    fn decode_ripgrep_byte_inc_dec_and_int() {
+        let inc = decode_one(&[0xfe, 0xc1], 0x1000).unwrap();
+        assert_eq!(inc.mnemonic, "inc");
+        assert_eq!(inc.operands, "cl");
+
+        let dec = decode_one(&[0xf0, 0x41, 0xfe, 0x4f, 0x28], 0x1000).unwrap();
+        assert_eq!(dec.mnemonic, "lock dec");
+        assert_eq!(dec.operands, "byte ptr [r15+0x28]");
+        assert_eq!(dec.length, 5);
+
+        let int = decode_one(&[0xcd, 0x29], 0x1000).unwrap();
+        assert_eq!(int.mnemonic, "int");
+        assert_eq!(int.operands, "0x29");
+        assert_eq!(int.length, 2);
+    }
+
+    #[test]
+    fn decode_ripgrep_sse_move_unpack_compare_and_shuffle() {
+        let load = decode_one(&[0xf3, 0x0f, 0x6f, 0x02], 0x1000).unwrap();
+        assert_eq!(load.mnemonic, "movdqu");
+        assert_eq!(load.operands, "xmm0, [rdx]");
+
+        let store = decode_one(&[0xf3, 0x0f, 0x7f, 0x02], 0x1000).unwrap();
+        assert_eq!(store.mnemonic, "movdqu");
+        assert_eq!(store.operands, "[rdx], xmm0");
+
+        let unpack = decode_one(&[0x66, 0x0f, 0x60, 0xc0], 0x1000).unwrap();
+        assert_eq!(unpack.mnemonic, "punpcklbw");
+        assert_eq!(unpack.operands, "xmm0, xmm0");
+
+        let compare = decode_one(&[0x66, 0x0f, 0x74, 0xc1], 0x1000).unwrap();
+        assert_eq!(compare.mnemonic, "pcmpeqb");
+        assert_eq!(compare.operands, "xmm0, xmm1");
+
+        let mask = decode_one(&[0x66, 0x0f, 0xd7, 0xf0], 0x1000).unwrap();
+        assert_eq!(mask.mnemonic, "pmovmskb");
+        assert_eq!(mask.operands, "esi, xmm0");
+
+        let shuffle = decode_one(&[0x66, 0x0f, 0x70, 0xc0, 0x00], 0x1000).unwrap();
+        assert_eq!(shuffle.mnemonic, "pshufd");
+        assert_eq!(shuffle.operands, "xmm0, xmm0, 0x0");
+
+        let pinsrw = decode_one(&[0x66, 0x0f, 0xc4, 0x04, 0x78, 0x01], 0x1000).unwrap();
+        assert_eq!(pinsrw.mnemonic, "pinsrw");
+        assert_eq!(pinsrw.operands, "xmm0, word ptr [rax+rdi*2], 0x1");
+
+        let movlps = decode_one(&[0x0f, 0x13, 0x4c, 0x08, 0x0f], 0x1000).unwrap();
+        assert_eq!(movlps.mnemonic, "movlps");
+        assert_eq!(movlps.operands, "qword ptr [rax+rcx+0xf], xmm1");
+        assert!(decode_one(&[0x0f, 0x13, 0xc1], 0x1000).is_err());
+    }
+
+    #[test]
+    fn decode_ripgrep_bit_ops_byte_cmpxchg_and_xadd() {
+        let bt = decode_one(&[0x48, 0x0f, 0xa3, 0xd0], 0x1000).unwrap();
+        assert_eq!(bt.mnemonic, "bt");
+        assert_eq!(bt.operands, "rax, rdx");
+
+        let locked_bts = decode_one(&[0xf0, 0x48, 0x0f, 0xba, 0x29, 0x03], 0x1000).unwrap();
+        assert_eq!(locked_bts.mnemonic, "lock bts");
+        assert_eq!(locked_bts.operands, "qword ptr [rcx], 0x3");
+
+        let btr = decode_one(&[0x0f, 0xba, 0xf0, 0x02], 0x1000).unwrap();
+        assert_eq!(btr.mnemonic, "btr");
+        assert_eq!(btr.operands, "eax, 0x2");
+
+        let locked_btc = decode_one(&[0xf0, 0x0f, 0xba, 0x39, 0x04], 0x1000).unwrap();
+        assert_eq!(locked_btc.mnemonic, "lock btc");
+        assert_eq!(locked_btc.operands, "dword ptr [rcx], 0x4");
+
+        let locked_bts_reg = decode_one(&[0xf0, 0x0f, 0xab, 0xc9], 0x1000);
+        assert!(locked_bts_reg.is_err());
+
+        let cmpxchg = decode_one(&[0xf0, 0x0f, 0xb0, 0x0e], 0x1000).unwrap();
+        assert_eq!(cmpxchg.mnemonic, "lock cmpxchg");
+        assert_eq!(cmpxchg.operands, "byte ptr [rsi], cl");
+
+        let xadd = decode_one(&[0xf0, 0x48, 0x0f, 0xc1, 0x01], 0x1000).unwrap();
+        assert_eq!(xadd.mnemonic, "lock xadd");
+        assert_eq!(xadd.operands, "qword ptr [rcx], rax");
+
+        let tzcnt = decode_one(&[0xf3, 0x48, 0x0f, 0xbc, 0xf5], 0x1000).unwrap();
+        assert_eq!(tzcnt.mnemonic, "tzcnt");
+        assert_eq!(tzcnt.operands, "rsi, rbp");
     }
 }
