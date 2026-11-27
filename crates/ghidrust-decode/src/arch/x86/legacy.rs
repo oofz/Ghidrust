@@ -21,6 +21,7 @@ const REGS8: [&str; 16] = [
     "al", "cl", "dl", "bl", "spl", "bpl", "sil", "dil", "r8b", "r9b", "r10b", "r11b", "r12b",
     "r13b", "r14b", "r15b",
 ];
+const REGS8_HIGH: [&str; 8] = ["al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"];
 
 #[derive(Clone, Copy, Default)]
 struct Prefix {
@@ -47,6 +48,15 @@ fn reg_name(idx: u8, w: bool, op16: bool, byte_op: bool) -> &'static str {
         REGS64[i]
     } else {
         REGS32[i]
+    }
+}
+
+fn byte_reg_name(idx: u8, has_rex: bool) -> &'static str {
+    let i = (idx & 0xf) as usize;
+    if has_rex {
+        REGS8[i]
+    } else {
+        REGS8_HIGH[i & 7]
     }
 }
 
@@ -168,7 +178,7 @@ fn decode_modrm_mem(
 
     if mod_ == 3 {
         let name = if byte_op {
-            reg_name(rm, false, false, true)
+            byte_reg_name(rm, pfx.has_rex)
         } else if pfx.rex_w {
             reg_name(rm, true, false, false)
         } else if op16 {
@@ -369,7 +379,7 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, true)?;
             (
                 "mov".into(),
-                format!("{rm}, {}", reg_name(reg, false, false, true)),
+                format!("{rm}, {}", byte_reg_name(reg, pfx.has_rex)),
             )
         }
         // MOV r8, r/m8
@@ -378,7 +388,7 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, true)?;
             (
                 "mov".into(),
-                format!("{}, {rm}", reg_name(reg, false, false, true)),
+                format!("{}, {rm}", byte_reg_name(reg, pfx.has_rex)),
             )
         }
         // MOV r/m, imm32 (C7 /0)
@@ -428,7 +438,7 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             let imm = cur.take_imm(1)?;
             (
                 "mov".into(),
-                format!("{}, {imm:#x}", reg_name(r, false, false, true)),
+                format!("{}, {imm:#x}", byte_reg_name(r, pfx.has_rex)),
             )
         }
         // LEA r, m
@@ -510,7 +520,7 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
             (
                 "test".into(),
-                format!("{rm}, {}", reg_name(reg, false, false, true)),
+                format!("{rm}, {}", byte_reg_name(reg, pfx.has_rex)),
             )
         }
         // TEST r/m, imm (F6 /0, F7 /0) — handled in F6/F7 groups below.
@@ -533,7 +543,7 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
             (
                 "xchg".into(),
-                format!("{rm}, {}", reg_name(reg, false, false, true)),
+                format!("{rm}, {}", byte_reg_name(reg, pfx.has_rex)),
             )
         }
         // MOV r/m8, imm8 (C6 /0)
@@ -862,6 +872,24 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                         ("movdqa".into(), format!("{rm}, {xmm}"))
                     }
                 }
+                // MOVD r/m32 <-> xmm (66 0F 6E / 7E). Operand-size 66 is
+                // mandatory here; the GPR/memory operand remains 32-bit.
+                0x6E | 0x7E if pfx.op_size => {
+                    let modrm = cur.get()?;
+                    let xmm = xmm_name(((modrm >> 3) & 7) | if pfx.rex_r { 8 } else { 0 });
+                    let rm = if modrm >> 6 == 3 {
+                        let index = (modrm & 7) | if pfx.rex_b { 8 } else { 0 };
+                        REGS32[index as usize].to_string()
+                    } else {
+                        let (_, operand) = decode_modrm_sized(&mut cur, modrm, pfx, false, 4)?;
+                        operand
+                    };
+                    if op2 == 0x6E {
+                        ("movd".into(), format!("{xmm}, {rm}"))
+                    } else {
+                        ("movd".into(), format!("{rm}, {xmm}"))
+                    }
+                }
                 // XORPS xmm, xmm/m128
                 0x57 => {
                     let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
@@ -1036,12 +1064,14 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                 }
             }
         }
-        // FF /2 CALL, /4 JMP
+        // FF /0 INC, /1 DEC, /2 CALL, /4 JMP, /6 PUSH
         0xFF => {
             let modrm = cur.get()?;
             let reg_field = (modrm >> 3) & 7;
             let (_r, rm) = decode_modrm_mem(&mut cur, modrm, pfx, false)?;
             match reg_field {
+                0 => ("inc".into(), rm),
+                1 => ("dec".into(), rm),
                 2 => ("call".into(), rm),
                 4 => ("jmp".into(), rm),
                 6 => ("push".into(), rm),
@@ -1050,20 +1080,24 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                 }
             }
         }
-        // XOR r8,r8 style short: 31 already; also 30
-        0x30 | 0x32 => {
+        // OR/XOR r8,r8 forms used with and without a REX prefix.
+        0x08 | 0x0A | 0x30 | 0x32 => {
             let modrm = cur.get()?;
-            let (reg, rm) = decode_modrm_mem(&mut cur, modrm, pfx, true)?;
-            let mnem = if op == 0x30 { "xor" } else { "xor" };
-            if op == 0x30 {
+            let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
+            let mnem = if op == 0x08 || op == 0x0A {
+                "or"
+            } else {
+                "xor"
+            };
+            if op == 0x08 || op == 0x30 {
                 (
                     mnem.into(),
-                    format!("{rm}, {}", reg_name(reg, false, false, true)),
+                    format!("{rm}, {}", byte_reg_name(reg, pfx.has_rex)),
                 )
             } else {
                 (
                     mnem.into(),
-                    format!("{}, {rm}", reg_name(reg, false, false, true)),
+                    format!("{}, {rm}", byte_reg_name(reg, pfx.has_rex)),
                 )
             }
         }
@@ -1270,5 +1304,36 @@ mod tests {
         let m = decode_one(&[0x66, 0x0f, 0x6f, 0xc1], 0).unwrap();
         assert_eq!(m.mnemonic, "movdqa");
         assert_eq!(m.operands, "xmm0, xmm1");
+    }
+
+    #[test]
+    fn decode_sqlite_movd_xmm_from_dword_memory() {
+        // 66 0f 6e 4c 24 28 movd xmm1, dword ptr [rsp+0x28]
+        let i = decode_one(&[0x66, 0x0f, 0x6e, 0x4c, 0x24, 0x28], 0x1000).unwrap();
+        assert_eq!(i.mnemonic, "movd");
+        assert_eq!(i.operands, "xmm1, dword ptr [rsp+0x28]");
+        assert_eq!(i.length, 6);
+    }
+
+    #[test]
+    fn decode_ripgrep_dec_r9d() {
+        // 41 ff c9 dec r9d
+        let i = decode_one(&[0x41, 0xff, 0xc9], 0x1000).unwrap();
+        assert_eq!(i.mnemonic, "dec");
+        assert_eq!(i.operands, "r9d");
+        assert_eq!(i.length, 3);
+    }
+
+    #[test]
+    fn decode_rex_byte_or_and_legacy_high_byte_register() {
+        // 40 08 68 01 or byte ptr [rax+0x1], bpl
+        let i = decode_one(&[0x40, 0x08, 0x68, 0x01], 0x1000).unwrap();
+        assert_eq!(i.mnemonic, "or");
+        assert_eq!(i.operands, "byte ptr [rax+0x1], bpl");
+        assert_eq!(i.length, 4);
+
+        // Without REX, the same ModRM reg field names CH, not BPL.
+        let legacy = decode_one(&[0x08, 0xe8], 0x2000).unwrap();
+        assert_eq!(legacy.operands, "al, ch");
     }
 }
