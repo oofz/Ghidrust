@@ -98,13 +98,10 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     let mut raw: Vec<FunctionInfo> = Vec::new();
     for (i, (entry, kind, pdata_end, name_opt)) in seeds.iter().enumerate() {
         let next_seed = seeds.get(i + 1).map(|(v, _, _, _)| *v);
-        let hard = match (pdata_end, next_seed) {
-            (Some(pe), Some(ns)) => Some((*pe).min(ns)),
-            (Some(pe), None) => Some(*pe),
-            (None, Some(ns)) => Some(ns),
-            (None, None) => None,
-        };
-        let end = grow_function(prog, *entry, hard);
+        // PE runtime-function ends are authoritative metadata. `grow_function`
+        // intentionally stops at the first `ret`, which truncates functions with
+        // multiple return sites or hot/cold fragments when applied to `.pdata`.
+        let end = resolved_function_end(prog, *entry, kind, *pdata_end, next_seed);
         let name = name_opt
             .clone()
             .or_else(|| {
@@ -122,10 +119,7 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     raw.sort_by_key(|f| f.entry);
     let mut functions = Vec::new();
     for f in raw {
-        let covered = functions
-            .iter()
-            .any(|prev: &FunctionInfo| f.entry > prev.entry && f.entry < prev.end);
-        if covered {
+        if is_covered_by_prior(&functions, &f) {
             continue;
         }
         functions.push(f);
@@ -155,6 +149,32 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     })
 }
 
+fn resolved_function_end(
+    prog: &Program,
+    entry: u64,
+    kind: &FunctionSeedKind,
+    pdata_end: Option<u64>,
+    next_seed: Option<u64>,
+) -> u64 {
+    if *kind == FunctionSeedKind::Pdata {
+        if let Some(end) = pdata_end.filter(|end| *end > entry) {
+            return end;
+        }
+    }
+    grow_function(prog, entry, next_seed)
+}
+
+fn is_covered_by_prior(functions: &[FunctionInfo], candidate: &FunctionInfo) -> bool {
+    // Preserve every authoritative `.pdata` record, including overlapping
+    // chained fragments. An inferred interval must not silently discard one.
+    if candidate.seed_kind == Some(FunctionSeedKind::Pdata) {
+        return false;
+    }
+    functions
+        .iter()
+        .any(|prev| candidate.entry > prev.entry && candidate.entry < prev.end)
+}
+
 fn seed_priority(k: &FunctionSeedKind) -> u8 {
     match k {
         FunctionSeedKind::Pdata => 0,
@@ -163,5 +183,58 @@ fn seed_priority(k: &FunctionSeedKind) -> u8 {
         FunctionSeedKind::Prologue => 3,
         FunctionSeedKind::Manual => 4,
         FunctionSeedKind::Synthesized => 5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::MemoryBlock;
+
+    fn program_with_early_return() -> Program {
+        let mut prog = Program::new("pdata-span".into(), "PE32+");
+        let bytes = vec![0xC3, 0x90, 0xC3];
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: 0x1000,
+            size: bytes.len() as u64,
+            bytes,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog
+    }
+
+    #[test]
+    fn pdata_end_is_preserved_past_first_return() {
+        let prog = program_with_early_return();
+        let end = resolved_function_end(
+            &prog,
+            0x1000,
+            &FunctionSeedKind::Pdata,
+            Some(0x1003),
+            Some(0x1003),
+        );
+        assert_eq!(grow_function(&prog, 0x1000, Some(0x1003)), 0x1001);
+        assert_eq!(end, 0x1003);
+    }
+
+    #[test]
+    fn overlapping_pdata_entries_are_retained_but_inferred_seed_is_dropped() {
+        let pdata_a =
+            FunctionInfo::new(0x1000, 0x1010, "pdata_a").with_seed_kind(FunctionSeedKind::Pdata);
+        let pdata_b =
+            FunctionInfo::new(0x1008, 0x1018, "pdata_b").with_seed_kind(FunctionSeedKind::Pdata);
+        let inferred = FunctionInfo::new(0x1009, 0x100c, "inferred")
+            .with_seed_kind(FunctionSeedKind::Prologue);
+        assert!(!is_covered_by_prior(
+            std::slice::from_ref(&pdata_a),
+            &pdata_b
+        ));
+        assert!(is_covered_by_prior(
+            std::slice::from_ref(&pdata_a),
+            &inferred
+        ));
     }
 }

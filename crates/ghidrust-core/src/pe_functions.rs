@@ -514,6 +514,26 @@ mod tests {
     }
 
     #[test]
+    fn function_start_preserves_pdata_span_past_early_ret() {
+        let mut bytes = minimal_pe_with_pdata();
+        // First ret is early, but the RUNTIME_FUNCTION span continues through
+        // padding and a second return at its exact exclusive end.
+        bytes[0x400..0x408].copy_from_slice(&[0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xC3]);
+        let mut prog = crate::pe::load_pe(&bytes, "pdata_early_ret").expect("load PE");
+        let report = crate::analyzers::run_analyzers(&mut prog, &["Function Start Search"])
+            .expect("run function start search");
+        let function = report.results[0]
+            .functions
+            .as_ref()
+            .expect("function list")
+            .iter()
+            .find(|function| function.entry == 0x140001000)
+            .expect("pdata seed");
+        assert_eq!(function.end, 0x140001008);
+        assert_eq!(function.seed_kind, Some(FunctionSeedKind::Pdata));
+    }
+
+    #[test]
     fn chaininfo_embedded_node_not_seeded() {
         // Build UNWIND_INFO with CHAININFO + embedded RUNTIME_FUNCTION begin=0.
         let mut bytes = minimal_pe_with_pdata();
