@@ -165,6 +165,12 @@ pub struct DisasmRangeResult {
     pub first_gap_va: Option<u64>,
     /// Why the walk stopped.
     pub stop_reason: DisasmStopReason,
+    /// First address that could not be decoded when `stop_reason` is `DecodeFail`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_error_va: Option<u64>,
+    /// Decoder diagnostic for `decode_error_va`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decode_error: Option<String>,
     /// Containing / resolved function entry when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry: Option<u64>,
@@ -272,6 +278,8 @@ fn disasm_linear(
     let mut decode_gaps = 0usize;
     let mut first_gap_va = None;
     let mut stop_reason = DisasmStopReason::Count;
+    let mut decode_error_va = None;
+    let mut decode_error = None;
     let max_steps = if skip_bad {
         max_insns.saturating_mul(8).max(max_insns)
     } else {
@@ -285,7 +293,7 @@ fn disasm_linear(
                 va = va.wrapping_add(len);
                 out.push(insn);
             }
-            Err(_) => {
+            Err(error) => {
                 if skip_bad {
                     if first_gap_va.is_none() {
                         first_gap_va = Some(va);
@@ -295,6 +303,8 @@ fn disasm_linear(
                     continue;
                 }
                 stop_reason = DisasmStopReason::DecodeFail;
+                decode_error_va = Some(va);
+                decode_error = Some(error.to_string());
                 break;
             }
         }
@@ -310,6 +320,8 @@ fn disasm_linear(
         decode_gaps,
         first_gap_va,
         stop_reason,
+        decode_error_va,
+        decode_error,
         entry: None,
         end: None,
     })
@@ -330,6 +342,8 @@ fn disasm_bounded(
     let mut decode_gaps = 0usize;
     let mut first_gap_va = None;
     let mut stop_reason = DisasmStopReason::Count;
+    let mut decode_error_va = None;
+    let mut decode_error = None;
     let max_steps = if skip_bad {
         max_insns.saturating_mul(8).max(max_insns)
     } else {
@@ -364,7 +378,7 @@ fn disasm_bounded(
                 out.push(insn);
                 va = next;
             }
-            Err(_) => {
+            Err(error) => {
                 if skip_bad {
                     if first_gap_va.is_none() {
                         first_gap_va = Some(va);
@@ -374,6 +388,8 @@ fn disasm_bounded(
                     continue;
                 }
                 stop_reason = DisasmStopReason::DecodeFail;
+                decode_error_va = Some(va);
+                decode_error = Some(error.to_string());
                 break;
             }
         }
@@ -389,6 +405,8 @@ fn disasm_bounded(
         decode_gaps,
         first_gap_va,
         stop_reason,
+        decode_error_va,
+        decode_error,
         entry: None,
         end: None,
     })
@@ -407,6 +425,8 @@ fn disasm_flow(
     let mut decode_gaps = 0usize;
     let mut first_gap_va = None;
     let mut stop_reason = DisasmStopReason::Count;
+    let mut decode_error_va = None;
+    let mut decode_error = None;
     let mut visited = HashSet::new();
     let mut queue = VecDeque::new();
     queue.push_back(start);
@@ -453,7 +473,7 @@ fn disasm_flow(
                     queue.push_back(fallthrough);
                 }
             }
-            Err(_) => {
+            Err(error) => {
                 if skip_bad {
                     if first_gap_va.is_none() {
                         first_gap_va = Some(va);
@@ -466,6 +486,8 @@ fn disasm_flow(
                     continue;
                 }
                 stop_reason = DisasmStopReason::DecodeFail;
+                decode_error_va = Some(va);
+                decode_error = Some(error.to_string());
                 if out.is_empty() {
                     break;
                 }
@@ -494,6 +516,8 @@ fn disasm_flow(
         decode_gaps,
         first_gap_va,
         stop_reason,
+        decode_error_va,
+        decode_error,
         entry: None,
         end: None,
     })

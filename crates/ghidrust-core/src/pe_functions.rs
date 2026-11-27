@@ -55,6 +55,21 @@ pub fn parse_runtime_functions(prog: &Program) -> Vec<RuntimeFunction> {
         if begin_rva == 0 || end_rva <= begin_rva {
             continue;
         }
+        let (Some(begin_va), Some(end_va)) = (
+            image_base.checked_add(begin_rva as u64),
+            image_base.checked_add(end_rva as u64),
+        ) else {
+            continue;
+        };
+        // The exception directory describes code ranges. Reject malformed or
+        // stale rows that point into data/unmapped memory instead of turning
+        // them into false function entries. EndAddress is exclusive and may
+        // equal the end of an executable block. Contiguous executable blocks
+        // are accepted, but unmapped gaps and non-executable regions are not.
+        let mapped_executable_range = range_is_fully_executable(prog, begin_va, end_va);
+        if !mapped_executable_range {
+            continue;
+        }
         let chained = unwind_is_chained(data, unwind_rva);
         // Pure chain descriptor with no real begin is already filtered (begin==0).
         // Embedded chain nodes live inside UNWIND_INFO and are never seeded here.
@@ -62,12 +77,37 @@ pub fn parse_runtime_functions(prog: &Program) -> Vec<RuntimeFunction> {
             begin_rva,
             end_rva,
             unwind_rva,
-            begin_va: image_base.wrapping_add(begin_rva as u64),
-            end_va: image_base.wrapping_add(end_rva as u64),
+            begin_va,
+            end_va,
             chained,
         });
     }
     out
+}
+
+fn range_is_fully_executable(prog: &Program, begin_va: u64, end_va: u64) -> bool {
+    if begin_va >= end_va {
+        return false;
+    }
+    let mut covered_until = begin_va;
+    while covered_until < end_va {
+        let next = prog
+            .blocks
+            .iter()
+            .filter(|block| block.executable)
+            .map(|block| (block.va, block.va.saturating_add(block.size)))
+            .filter(|(start, end)| *start <= covered_until && *end > covered_until)
+            .map(|(_, end)| end.min(end_va))
+            .max();
+        let Some(next) = next else {
+            return false;
+        };
+        if next <= covered_until {
+            return false;
+        }
+        covered_until = next;
+    }
+    true
 }
 
 /// Convert RUNTIME_FUNCTION entries into seed FunctionInfo records (pdata ends).
@@ -511,6 +551,38 @@ mod tests {
         let seeded = functions_from_runtime(&rts);
         assert_eq!(seeded[0].seed_kind, Some(FunctionSeedKind::Pdata));
         assert_eq!(seeded[0].end, 0x140001008);
+    }
+
+    #[test]
+    fn parse_pdata_rejects_non_executable_and_out_of_section_ranges() {
+        let mut non_executable = minimal_pe_with_pdata();
+        non_executable[0x600..0x604].copy_from_slice(&0x2000u32.to_le_bytes());
+        non_executable[0x604..0x608].copy_from_slice(&0x2008u32.to_le_bytes());
+        let prog = crate::pe::load_pe(&non_executable, "pdata_non_code").expect("load PE");
+        assert!(parse_runtime_functions(&prog).is_empty());
+
+        let mut out_of_section = minimal_pe_with_pdata();
+        out_of_section[0x604..0x608].copy_from_slice(&0x3000u32.to_le_bytes());
+        let prog = crate::pe::load_pe(&out_of_section, "pdata_cross_section").expect("load PE");
+        assert!(parse_runtime_functions(&prog).is_empty());
+    }
+
+    #[test]
+    fn executable_range_check_allows_adjacent_code_blocks_without_gaps() {
+        let mut prog = Program::new("adjacent-code".into(), "PE32+");
+        for (va, size) in [(0x1000, 4), (0x1004, 4)] {
+            prog.blocks.push(MemoryBlock {
+                name: "code".into(),
+                va,
+                size,
+                bytes: vec![0x90; size as usize],
+                readable: true,
+                writable: false,
+                executable: true,
+            });
+        }
+        assert!(range_is_fully_executable(&prog, 0x1002, 0x1006));
+        assert!(!range_is_fully_executable(&prog, 0x1002, 0x1009));
     }
 
     #[test]
