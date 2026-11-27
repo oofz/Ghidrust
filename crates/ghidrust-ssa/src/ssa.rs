@@ -217,79 +217,105 @@ pub fn build_ssa(cfg: &Cfg) -> SsaFunction {
     }
 }
 
+/// Iterative dominator-tree SSA rename (Cytron algorithm, step 3).
+///
+/// Uses an explicit work stack instead of recursion so that arbitrarily
+/// deep dominator trees cannot overflow the call stack. Each frame on the
+/// work stack mirrors one activation of the original recursive
+/// `rename_block`: it records which keys were pushed so they can be
+/// popped when backtracking.
 fn rename_block(
-    b: u32,
+    root: u32,
     cfg: &Cfg,
     ssa_blocks: &mut [SsaBlock],
     dom_children: &[Vec<u32>],
     versions: &mut BTreeMap<(AddrSpace, u64), u32>,
     stacks: &mut HashMap<(AddrSpace, u64), Vec<u32>>,
 ) {
-    // Track keys we push so we can pop them at the end (Cytron style).
-    let mut pushed: Vec<(AddrSpace, u64)> = Vec::new();
-
-    // 3a. Phis define new values.
-    for phi in &mut ssa_blocks[b as usize].phis {
-        let key = (phi.out.space, phi.out.offset);
-        let v = new_version(versions, key);
-        phi.out.version = v;
-        stacks.entry(key).or_default().push(v);
-        pushed.push(key);
+    // Work item: either Enter(block) to process it, or Leave(pushed_keys) to
+    // pop the keys that block pushed.
+    enum Work {
+        Enter(u32),
+        Leave(Vec<(AddrSpace, u64)>),
     }
 
-    // 3b. Rename op stream. We consume the pre-SSA ops from the original CFG
-    //     block and produce SsaOps; the block was seeded empty above.
-    let src_ops = cfg.blocks[b as usize].ops.clone();
-    for op in src_ops {
-        let inputs: Vec<SsaOperand> = op.inputs.iter().map(|v| rename_input(v, stacks)).collect();
-        let output = op.output.as_ref().map(|v| {
-            let key = (v.space, v.offset);
-            let ver = new_version(versions, key);
-            stacks.entry(key).or_default().push(ver);
-            pushed.push(key);
-            SsaValue {
-                space: v.space,
-                offset: v.offset,
-                size: v.size,
-                version: ver,
-            }
-        });
-        ssa_blocks[b as usize].ops.push(SsaOp {
-            opcode: op.opcode,
-            output,
-            inputs,
-            note: op.note.clone(),
-        });
-    }
+    let mut work: Vec<Work> = vec![Work::Enter(root)];
 
-    // 3c. Fill in successor phi slots with the current stack tops.
-    let succs = ssa_blocks[b as usize].successors.clone();
-    for s in succs {
-        for phi in ssa_blocks[s as usize].phis.iter_mut() {
-            let key = (phi.out.space, phi.out.offset);
-            let tos = stacks.get(&key).and_then(|st| st.last().copied());
-            for (pred, slot) in phi.incoming.iter_mut() {
-                if *pred == b {
-                    *slot = tos.map(|ver| SsaValue {
-                        space: phi.out.space,
-                        offset: phi.out.offset,
-                        size: phi.out.size,
-                        version: ver,
+    while let Some(item) = work.pop() {
+        match item {
+            Work::Enter(b) => {
+                let mut pushed: Vec<(AddrSpace, u64)> = Vec::new();
+
+                // 3a. Phis define new values.
+                for phi in &mut ssa_blocks[b as usize].phis {
+                    let key = (phi.out.space, phi.out.offset);
+                    let v = new_version(versions, key);
+                    phi.out.version = v;
+                    stacks.entry(key).or_default().push(v);
+                    pushed.push(key);
+                }
+
+                // 3b. Rename op stream.
+                let src_ops = cfg.blocks[b as usize].ops.clone();
+                for op in src_ops {
+                    let inputs: Vec<SsaOperand> =
+                        op.inputs.iter().map(|v| rename_input(v, stacks)).collect();
+                    let output = op.output.as_ref().map(|v| {
+                        let key = (v.space, v.offset);
+                        let ver = new_version(versions, key);
+                        stacks.entry(key).or_default().push(ver);
+                        pushed.push(key);
+                        SsaValue {
+                            space: v.space,
+                            offset: v.offset,
+                            size: v.size,
+                            version: ver,
+                        }
+                    });
+                    ssa_blocks[b as usize].ops.push(SsaOp {
+                        opcode: op.opcode,
+                        output,
+                        inputs,
+                        note: op.note.clone(),
                     });
                 }
+
+                // 3c. Fill in successor phi slots.
+                let succs = ssa_blocks[b as usize].successors.clone();
+                for s in succs {
+                    for phi in ssa_blocks[s as usize].phis.iter_mut() {
+                        let key = (phi.out.space, phi.out.offset);
+                        let tos = stacks.get(&key).and_then(|st| st.last().copied());
+                        for (pred, slot) in phi.incoming.iter_mut() {
+                            if *pred == b {
+                                *slot = tos.map(|ver| SsaValue {
+                                    space: phi.out.space,
+                                    offset: phi.out.offset,
+                                    size: phi.out.size,
+                                    version: ver,
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Schedule Leave (pop) BEFORE children so it runs AFTER them.
+                work.push(Work::Leave(pushed));
+
+                // 3d. Push dominator-tree children (reverse order so leftmost
+                //     is processed first).
+                for &c in dom_children[b as usize].iter().rev() {
+                    work.push(Work::Enter(c));
+                }
             }
-        }
-    }
-
-    // 3d. Recurse on dominator-tree children.
-    for &c in &dom_children[b as usize] {
-        rename_block(c, cfg, ssa_blocks, dom_children, versions, stacks);
-    }
-
-    // 3e. Pop everything we pushed.
-    for key in pushed.into_iter().rev() {
-        if let Some(st) = stacks.get_mut(&key) {
-            st.pop();
+            Work::Leave(pushed) => {
+                // 3e. Pop everything this block pushed (reverse order).
+                for key in pushed.into_iter().rev() {
+                    if let Some(st) = stacks.get_mut(&key) {
+                        st.pop();
+                    }
+                }
+            }
         }
     }
 }
@@ -509,7 +535,7 @@ pub fn const_fold(func: &mut SsaFunction) -> usize {
                                 if src_size >= 8 {
                                     a & mask
                                 } else {
-                                    let bits = (src_size * 8) as u32;
+                                    let bits = src_size * 8;
                                     let sign_bit = 1u64 << (bits - 1);
                                     if a & sign_bit != 0 {
                                         let ext = !((1u64 << bits) - 1);

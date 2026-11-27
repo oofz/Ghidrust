@@ -45,7 +45,14 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
                 .read_va(f.entry, (f.end - f.entry) as usize)
                 .unwrap_or_default();
             let has_ret = bytes.contains(&0xC3);
-            let has_int3 = bytes.contains(&0xCC);
+            // Function discovery deliberately excludes an `int3 int3` padding
+            // run from the function interval. Treat that immediately adjacent
+            // terminal trap run as body evidence too, otherwise a no-return
+            // body ending at the padding boundary is missed.
+            let has_int3 = bytes.contains(&0xCC)
+                || prog
+                    .read_va(f.end, 2)
+                    .is_some_and(|tail| tail.as_slice() == [0xCC, 0xCC]);
             (f.entry, !has_ret && has_int3)
         })
         .collect();

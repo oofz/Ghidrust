@@ -95,7 +95,9 @@ pub use machine::{
 };
 pub use pe_functions::{
     create_function, create_function_with_kind, functions_from_runtime, grow_function,
-    parse_export_code_vas, parse_runtime_functions, runtime_function_containing, RuntimeFunction,
+    parse_export_code_vas, parse_runtime_functions, parse_runtime_functions_report,
+    runtime_function_containing, RejectedRuntimeFunction, RuntimeFunction,
+    RuntimeFunctionParseReport,
 };
 pub use process::{
     launch_command_line, live_process_info_json, process_attach, process_attach_opts,

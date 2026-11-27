@@ -188,6 +188,12 @@ pub fn bench_program_stage1_parallel(
     conv: CallConv,
 ) -> BenchReport {
     use rayon::prelude::*;
+    // Use Rayon’s normal worker stacks; recursive passes are depth-bounded
+    // and Region rendering uses an explicit work stack.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .build()
+        .expect("failed to build rayon thread pool");
+
     let mut targets: Vec<(String, u64)> = if let Some(es) = entries {
         es.iter()
             .map(|&e| {
@@ -223,10 +229,12 @@ pub fn bench_program_stage1_parallel(
             Some((name, entry, insns))
         })
         .collect();
-    let per_function: Vec<FunctionBench> = prepared
-        .par_iter()
-        .map(|(name, entry, insns)| bench_one_stage1(name, *entry, insns, conv))
-        .collect();
+    let per_function: Vec<FunctionBench> = pool.install(|| {
+        prepared
+            .par_iter()
+            .map(|(name, entry, insns)| bench_one_stage1(name, *entry, insns, conv))
+            .collect()
+    });
     finalize(prog.name.clone(), per_function)
 }
 

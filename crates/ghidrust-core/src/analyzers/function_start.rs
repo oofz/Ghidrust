@@ -3,7 +3,7 @@
 use super::AnalyzerOutput;
 use crate::error::Result;
 use crate::pe_functions::{
-    grow_function, parse_export_code_vas, parse_runtime_functions, RuntimeFunction,
+    grow_function, parse_export_code_vas, parse_runtime_functions_report, RuntimeFunction,
 };
 use crate::program::{FunctionInfo, FunctionSeedKind, Program};
 
@@ -11,7 +11,9 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     let mut seeds: Vec<(u64, FunctionSeedKind, Option<u64>, Option<String>)> = Vec::new();
 
     // 1) PE Exception Directory — authoritative begins/ends (mandatory PE64 pass).
-    let runtime: Vec<RuntimeFunction> = parse_runtime_functions(prog);
+    let runtime_report = parse_runtime_functions_report(prog);
+    let runtime: Vec<RuntimeFunction> = runtime_report.functions;
+    let rejected_jump_tables = runtime_report.rejected_jump_tables;
     for rf in &runtime {
         seeds.push((rf.begin_va, FunctionSeedKind::Pdata, Some(rf.end_va), None));
     }
@@ -69,6 +71,15 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
         }
     }
 
+    // A proven jump-table range is data even though PE marked its containing
+    // section executable. Do not reintroduce it through weaker prologue/export
+    // seeds after the authoritative pdata record was classified.
+    seeds.retain(|(va, _, _, _)| {
+        !rejected_jump_tables
+            .iter()
+            .any(|rejection| *va >= rejection.function.begin_va && *va < rejection.function.end_va)
+    });
+
     // Prefer pdata / export over weaker seeds at the same VA.
     seeds.sort_by(|(a, ka, _, _), (b, kb, _, _)| {
         a.cmp(b)
@@ -98,13 +109,10 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     let mut raw: Vec<FunctionInfo> = Vec::new();
     for (i, (entry, kind, pdata_end, name_opt)) in seeds.iter().enumerate() {
         let next_seed = seeds.get(i + 1).map(|(v, _, _, _)| *v);
-        let hard = match (pdata_end, next_seed) {
-            (Some(pe), Some(ns)) => Some((*pe).min(ns)),
-            (Some(pe), None) => Some(*pe),
-            (None, Some(ns)) => Some(ns),
-            (None, None) => None,
-        };
-        let end = grow_function(prog, *entry, hard);
+        // PE runtime-function ends are authoritative metadata. `grow_function`
+        // intentionally stops at the first `ret`, which truncates functions with
+        // multiple return sites or hot/cold fragments when applied to `.pdata`.
+        let end = resolved_function_end(prog, *entry, kind, *pdata_end, next_seed);
         let name = name_opt
             .clone()
             .or_else(|| {
@@ -122,10 +130,7 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     raw.sort_by_key(|f| f.entry);
     let mut functions = Vec::new();
     for f in raw {
-        let covered = functions
-            .iter()
-            .any(|prev: &FunctionInfo| f.entry > prev.entry && f.entry < prev.end);
-        if covered {
+        if is_covered_by_prior(&functions, &f) {
             continue;
         }
         functions.push(f);
@@ -144,15 +149,52 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
         .filter(|f| f.seed_kind == Some(FunctionSeedKind::Pdata))
         .count();
     prog.analysis.functions = functions.clone();
+    let mut message =
+        format!("identified {n} function start(s) ({pdata_n} from PE Exception Directory)");
+    if !rejected_jump_tables.is_empty() {
+        let addresses = rejected_jump_tables
+            .iter()
+            .map(|rejection| format!("{:#x}", rejection.function.begin_va))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            "; excluded {} verified CHAININFO jump-table data range(s) at {addresses}",
+            rejected_jump_tables.len()
+        ));
+    }
     Ok(AnalyzerOutput {
         name: "Function Start Search".into(),
         status: "ok".into(),
-        message: format!(
-            "identified {n} function start(s) ({pdata_n} from PE Exception Directory)"
-        ),
+        message,
         functions: Some(functions),
         ..Default::default()
     })
+}
+
+fn resolved_function_end(
+    prog: &Program,
+    entry: u64,
+    kind: &FunctionSeedKind,
+    pdata_end: Option<u64>,
+    next_seed: Option<u64>,
+) -> u64 {
+    if *kind == FunctionSeedKind::Pdata {
+        if let Some(end) = pdata_end.filter(|end| *end > entry) {
+            return end;
+        }
+    }
+    grow_function(prog, entry, next_seed)
+}
+
+fn is_covered_by_prior(functions: &[FunctionInfo], candidate: &FunctionInfo) -> bool {
+    // Preserve every authoritative `.pdata` record, including overlapping
+    // chained fragments. An inferred interval must not silently discard one.
+    if candidate.seed_kind == Some(FunctionSeedKind::Pdata) {
+        return false;
+    }
+    functions
+        .iter()
+        .any(|prev| candidate.entry > prev.entry && candidate.entry < prev.end)
 }
 
 fn seed_priority(k: &FunctionSeedKind) -> u8 {
@@ -163,5 +205,58 @@ fn seed_priority(k: &FunctionSeedKind) -> u8 {
         FunctionSeedKind::Prologue => 3,
         FunctionSeedKind::Manual => 4,
         FunctionSeedKind::Synthesized => 5,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::MemoryBlock;
+
+    fn program_with_early_return() -> Program {
+        let mut prog = Program::new("pdata-span".into(), "PE32+");
+        let bytes = vec![0xC3, 0x90, 0xC3];
+        prog.blocks.push(MemoryBlock {
+            name: ".text".into(),
+            va: 0x1000,
+            size: bytes.len() as u64,
+            bytes,
+            readable: true,
+            writable: false,
+            executable: true,
+        });
+        prog
+    }
+
+    #[test]
+    fn pdata_end_is_preserved_past_first_return() {
+        let prog = program_with_early_return();
+        let end = resolved_function_end(
+            &prog,
+            0x1000,
+            &FunctionSeedKind::Pdata,
+            Some(0x1003),
+            Some(0x1003),
+        );
+        assert_eq!(grow_function(&prog, 0x1000, Some(0x1003)), 0x1001);
+        assert_eq!(end, 0x1003);
+    }
+
+    #[test]
+    fn overlapping_pdata_entries_are_retained_but_inferred_seed_is_dropped() {
+        let pdata_a =
+            FunctionInfo::new(0x1000, 0x1010, "pdata_a").with_seed_kind(FunctionSeedKind::Pdata);
+        let pdata_b =
+            FunctionInfo::new(0x1008, 0x1018, "pdata_b").with_seed_kind(FunctionSeedKind::Pdata);
+        let inferred = FunctionInfo::new(0x1009, 0x100c, "inferred")
+            .with_seed_kind(FunctionSeedKind::Prologue);
+        assert!(!is_covered_by_prior(
+            std::slice::from_ref(&pdata_a),
+            &pdata_b
+        ));
+        assert!(is_covered_by_prior(
+            std::slice::from_ref(&pdata_a),
+            &inferred
+        ));
     }
 }
