@@ -81,6 +81,8 @@ mod tests {
             region: Region::Seq(kids),
             loops: Vec::new(),
             post_dominators: Vec::new(),
+            construction_cost: 0,
+            unstructured_fallback: false,
         }
     }
 

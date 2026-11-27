@@ -369,6 +369,70 @@ fn render_region_iter(r: &Region, ind: usize, ctx: &mut RenderCtx, out: &mut Str
                 render_block_body(*block, level, ctx, out, false);
             }
             Region::Goto(block) => out.push_str(&format!("{}goto block_{block};\n", pad(level))),
+            Region::Unstructured(blocks) => {
+                // This is a complete CFG listing, not a best-effort structured
+                // tree: emit each block body once and spell out its outgoing
+                // edges. Conditional successor order is established by
+                // build_cfg: branch target first, fallthrough second.
+                for block in blocks {
+                    out.push_str(&format!("{}block_{}:\n", pad(level), block.block));
+                    // render_block_body normally owns label emission; the
+                    // explicit fallback label above keeps it adjacent to
+                    // the edge listing, so mark it emitted first.
+                    ctx.rendered_blocks.insert(block.block);
+                    render_block_body(block.block, level, ctx, out, true);
+                    match block.successors.as_slice() {
+                        [] => {}
+                        [target] => out.push_str(&format!("{}goto block_{target};\n", pad(level))),
+                        [taken, fallthrough]
+                            if ctx
+                                .ssa
+                                .block(block.block)
+                                .and_then(|b| b.ops.last())
+                                .is_some_and(|op| op.opcode == OpCode::CBranch) =>
+                        {
+                            let condition = branch_condition(ctx.ssa, block.block);
+                            out.push_str(&format!(
+                                "{}if ({condition}) goto block_{taken};\n{}goto block_{fallthrough};\n",
+                                pad(level),
+                                pad(level)
+                            ));
+                        }
+                        successors => {
+                            // Keep indirect control flow executable in the
+                            // pseudocode while listing every CFG destination.
+                            let edges = successors
+                                .iter()
+                                .map(|target| format!("block_{target}"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let indirect = ctx
+                                .ssa
+                                .block(block.block)
+                                .filter(|b| {
+                                    matches!(
+                                        b.ops.last().map(|op| op.opcode),
+                                        Some(OpCode::BranchInd)
+                                    )
+                                })
+                                .and_then(|b| b.ops.last())
+                                .and_then(|op| op.inputs.first())
+                                .map(|target| format_operand_ctx(target, ctx));
+                            if let Some(target) = indirect {
+                                out.push_str(&format!(
+                                    "{}goto *({target}); /* CFG destinations: {edges} */\n",
+                                    pad(level)
+                                ));
+                            } else {
+                                out.push_str(&format!(
+                                    "{}/* multi-edge CFG transfer; destinations: {edges} */\n",
+                                    pad(level)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
             Region::Break => out.push_str(&format!("{}break;\n", pad(level))),
             Region::Continue => out.push_str(&format!("{}continue;\n", pad(level))),
             Region::Seq(regions) => {

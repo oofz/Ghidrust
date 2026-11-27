@@ -54,6 +54,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 /// to prevent stack overflow on functions with deeply nested CFGs
 /// (e.g. compiler-generated state machines, switch cascades).
 const MAX_STRUCTURE_DEPTH: usize = 256;
+/// Maximum number of materialized structure nodes per function. This is a
+/// work budget, not a recursion limit: each node and each candidate branch
+/// expansion is charged before it is constructed.
+pub const DEFAULT_MAX_REGION_NODES: usize = 16_384;
 
 // stacker removed: all recursive walks are bounded by MAX_STRUCTURE_DEPTH
 // (the Region tree cannot exceed that depth).
@@ -135,6 +139,9 @@ pub enum Region {
     /// `goto block_<id>;` — unstructured fallback for edges that don't fit
     /// any pattern (irreducible graphs, unresolved indirect branches).
     Goto(u32),
+    /// Bounded, lossless fallback. Each reachable block is emitted once
+    /// under its own label and every CFG successor is represented explicitly.
+    Unstructured(Vec<UnstructuredBlock>),
     /// `switch (var) { case K: … }` — recovered from a computed jump at the
     /// header whose targets are supplied via [`StructureHints::switches`].
     ///
@@ -158,6 +165,14 @@ pub enum Region {
         then_branch: Box<Region>,
         else_branch: Option<Box<Region>>,
     },
+}
+
+/// One block and its complete CFG successor list for the unstructured
+/// fallback. The block body itself remains in the corresponding SSA block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnstructuredBlock {
+    pub block: u32,
+    pub successors: Vec<u32>,
 }
 
 /// One arm of a recovered `switch`. `selector` is the integer case value
@@ -198,6 +213,7 @@ impl Region {
     pub fn block_count(&self) -> usize {
         match self {
             Region::Block(_) | Region::Return(_) | Region::Goto(_) => 1,
+            Region::Unstructured(blocks) => blocks.len(),
             Region::Break | Region::Continue => 1,
             Region::Seq(rs) => rs.iter().map(|r| r.block_count()).sum(),
             Region::IfThen { then_branch, .. } => 1 + then_branch.block_count(),
@@ -227,7 +243,7 @@ impl Region {
     /// Depth of nested control-flow constructs.
     pub fn depth(&self) -> usize {
         match self {
-            Region::Block(_) | Region::Return(_) | Region::Goto(_) => 0,
+            Region::Block(_) | Region::Return(_) | Region::Goto(_) | Region::Unstructured(_) => 0,
             Region::Break | Region::Continue => 0,
             Region::Seq(rs) => rs.iter().map(|r| r.depth()).max().unwrap_or(0),
             Region::IfThen { then_branch, .. } => 1 + then_branch.depth(),
@@ -272,6 +288,7 @@ impl Region {
             Region::Block(b) | Region::Return(b) | Region::Goto(b) => {
                 set.insert(*b);
             }
+            Region::Unstructured(blocks) => set.extend(blocks.iter().map(|b| b.block)),
             Region::Break | Region::Continue => {}
             Region::Seq(rs) => rs.iter().for_each(|r| r.collect_blocks(set)),
             Region::IfThen {
@@ -340,6 +357,11 @@ pub struct StructureReport {
     pub region: Region,
     pub loops: Vec<NaturalLoop>,
     pub post_dominators: Vec<u32>,
+    /// Number of construction steps charged by the structurer.
+    pub construction_cost: usize,
+    /// Set when the configured per-function budget forced the lossless CFG
+    /// fallback. A fallback is complete, but less structured.
+    pub unstructured_fallback: bool,
 }
 
 /// A single natural loop: `header → … → latch → header`, plus all body
@@ -369,12 +391,37 @@ pub fn structure_function_with_hints(
     ssa: &SsaFunction,
     hints: &StructureHints,
 ) -> StructureReport {
+    structure_function_with_budget(cfg, ssa, hints, DEFAULT_MAX_REGION_NODES)
+}
+
+/// Like [`structure_function_with_hints`] with a caller-selected construction
+/// budget. A zero budget selects the lossless unstructured representation.
+pub fn structure_function_with_budget(
+    cfg: &Cfg,
+    ssa: &SsaFunction,
+    hints: &StructureHints,
+    max_region_nodes: usize,
+) -> StructureReport {
     let n = cfg.blocks.len();
     if n == 0 {
         return StructureReport {
             region: Region::Seq(Vec::new()),
             loops: Vec::new(),
             post_dominators: Vec::new(),
+            construction_cost: 0,
+            unstructured_fallback: false,
+        };
+    }
+    // Avoid running loop/post-dominator analyses whose work can exceed the
+    // requested per-function region budget. The fallback itself is linear in
+    // reachable blocks and retains all successor edges.
+    if n > max_region_nodes {
+        return StructureReport {
+            region: unstructured_cfg(cfg),
+            loops: Vec::new(),
+            post_dominators: vec![u32::MAX; n],
+            construction_cost: 0,
+            unstructured_fallback: true,
         };
     }
     let dom = cfg.dominators();
@@ -389,44 +436,89 @@ pub fn structure_function_with_hints(
         loops: &loops,
         switches: &switch_targets,
         loop_stack: Vec::new(),
+        construction_cost: 0,
+        max_region_nodes,
+        exceeded_budget: false,
     };
     let mut visited: HashSet<u32> = HashSet::new();
-    let raw = ctx.build_region_from(ENTRY_BLOCK, None, &mut visited, 0);
-    // The depth fallback intentionally leaves an edge as `Goto`. Keep a
-    // concrete region for every otherwise-unemitted block reachable from
-    // entry, so the emitter can provide a body and label for each target.
+    let raw = if ctx.exceeded_budget {
+        Region::Seq(Vec::new())
+    } else {
+        ctx.build_region_from(ENTRY_BLOCK, None, &mut visited, 0)
+    };
+    let (raw, unstructured_fallback) = if ctx.exceeded_budget {
+        (unstructured_cfg(cfg), true)
+    } else {
+        // The depth fallback intentionally leaves an edge as `Goto`. Keep a
+        // concrete region for every otherwise-unemitted block reachable from
+        // entry, so the emitter can provide a body and label for each target.
+        let mut reachable = BTreeSet::new();
+        let mut pending = VecDeque::from([ENTRY_BLOCK]);
+        while let Some(block) = pending.pop_front() {
+            if !reachable.insert(block) {
+                continue;
+            }
+            if let Some(cfg_block) = cfg.blocks.get(block as usize) {
+                pending.extend(cfg_block.successors.iter().copied());
+            }
+        }
+        let mut fallback_blocks = Vec::new();
+        for block in reachable {
+            if visited.insert(block) {
+                fallback_blocks.push(Region::Block(block));
+            }
+        }
+        let raw = if fallback_blocks.is_empty() {
+            raw
+        } else {
+            let mut regions = vec![raw];
+            regions.extend(fallback_blocks);
+            Region::Seq(regions)
+        };
+        (raw, false)
+    };
+    let flattened = flatten_short_circuit(raw, ssa);
+    // R3: `if (cond) goto return_block` → `if (cond) return` when the
+    // target leaf is a Return region (early-exit polish).
+    let polished = promote_early_returns(flattened, ssa);
+    let construction_cost = ctx.construction_cost;
+    drop(ctx);
+    StructureReport {
+        region: polished,
+        loops,
+        post_dominators: pdom,
+        construction_cost,
+        unstructured_fallback,
+    }
+}
+
+fn unstructured_cfg(cfg: &Cfg) -> Region {
     let mut reachable = BTreeSet::new();
     let mut pending = VecDeque::from([ENTRY_BLOCK]);
     while let Some(block) = pending.pop_front() {
         if !reachable.insert(block) {
             continue;
         }
-        if let Some(cfg_block) = cfg.blocks.get(block as usize) {
-            pending.extend(cfg_block.successors.iter().copied());
+        if let Some(b) = cfg.blocks.get(block as usize) {
+            pending.extend(b.successors.iter().copied());
         }
     }
-    let mut fallback_blocks = Vec::new();
-    for block in reachable {
-        if visited.insert(block) {
-            fallback_blocks.push(Region::Block(block));
-        }
-    }
-    let raw = if fallback_blocks.is_empty() {
-        raw
-    } else {
-        let mut regions = vec![raw];
-        regions.extend(fallback_blocks);
-        Region::Seq(regions)
-    };
-    let flattened = flatten_short_circuit(raw, ssa);
-    // R3: `if (cond) goto return_block` → `if (cond) return` when the
-    // target leaf is a Return region (early-exit polish).
-    let polished = promote_early_returns(flattened, ssa);
-    StructureReport {
-        region: polished,
-        loops,
-        post_dominators: pdom,
-    }
+    Region::Unstructured(
+        reachable
+            .into_iter()
+            .filter_map(|block| {
+                cfg.blocks.get(block as usize).map(|b| UnstructuredBlock {
+                    block,
+                    successors: b
+                        .successors
+                        .iter()
+                        .copied()
+                        .filter(|s| (*s as usize) < cfg.blocks.len())
+                        .collect(),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Rewrite `IfThen { h, Goto(t) }` / `IfThenElse` arms into `Return(t)` when
@@ -653,6 +745,9 @@ struct StructCtx<'a> {
     /// `continue;` instead of goto when they hit the loop's canonical exit
     /// or its header. The innermost loop is at the top of the stack.
     loop_stack: Vec<LoopFrame>,
+    construction_cost: usize,
+    max_region_nodes: usize,
+    exceeded_budget: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -682,11 +777,11 @@ impl<'a> StructCtx<'a> {
         visited: &mut HashSet<u32>,
         depth: usize,
     ) -> Region {
+        if self.exceeded_budget {
+            return Region::Goto(start);
+        }
         if depth > MAX_STRUCTURE_DEPTH {
-            // Depth limit reached — emit a Goto to avoid stack overflow.
-            // The decompiled output will show a goto instead of structured
-            // code for this deeply-nested region, which is acceptable for
-            // correctness.
+            self.exceeded_budget = true;
             return Region::Goto(start);
         }
         let mut seq: Vec<Region> = Vec::new();
@@ -703,6 +798,11 @@ impl<'a> StructCtx<'a> {
                 seq.push(self.loop_terminator_for(b));
                 break;
             }
+            if self.construction_cost >= self.max_region_nodes {
+                self.exceeded_budget = true;
+                return collapse_seq(seq);
+            }
+            self.construction_cost += 1;
 
             // Loop handling.
             if let Some(l) = self.loop_at(b) {
@@ -720,33 +820,37 @@ impl<'a> StructCtx<'a> {
                         .copied()
                         .filter(|p| *p != u32::MAX && *p != b)
                 });
-                let cases: Vec<SwitchCase> = sw
-                    .cases
-                    .iter()
-                    .map(|(sel, tgt)| {
-                        let mut case_visited: HashSet<u32> = HashSet::new();
-                        case_visited.insert(b);
-                        let body = self.build_region_from(*tgt, stop, &mut case_visited, depth + 1);
-                        for cb in case_visited {
-                            visited.insert(cb);
-                        }
-                        SwitchCase {
-                            selector: *sel,
-                            target: *tgt,
-                            body: Box::new(body),
-                        }
-                    })
-                    .collect();
+                let mut cases: Vec<SwitchCase> = Vec::new();
+                for (sel, tgt) in &sw.cases {
+                    if self.exceeded_budget {
+                        break;
+                    }
+                    if self.construction_cost >= self.max_region_nodes {
+                        self.exceeded_budget = true;
+                        break;
+                    }
+                    self.construction_cost += 1;
+                    let body = if visited.contains(tgt) {
+                        Region::Goto(*tgt)
+                    } else {
+                        // Share the function-wide visited set so shared case
+                        // tails are emitted once and later cases jump to them.
+                        self.build_region_from(*tgt, stop, visited, depth + 1)
+                    };
+                    cases.push(SwitchCase {
+                        selector: *sel,
+                        target: *tgt,
+                        body: Box::new(body),
+                    });
+                }
                 let default_region = sw.default.map(|d| {
+                    if self.exceeded_budget {
+                        return Box::new(Region::Goto(d));
+                    }
                     if visited.contains(&d) {
                         Box::new(Region::Goto(d))
                     } else {
-                        let mut dv: HashSet<u32> = HashSet::new();
-                        dv.insert(b);
-                        let r = self.build_region_from(d, stop, &mut dv, depth + 1);
-                        for cb in dv {
-                            visited.insert(cb);
-                        }
+                        let r = self.build_region_from(d, stop, visited, depth + 1);
                         Box::new(r)
                     }
                 });
@@ -773,6 +877,11 @@ impl<'a> StructCtx<'a> {
             if succs.len() == 2 && ends_in_cbranch(block) {
                 let (then_id, else_id) = (succs[0], succs[1]);
                 let join = self.if_join(then_id, else_id, stop_at);
+                if self.construction_cost >= self.max_region_nodes {
+                    self.exceeded_budget = true;
+                    return collapse_seq(seq);
+                }
+                self.construction_cost += 1;
                 let then_branch =
                     Box::new(self.build_region_from(then_id, join, visited, depth + 1));
                 let else_branch = if let Some(join) = join {
@@ -1004,20 +1113,41 @@ impl<'a> StructCtx<'a> {
     /// Pick the join point for an if header. Falls back to the immediate
     /// post-dominator of the header block.
     fn if_join(&self, then_id: u32, else_id: u32, stop_at: Option<u32>) -> Option<u32> {
-        let post_then = self.pdom.get(then_id as usize).copied();
-        let post_else = self.pdom.get(else_id as usize).copied();
-        let candidates = [post_then, post_else];
-        let mut best: Option<u32> = None;
-        for c in candidates.into_iter().flatten() {
-            if c == u32::MAX || c == then_id || c == else_id {
-                continue;
+        let mut then_chain = BTreeSet::new();
+        let mut current = then_id;
+        for _ in 0..=self.pdom.len() {
+            if current as usize >= self.pdom.len()
+                || current == u32::MAX
+                || !then_chain.insert(current)
+            {
+                break;
             }
-            if Some(c) == stop_at {
-                continue;
+            let next = self.pdom[current as usize];
+            if next == current || next == u32::MAX {
+                break;
             }
-            best = Some(c);
+            current = next;
         }
-        best
+
+        let mut current = else_id;
+        let mut seen = BTreeSet::new();
+        for _ in 0..=self.pdom.len() {
+            if current as usize >= self.pdom.len() || current == u32::MAX || !seen.insert(current) {
+                break;
+            }
+            if then_chain.contains(&current) {
+                // A convergence outside the caller's region is still the
+                // correct stop point; the caller will stop there as well.
+                return Some(current);
+            }
+            let next = self.pdom[current as usize];
+            if next == current || next == u32::MAX {
+                break;
+            }
+            current = next;
+        }
+        let _ = stop_at;
+        None
     }
 }
 
@@ -1223,6 +1353,16 @@ fn render(r: &Region, indent: usize, out: &mut String) {
         Region::Break => out.push_str(&format!("{pad}break;\n")),
         Region::Continue => out.push_str(&format!("{pad}continue;\n")),
         Region::Goto(b) => out.push_str(&format!("{pad}goto block_{b};\n")),
+        Region::Unstructured(blocks) => {
+            for b in blocks {
+                out.push_str(&format!("{pad}block_{}: ", b.block));
+                if b.successors.is_empty() {
+                    out.push_str("<terminal>\n");
+                } else {
+                    out.push_str(&format!("goto {:?};\n", b.successors));
+                }
+            }
+        }
         Region::Seq(rs) => {
             for r in rs {
                 render(r, indent, out);
@@ -1391,6 +1531,7 @@ pub fn flatten_short_circuit(r: Region, ssa: &SsaFunction) -> Region {
         leaf @ (Region::Block(_)
         | Region::Return(_)
         | Region::Goto(_)
+        | Region::Unstructured(_)
         | Region::Break
         | Region::Continue) => leaf,
     }
@@ -1535,6 +1676,7 @@ pub fn loop_count(report: &StructureReport) -> usize {
 pub fn goto_count(region: &Region) -> usize {
     match region {
         Region::Goto(_) => 1,
+        Region::Unstructured(blocks) => blocks.iter().map(|b| b.successors.len()).sum(),
         Region::Seq(rs) => rs.iter().map(goto_count).sum(),
         Region::IfThen { then_branch, .. } => goto_count(then_branch),
         Region::IfThenElse {
@@ -1568,6 +1710,7 @@ pub fn region_leaf_count(region: &Region) -> usize {
         | Region::Goto(_)
         | Region::Break
         | Region::Continue => 1,
+        Region::Unstructured(blocks) => blocks.len(),
         Region::Seq(rs) => rs.iter().map(region_leaf_count).sum(),
         Region::IfThen { then_branch, .. } => 1 + region_leaf_count(then_branch),
         Region::IfThenElse {
@@ -1666,15 +1809,245 @@ fn walk(r: &Region, map: &mut BTreeMap<u32, Region>) {
 mod tests {
     use super::*;
     use ghidrust_decode::decode_bytes;
-    use ghidrust_ir::{IrSequence, PcodeOp, Varnode};
+    use ghidrust_ir::{BasicBlock, IrSequence, PcodeOp, Varnode};
     use ghidrust_lift::lift_instructions;
-    use ghidrust_ssa::{build_cfg, build_ssa};
+    use ghidrust_ssa::{build_cfg, build_ssa, Cfg, SsaBlock};
+
+    /// Construct exact synthetic graphs without decoder/layout assumptions.
+    /// `terminators` selects only control-flow classification; all topology is
+    /// explicit in `edges`, matching the CFG contract consumed by structuring.
+    fn graph(edges: &[&[u32]], terminators: &[OpCode]) -> (Cfg, SsaFunction) {
+        assert_eq!(edges.len(), terminators.len());
+        let n = edges.len();
+        let mut blocks = Vec::with_capacity(n);
+        let mut ssa_blocks = Vec::with_capacity(n);
+        let mut block_of_addr = BTreeMap::new();
+        for (id, (successors, opcode)) in edges.iter().zip(terminators).enumerate() {
+            let id = id as u32;
+            let start = 0x1000 + u64::from(id) * 0x10;
+            let mut block = BasicBlock::new(id);
+            block.start = Some(start);
+            block.end = Some(start + 1);
+            block.successors = successors.to_vec();
+            block_of_addr.insert(start, id);
+            blocks.push(block);
+            ssa_blocks.push(SsaBlock {
+                id,
+                ops: vec![ghidrust_ssa::SsaOp {
+                    opcode: *opcode,
+                    output: None,
+                    inputs: Vec::new(),
+                    note: None,
+                }],
+                successors: successors.to_vec(),
+                start: Some(start),
+                end: Some(start + 1),
+                ..Default::default()
+            });
+        }
+        (
+            Cfg {
+                blocks,
+                block_of_addr,
+                external_exits: Vec::new(),
+            },
+            SsaFunction {
+                entry: 0,
+                blocks: ssa_blocks,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn assert_complete_fallback(cfg: &Cfg, report: &StructureReport) {
+        let Region::Unstructured(blocks) = &report.region else {
+            panic!(
+                "expected lossless unstructured fallback, got {:?}",
+                report.region
+            );
+        };
+        let reachable = reachable_blocks(cfg);
+        let emitted: BTreeSet<_> = blocks.iter().map(|block| block.block).collect();
+        assert_eq!(emitted.len(), blocks.len(), "fallback duplicated a block");
+        assert_eq!(
+            emitted, reachable,
+            "fallback omitted or added reachable blocks"
+        );
+        let expected_edges: BTreeSet<_> = reachable
+            .iter()
+            .flat_map(|&src| {
+                cfg.blocks[src as usize]
+                    .successors
+                    .iter()
+                    .filter(|dst| reachable.contains(dst))
+                    .map(move |&dst| (src, dst))
+            })
+            .collect();
+        let actual_edges: BTreeSet<_> = blocks
+            .iter()
+            .flat_map(|block| block.successors.iter().map(move |&dst| (block.block, dst)))
+            .collect();
+        assert_eq!(
+            actual_edges, expected_edges,
+            "fallback did not preserve every reachable CFG edge"
+        );
+        for (_, dst) in &actual_edges {
+            assert!(
+                emitted.contains(dst),
+                "goto destination block_{dst} has no fallback label"
+            );
+        }
+        assert_eq!(report.region.touched_blocks(), reachable);
+    }
+
+    fn reachable_blocks(cfg: &Cfg) -> BTreeSet<u32> {
+        let mut seen = BTreeSet::new();
+        let mut pending = VecDeque::from([ENTRY_BLOCK]);
+        while let Some(block) = pending.pop_front() {
+            if !seen.insert(block) {
+                continue;
+            }
+            pending.extend(cfg.blocks[block as usize].successors.iter().copied());
+        }
+        seen
+    }
+
+    #[test]
+    fn successive_diamonds_obey_budget_and_fallback_preserves_all_edges() {
+        // Each pair of arms converges on the next conditional. Shared joins
+        // must not be recursively reconstructed once per incoming arm.
+        let mut edges: Vec<Vec<u32>> = vec![vec![1, 2], vec![3], vec![3]];
+        let mut terms = vec![OpCode::CBranch, OpCode::Branch, OpCode::Branch];
+        let mut join = 3u32;
+        for _ in 0..12 {
+            let left = join + 1;
+            let right = join + 2;
+            let next_join = join + 3;
+            edges.push(vec![left, right]);
+            edges.push(vec![next_join]);
+            edges.push(vec![next_join]);
+            terms.push(OpCode::CBranch);
+            terms.push(OpCode::Branch);
+            terms.push(OpCode::Branch);
+            join = next_join;
+        }
+        edges.push(Vec::new());
+        terms.push(OpCode::Return);
+        let edge_refs: Vec<&[u32]> = edges.iter().map(Vec::as_slice).collect();
+        let (cfg, ssa) = graph(&edge_refs, &terms);
+        let structured = structure_function(&cfg, &ssa);
+        assert!(!structured.unstructured_fallback);
+        assert!(structured.construction_cost <= DEFAULT_MAX_REGION_NODES);
+        assert!(
+            structured.region.block_count() <= cfg.blocks.len() * 3,
+            "successive diamonds duplicated their shared tails: {} nodes for {} blocks",
+            structured.region.block_count(),
+            cfg.blocks.len()
+        );
+        let report = structure_function_with_budget(&cfg, &ssa, &StructureHints::default(), 32);
+        assert!(
+            report.construction_cost <= 32,
+            "cost {} exceeded budget",
+            report.construction_cost
+        );
+        assert!(
+            report.unstructured_fallback,
+            "adversarial graph should switch to bounded CFG form"
+        );
+        assert_complete_fallback(&cfg, &report);
+    }
+
+    #[test]
+    fn switch_with_shared_destinations_falls_back_without_duplicate_subgraphs() {
+        let (cfg, ssa) = graph(
+            &[&[1, 2, 3], &[4], &[4], &[4], &[]],
+            &[
+                OpCode::BranchInd,
+                OpCode::Branch,
+                OpCode::Branch,
+                OpCode::Branch,
+                OpCode::Return,
+            ],
+        );
+        let hints = StructureHints::with_switches(vec![SwitchHint {
+            jump_va: 0x1000,
+            cases: vec![(0, 0x1010), (1, 0x1020), (2, 0x1030)],
+        }]);
+        let report = structure_function_with_budget(&cfg, &ssa, &hints, 2);
+        assert!(report.construction_cost <= 2);
+        assert_complete_fallback(&cfg, &report);
+
+        let structured = structure_function_with_budget(&cfg, &ssa, &hints, 64);
+        assert!(!structured.unstructured_fallback);
+        assert!(structured.construction_cost <= 64);
+        assert!(structured.region.block_count() <= 2 * cfg.blocks.len());
+    }
+
+    #[test]
+    fn nested_loops_have_bounded_construction_and_lossless_fallback() {
+        // Outer header 1 encloses inner header 2/latch 3; both loops exit to 5.
+        let (cfg, ssa) = graph(
+            &[&[1], &[2, 5], &[3, 4], &[2], &[1], &[]],
+            &[
+                OpCode::Branch,
+                OpCode::CBranch,
+                OpCode::CBranch,
+                OpCode::Branch,
+                OpCode::Branch,
+                OpCode::Return,
+            ],
+        );
+        let report = structure_function_with_budget(&cfg, &ssa, &StructureHints::default(), 3);
+        assert!(report.construction_cost <= 3);
+        assert_complete_fallback(&cfg, &report);
+    }
+
+    #[test]
+    fn irreducible_multi_entry_scc_preserves_all_edges_in_fallback() {
+        // Entry reaches both members of an SCC, so neither member dominates
+        // the other; the graph is irreducible and must retain both exits/edges.
+        let (cfg, ssa) = graph(
+            &[&[1, 2], &[2, 3], &[1, 3], &[]],
+            &[
+                OpCode::CBranch,
+                OpCode::CBranch,
+                OpCode::CBranch,
+                OpCode::Return,
+            ],
+        );
+        let report = structure_function_with_budget(&cfg, &ssa, &StructureHints::default(), 2);
+        assert!(report.construction_cost <= 2);
+        assert_complete_fallback(&cfg, &report);
+    }
+
+    #[test]
+    fn deeply_nested_if_graph_switches_to_lossless_fallback() {
+        let depth = 300usize;
+        let mut edges = Vec::with_capacity(depth + 1);
+        let mut terms = Vec::with_capacity(depth + 1);
+        for block in 0..depth {
+            edges.push(vec![(block + 1) as u32, depth as u32]);
+            terms.push(OpCode::CBranch);
+        }
+        edges.push(Vec::new());
+        terms.push(OpCode::Return);
+        let edge_refs: Vec<&[u32]> = edges.iter().map(Vec::as_slice).collect();
+        let (cfg, ssa) = graph(&edge_refs, &terms);
+        let report = structure_function_with_budget(&cfg, &ssa, &StructureHints::default(), 1_000);
+        assert!(
+            report.unstructured_fallback,
+            "depth cap must be explicit fallback"
+        );
+        assert!(report.construction_cost <= 1_000);
+        assert_complete_fallback(&cfg, &report);
+    }
 
     fn collect_concrete_blocks(region: &Region, out: &mut BTreeSet<u32>) {
         match region {
             Region::Block(b) | Region::Return(b) => {
                 out.insert(*b);
             }
+            Region::Unstructured(blocks) => out.extend(blocks.iter().map(|block| block.block)),
             Region::Goto(_) | Region::Break | Region::Continue => {}
             Region::Seq(children) => children
                 .iter()
@@ -2149,7 +2522,8 @@ mod tests {
         }
     }
 
-    /// Deeply nested CFG should produce Goto fallbacks without panicking.
+    /// Deep CFG should remain complete without relying on a particular
+    /// structured-vs-fallback representation.
     #[test]
     fn deeply_nested_cfg_produces_gotos() {
         let result = std::thread::Builder::new()
@@ -2178,9 +2552,8 @@ mod tests {
                 let cfg = build_cfg(&seq, 0, end);
                 let ssa = build_ssa(&cfg);
                 let rep = structure_function(&cfg, &ssa);
-                let text = dump_region(&rep.region);
-                // Must have gotos from the depth limit:
-                assert!(text.contains("goto"), "expected goto fallbacks in deep CFG");
+                assert!(rep.construction_cost <= DEFAULT_MAX_REGION_NODES);
+                assert_eq!(coverage(&rep), cfg.blocks.len());
                 // Every entry-reachable CFG block has a concrete emitted body
                 // or structured header; a Goto reference alone is insufficient.
                 let mut concrete = BTreeSet::new();
