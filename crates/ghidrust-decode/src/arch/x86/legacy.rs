@@ -1138,10 +1138,15 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                     let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
                     ("pand".into(), format!("{xmm}, {rm}"))
                 }
-                // PUNPCKLBW and PCMPEQB, XMM forms (SSE2 mandatory 66 prefix).
-                0x60 | 0x74 if pfx.op_size && !pfx.rep && !pfx.repne => {
+                // PUNPCKLBW/PUNPCKLDQ/PUNPCKLQDQ and PCMPEQB, XMM forms.
+                0x60 | 0x62 | 0x6C | 0x74 if pfx.op_size && !pfx.rep && !pfx.repne => {
                     let (xmm, rm) = decode_sse_xmm_rm(&mut cur, pfx)?;
-                    let mnemonic = if op2 == 0x60 { "punpcklbw" } else { "pcmpeqb" };
+                    let mnemonic = match op2 {
+                        0x60 => "punpcklbw",
+                        0x62 => "punpckldq",
+                        0x6C => "punpcklqdq",
+                        _ => "pcmpeqb",
+                    };
                     (mnemonic.into(), format!("{xmm}, {rm}"))
                 }
                 // PMOVMSKB r32, xmm (register source only).
@@ -1519,6 +1524,17 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
                 mnemonic.to_string()
             };
             (mnemonic, String::new())
+        }
+        // REP STOSB and REP STOSW/STOSD/STOSQ. The repeat prefix and width
+        // stay in the mnemonic because Instruction has no prefix field.
+        0xAA if pfx.rep => ("rep stosb".into(), String::new()),
+        0xAB if pfx.rep => {
+            let mnemonic = match gp_width(pfx) {
+                8 => "rep stosq",
+                2 => "rep stosw",
+                _ => "rep stosd",
+            };
+            (mnemonic.into(), String::new())
         }
         // FE /0 INC and /1 DEC r/m8.
         0xFE => {
@@ -2128,5 +2144,42 @@ mod tests {
         let tzcnt = decode_one(&[0xf3, 0x48, 0x0f, 0xbc, 0xf5], 0x1000).unwrap();
         assert_eq!(tzcnt.mnemonic, "tzcnt");
         assert_eq!(tzcnt.operands, "rsi, rbp");
+    }
+
+    #[test]
+    fn decode_ripgrep_packed_unpack_low_variants() {
+        let qword = decode_one(&[0x66, 0x0f, 0x6c, 0xc1], 0x1000).unwrap();
+        assert_eq!(qword.mnemonic, "punpcklqdq");
+        assert_eq!(qword.operands, "xmm0, xmm1");
+        assert_eq!(qword.length, 4);
+
+        let dword_mem = decode_one(&[0x66, 0x0f, 0x62, 0x44, 0x24, 0x08], 0x1000).unwrap();
+        assert_eq!(dword_mem.mnemonic, "punpckldq");
+        assert_eq!(dword_mem.operands, "xmm0, [rsp+0x8]");
+        assert_eq!(dword_mem.length, 6);
+
+        let byte_compare = decode_one(&[0x66, 0x0f, 0x74, 0xc1], 0x1000).unwrap();
+        assert_eq!(byte_compare.mnemonic, "pcmpeqb");
+        assert_eq!(byte_compare.operands, "xmm0, xmm1");
+    }
+
+    #[test]
+    fn decode_rep_stos_width_and_prefix() {
+        let byte = decode_one(&[0xf3, 0xaa], 0x1000).unwrap();
+        assert_eq!(byte.mnemonic, "rep stosb");
+        assert_eq!(byte.operands, "");
+        assert_eq!(byte.length, 2);
+
+        let dword = decode_one(&[0xf3, 0xab], 0x1000).unwrap();
+        assert_eq!(dword.mnemonic, "rep stosd");
+        assert_eq!(dword.length, 2);
+
+        let qword = decode_one(&[0xf3, 0x48, 0xab], 0x1000).unwrap();
+        assert_eq!(qword.mnemonic, "rep stosq");
+        assert_eq!(qword.length, 3);
+
+        let word = decode_one(&[0x66, 0xf3, 0xab], 0x1000).unwrap();
+        assert_eq!(word.mnemonic, "rep stosw");
+        assert_eq!(word.length, 3);
     }
 }
