@@ -1362,13 +1362,13 @@ pub fn decode_one(bytes: &[u8], address: u64) -> Result<Instruction> {
             (mnemonic, String::new())
         }
         // OR/XOR r8,r8 forms used with and without a REX prefix.
-        0x08 | 0x0A | 0x30 | 0x32 => {
+        0x08 | 0x0A | 0x2A | 0x30 | 0x32 => {
             let modrm = cur.get()?;
             let (reg, rm) = decode_modrm_sized(&mut cur, modrm, pfx, true, 1)?;
-            let mnem = if op == 0x08 || op == 0x0A {
-                "or"
-            } else {
-                "xor"
+            let mnem = match op {
+                0x08 | 0x0A => "or",
+                0x2A => "sub",
+                _ => "xor",
             };
             if op == 0x08 || op == 0x30 {
                 (
@@ -1819,5 +1819,21 @@ mod tests {
         assert_eq!(movsq.mnemonic, "rep movsq");
         assert_eq!(movsq.operands, "");
         assert_eq!(movsq.length, 3);
+    }
+
+    #[test]
+    fn decode_sqlite_sub_byte_register_from_memory() {
+        // 2a 85 ef 08 00 00 sub al, byte ptr [rbp+0x8ef]
+        let i = decode_one(&[0x2a, 0x85, 0xef, 0x08, 0x00, 0x00], 0x1000).unwrap();
+        assert_eq!(i.mnemonic, "sub");
+        assert_eq!(i.operands, "al, byte ptr [rbp+0x8ef]");
+        assert_eq!(i.length, 6);
+    }
+
+    #[test]
+    fn x87_fninit_stays_unsupported_without_lifter_semantics() {
+        // DB E3 is FNINIT. Keep it a decode failure until the lifter can
+        // preserve its FPU state effect instead of accepting then dropping it.
+        assert!(decode_one(&[0xdb, 0xe3], 0x1000).is_err());
     }
 }
