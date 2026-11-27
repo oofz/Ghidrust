@@ -3,7 +3,7 @@
 use super::AnalyzerOutput;
 use crate::error::Result;
 use crate::pe_functions::{
-    grow_function, parse_export_code_vas, parse_runtime_functions, RuntimeFunction,
+    grow_function, parse_export_code_vas, parse_runtime_functions_report, RuntimeFunction,
 };
 use crate::program::{FunctionInfo, FunctionSeedKind, Program};
 
@@ -11,7 +11,9 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
     let mut seeds: Vec<(u64, FunctionSeedKind, Option<u64>, Option<String>)> = Vec::new();
 
     // 1) PE Exception Directory — authoritative begins/ends (mandatory PE64 pass).
-    let runtime: Vec<RuntimeFunction> = parse_runtime_functions(prog);
+    let runtime_report = parse_runtime_functions_report(prog);
+    let runtime: Vec<RuntimeFunction> = runtime_report.functions;
+    let rejected_jump_tables = runtime_report.rejected_jump_tables;
     for rf in &runtime {
         seeds.push((rf.begin_va, FunctionSeedKind::Pdata, Some(rf.end_va), None));
     }
@@ -68,6 +70,15 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
             i += 1;
         }
     }
+
+    // A proven jump-table range is data even though PE marked its containing
+    // section executable. Do not reintroduce it through weaker prologue/export
+    // seeds after the authoritative pdata record was classified.
+    seeds.retain(|(va, _, _, _)| {
+        !rejected_jump_tables
+            .iter()
+            .any(|rejection| *va >= rejection.function.begin_va && *va < rejection.function.end_va)
+    });
 
     // Prefer pdata / export over weaker seeds at the same VA.
     seeds.sort_by(|(a, ka, _, _), (b, kb, _, _)| {
@@ -138,12 +149,23 @@ pub fn run(prog: &mut Program) -> Result<AnalyzerOutput> {
         .filter(|f| f.seed_kind == Some(FunctionSeedKind::Pdata))
         .count();
     prog.analysis.functions = functions.clone();
+    let mut message =
+        format!("identified {n} function start(s) ({pdata_n} from PE Exception Directory)");
+    if !rejected_jump_tables.is_empty() {
+        let addresses = rejected_jump_tables
+            .iter()
+            .map(|rejection| format!("{:#x}", rejection.function.begin_va))
+            .collect::<Vec<_>>()
+            .join(", ");
+        message.push_str(&format!(
+            "; excluded {} verified CHAININFO jump-table data range(s) at {addresses}",
+            rejected_jump_tables.len()
+        ));
+    }
     Ok(AnalyzerOutput {
         name: "Function Start Search".into(),
         status: "ok".into(),
-        message: format!(
-            "identified {n} function start(s) ({pdata_n} from PE Exception Directory)"
-        ),
+        message,
         functions: Some(functions),
         ..Default::default()
     })

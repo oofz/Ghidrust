@@ -2,7 +2,7 @@
 //!
 //! Hand-rolled PE parse. Industry-aligned function seeding for PE64.
 
-use crate::disasm::decode_one;
+use crate::disasm::{decode_one, Instruction};
 use crate::program::{FunctionInfo, FunctionSeedKind, Program};
 use serde::{Deserialize, Serialize};
 
@@ -24,25 +24,46 @@ pub struct RuntimeFunction {
     pub chained: bool,
 }
 
+/// Result of reading the PE exception directory. Verified jump-table ranges
+/// are returned as diagnostics instead of being silently exposed as functions.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RuntimeFunctionParseReport {
+    pub functions: Vec<RuntimeFunction>,
+    pub rejected_jump_tables: Vec<RejectedRuntimeFunction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RejectedRuntimeFunction {
+    pub function: RuntimeFunction,
+    pub reason: String,
+}
+
 /// Parse PE Exception Directory / .pdata into runtime function ranges.
 ///
 /// Honors UNW_FLAG_CHAININFO by following the chain for classification; does not
 /// invent separate functions for embedded chain-node RUNTIME_FUNCTION records
 /// that lack a real BeginAddress (BeginAddress == 0), and skips zero-length /
-/// empty begins.
+/// empty begins. Verified CHAININFO jump-table data rows are excluded; use
+/// [`parse_runtime_functions_report`] when the exclusion diagnostics are needed.
 pub fn parse_runtime_functions(prog: &Program) -> Vec<RuntimeFunction> {
+    parse_runtime_functions_report(prog).functions
+}
+
+/// Parse runtime functions and retain diagnostics for rigorously verified
+/// CHAININFO ranges that are actually relative jump-table data.
+pub fn parse_runtime_functions_report(prog: &Program) -> RuntimeFunctionParseReport {
     if !prog.format.to_ascii_lowercase().starts_with("pe") {
-        return Vec::new();
+        return RuntimeFunctionParseReport::default();
     }
     let data = &prog.file_bytes;
     let Some((exc_rva, exc_size)) = pe_data_directory(data, 3) else {
-        return Vec::new();
+        return RuntimeFunctionParseReport::default();
     };
     if exc_rva == 0 || exc_size < 12 {
-        return Vec::new();
+        return RuntimeFunctionParseReport::default();
     }
     let Some(mut off) = rva_to_file(data, exc_rva as u64) else {
-        return Vec::new();
+        return RuntimeFunctionParseReport::default();
     };
     let end_off = off + exc_size as usize;
     let image_base = prog.image_base;
@@ -82,7 +103,18 @@ pub fn parse_runtime_functions(prog: &Program) -> Vec<RuntimeFunction> {
             chained,
         });
     }
-    out
+
+    let mut report = RuntimeFunctionParseReport::default();
+    for function in out.iter().copied() {
+        if let Some(reason) = verified_chained_jump_table(prog, data, function, &out) {
+            report
+                .rejected_jump_tables
+                .push(RejectedRuntimeFunction { function, reason });
+        } else {
+            report.functions.push(function);
+        }
+    }
+    report
 }
 
 fn range_is_fully_executable(prog: &Program, begin_va: u64, end_va: u64) -> bool {
@@ -108,6 +140,260 @@ fn range_is_fully_executable(prog: &Program, begin_va: u64, end_va: u64) -> bool
         covered_until = next;
     }
     true
+}
+
+fn chained_parent(data: &[u8], rf: RuntimeFunction) -> Option<(u32, u32, u32)> {
+    if !rf.chained {
+        return None;
+    }
+    let unwind_off = rva_to_file(data, rf.unwind_rva as u64)?;
+    if unwind_off.checked_add(4)? > data.len() {
+        return None;
+    }
+    let count_codes = *data.get(unwind_off + 2)? as usize;
+    let code_bytes = count_codes.checked_mul(2)?;
+    let aligned_code_bytes = code_bytes.checked_add(3)? & !3;
+    let chain_off = unwind_off.checked_add(4)?.checked_add(aligned_code_bytes)?;
+    if chain_off.checked_add(12)? > data.len() {
+        return None;
+    }
+    Some((
+        rdu32(data, chain_off),
+        rdu32(data, chain_off + 4),
+        rdu32(data, chain_off + 8),
+    ))
+}
+
+/// Return a diagnostic only for the specific, fully validated pattern:
+/// adjacent CHAININFO code and table records share a known parent; the owner
+/// contains the exact bounded indexed-RVA-load/add/indirect-jump sequence; and
+/// every table cell is an independently decoded instruction start in the owner.
+fn verified_chained_jump_table(
+    prog: &Program,
+    data: &[u8],
+    table: RuntimeFunction,
+    records: &[RuntimeFunction],
+) -> Option<String> {
+    if !table.chained || table.begin_rva % 4 != 0 || table.end_rva <= table.begin_rva {
+        return None;
+    }
+    let table_len = table.end_rva.checked_sub(table.begin_rva)? as usize;
+    if table_len < 8 || table_len > 256 || table_len % 4 != 0 {
+        return None;
+    }
+
+    let parent = chained_parent(data, table)?;
+    let known_parent_count = records
+        .iter()
+        .filter(|rf| (rf.begin_rva, rf.end_rva, rf.unwind_rva) == parent)
+        .count();
+    if known_parent_count != 1 {
+        return None;
+    }
+
+    let owners: Vec<_> = records
+        .iter()
+        .copied()
+        .filter(|rf| {
+            rf.end_rva == table.begin_rva
+                && rf.chained
+                && chained_parent(data, *rf) == Some(parent)
+                && rf.begin_rva < rf.end_rva
+        })
+        .collect();
+    if owners.len() != 1 {
+        return None;
+    }
+    let owner = owners[0];
+    let owner_len = owner.end_va.checked_sub(owner.begin_va)?;
+    if owner_len == 0 || owner_len > 64 * 1024 {
+        return None;
+    }
+
+    // Do a bounded linear decode of the owner. A decode gap means that the
+    // boundary proof is incomplete, so the candidate must remain a function.
+    let mut instructions = Vec::new();
+    let mut va = owner.begin_va;
+    while va < owner.end_va {
+        let bytes = prog.read_va(va, 15)?;
+        let instruction = decode_one(&bytes, va).ok()?;
+        let next = va.checked_add(instruction.length as u64)?;
+        if instruction.length == 0 || next > owner.end_va {
+            return None;
+        }
+        instructions.push(instruction);
+        va = next;
+    }
+    let instruction_starts: std::collections::HashSet<u64> =
+        instructions.iter().map(|i| i.address).collect();
+
+    let table_bytes = prog.read_va(table.begin_va, table_len)?;
+    if table_bytes.len() != table_len {
+        return None;
+    }
+    let targets: Vec<u32> = table_bytes
+        .chunks_exact(4)
+        .map(|cell| u32::from_le_bytes(cell.try_into().unwrap()))
+        .collect();
+    if targets.len() < 2
+        || targets
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            < 2
+    {
+        return None;
+    }
+
+    let Some(load_index) = find_bounded_rva_dispatch(
+        prog.image_base,
+        table.begin_rva,
+        targets.len(),
+        &instructions,
+        &instruction_starts,
+        owner.begin_va,
+        owner.end_va,
+    ) else {
+        return None;
+    };
+
+    for target_rva in &targets {
+        let target_va = prog.image_base.checked_add(*target_rva as u64)?;
+        if target_rva < &owner.begin_rva
+            || target_rva >= &owner.end_rva
+            || !instruction_starts.contains(&target_va)
+        {
+            return None;
+        }
+        let bytes = prog.read_va(target_va, 15)?;
+        let target_instruction = decode_one(&bytes, target_va).ok()?;
+        if target_instruction.length == 0
+            || target_va.checked_add(target_instruction.length as u64)? > owner.end_va
+        {
+            return None;
+        }
+    }
+
+    Some(format!(
+        "verified CHAININFO RVA jump table: {} cells, bounded dispatch at {:#x}, all destinations are instruction starts in the owner code range",
+        targets.len(), instructions[load_index].address
+    ))
+}
+
+fn find_bounded_rva_dispatch(
+    image_base: u64,
+    table_rva: u32,
+    entry_count: usize,
+    instructions: &[Instruction],
+    instruction_starts: &std::collections::HashSet<u64>,
+    owner_begin: u64,
+    owner_end: u64,
+) -> Option<usize> {
+    if entry_count < 2 {
+        return None;
+    }
+    for i in 4..instructions.len().saturating_sub(2) {
+        let compare = &instructions[i - 4];
+        let branch = &instructions[i - 3];
+        let base_setup = &instructions[i - 2];
+        let sign_extend = &instructions[i - 1];
+        let load = &instructions[i];
+        let add = &instructions[i + 1];
+        let jump = &instructions[i + 2];
+
+        if compare.mnemonic != "cmp"
+            || compare.operands != format!("eax, {:#x}", entry_count - 1)
+            || branch.mnemonic != "ja"
+            || base_setup.mnemonic != "lea"
+            || sign_extend.mnemonic != "cdqe"
+            || load.mnemonic != "mov"
+            || add.mnemonic != "add"
+            || jump.mnemonic != "jmp"
+        {
+            continue;
+        }
+        let Some(branch_target) = parse_operand_address(&branch.operands) else {
+            continue;
+        };
+        if branch_target < owner_begin || branch_target >= owner_end {
+            continue;
+        }
+        if !instruction_starts.contains(&branch_target) {
+            continue;
+        }
+        let Some((base_register, destination_register)) =
+            parse_exact_indexed_rva_load(&load.operands, table_rva)
+        else {
+            continue;
+        };
+        let Some((base_setup_register, _)) = base_setup.operands.split_once(", ") else {
+            continue;
+        };
+        if base_setup_register != base_register {
+            continue;
+        }
+        if parse_rip_relative_lea_target(base_setup) != Some(image_base) {
+            continue;
+        }
+        if add.operands != format!("{}, {}", register64(&destination_register)?, base_register)
+            || jump.operands != destination_register
+        {
+            continue;
+        }
+        if load.address.checked_add(load.length as u64)? != add.address
+            || add.address.checked_add(add.length as u64)? != jump.address
+        {
+            continue;
+        }
+        return Some(i);
+    }
+    None
+}
+
+fn parse_exact_indexed_rva_load(operands: &str, table_rva: u32) -> Option<(String, String)> {
+    let (destination, memory) = operands.split_once(", [")?;
+    let memory = memory.strip_suffix(']')?;
+    let mut components = memory.split('+');
+    let base = components.next()?.to_string();
+    let index = components.next()?;
+    let displacement = components.next()?;
+    if components.next().is_some()
+        || !index.ends_with("*4")
+        || displacement != format!("{:#x}", table_rva)
+    {
+        return None;
+    }
+    let index_register = index.strip_suffix("*4")?;
+    if index_register != "rax" || base != "r8" || destination != "ecx" {
+        return None;
+    }
+    Some((base, destination.to_string()))
+}
+
+fn register64(register32: &str) -> Option<&'static str> {
+    match register32 {
+        "ecx" => Some("rcx"),
+        _ => None,
+    }
+}
+
+fn parse_rip_relative_lea_target(instruction: &Instruction) -> Option<u64> {
+    let (_, operand) = instruction.operands.split_once(", [rip")?;
+    let expression = operand.strip_suffix(']')?;
+    let (sign, displacement) = match expression.as_bytes().first().copied()? {
+        b'+' => (1i64, &expression[1..]),
+        b'-' => (-1i64, &expression[1..]),
+        _ => return None,
+    };
+    let displacement = i64::from_str_radix(displacement.strip_prefix("0x")?, 16).ok()?;
+    let next = instruction.address.checked_add(instruction.length as u64)?;
+    let target = (next as i64).checked_add(sign.checked_mul(displacement)?)?;
+    u64::try_from(target).ok()
+}
+
+fn parse_operand_address(operand: &str) -> Option<u64> {
+    u64::from_str_radix(operand.strip_prefix("0x")?, 16).ok()
 }
 
 /// Convert RUNTIME_FUNCTION entries into seed FunctionInfo records (pdata ends).
@@ -537,6 +823,57 @@ mod tests {
         data[off + 36..off + 40].copy_from_slice(&chars.to_le_bytes());
     }
 
+    fn chained_table_fixture(entry_count: usize) -> Vec<u8> {
+        let mut data = minimal_pe_with_pdata();
+        let opt = 0x98;
+        let exception_size = opt + 112 + 3 * 8 + 4;
+        data[exception_size..exception_size + 4].copy_from_slice(&36u32.to_le_bytes());
+
+        let parent_unwind_rva = 0x2060u32;
+        let rows = [
+            (0x1000u32, 0x1008u32, parent_unwind_rva),
+            (0x1008, 0x1040, 0x2040),
+            (0x1040, 0x1040 + (entry_count as u32 * 4), 0x2050),
+        ];
+        for (index, (begin, end, unwind)) in rows.into_iter().enumerate() {
+            let off = 0x600 + index * 12;
+            data[off..off + 4].copy_from_slice(&begin.to_le_bytes());
+            data[off + 4..off + 8].copy_from_slice(&end.to_le_bytes());
+            data[off + 8..off + 12].copy_from_slice(&unwind.to_le_bytes());
+        }
+
+        // CHAININFO records for owner and table both name the exact parent row.
+        for off in [0x640, 0x650] {
+            data[off..off + 4].copy_from_slice(&[0x21, 0, 0, 0]);
+            data[off + 4..off + 8].copy_from_slice(&0x1000u32.to_le_bytes());
+            data[off + 8..off + 12].copy_from_slice(&0x1008u32.to_le_bytes());
+            data[off + 12..off + 16].copy_from_slice(&parent_unwind_rva.to_le_bytes());
+        }
+        data[0x660..0x664].copy_from_slice(&[0x01, 0, 0, 0]);
+
+        // Parent prologue, then a strict bounded relative-RVA dispatch:
+        // cmp eax, 1; ja default; lea r8, [image_base]; cdqe;
+        // mov ecx, [r8+rax*4+table_rva]; add rcx, r8; jmp ecx.
+        let mut code = vec![0x90; 0x40];
+        let owner_code = [
+            0x83, 0xF8, 0x01, 0x77, 0x23, 0x4C, 0x8D, 0x05, 0xEC, 0xEF, 0xFF, 0xFF, 0x48, 0x98,
+            0x41, 0x8B, 0x8C, 0x80, 0x40, 0x10, 0x00, 0x00, 0x49, 0x03, 0xC8, 0xFF, 0xE1,
+        ];
+        code[8..8 + owner_code.len()].copy_from_slice(&owner_code);
+        // These are the two indirect destinations, followed by a valid default.
+        code[0x28..0x2e].copy_from_slice(&[0xB8, 0x01, 0, 0, 0, 0xC3]);
+        code[0x30..0x34].copy_from_slice(&[0x31, 0xC0, 0xC3, 0x90]);
+        data[0x400..0x440].copy_from_slice(&code);
+
+        let table_off = 0x440;
+        let targets = [0x1028u32, 0x1030, 0x1034];
+        for (index, target) in targets.iter().take(entry_count).enumerate() {
+            let off = table_off + index * 4;
+            data[off..off + 4].copy_from_slice(&target.to_le_bytes());
+        }
+        data
+    }
+
     #[test]
     fn parse_pdata_runtime_functions() {
         let bytes = minimal_pe_with_pdata();
@@ -565,6 +902,48 @@ mod tests {
         out_of_section[0x604..0x608].copy_from_slice(&0x3000u32.to_le_bytes());
         let prog = crate::pe::load_pe(&out_of_section, "pdata_cross_section").expect("load PE");
         assert!(parse_runtime_functions(&prog).is_empty());
+    }
+
+    #[test]
+    fn chained_jump_table_is_excluded_only_after_full_dispatch_and_target_proof() {
+        let bytes = chained_table_fixture(2);
+        let prog = crate::pe::load_pe(&bytes, "verified_jump_table").expect("load PE");
+        let report = parse_runtime_functions_report(&prog);
+
+        assert_eq!(report.rejected_jump_tables.len(), 1);
+        assert_eq!(report.rejected_jump_tables[0].function.begin_rva, 0x1040);
+        assert!(report.rejected_jump_tables[0]
+            .reason
+            .contains("all destinations are instruction starts in the owner code range"));
+        assert_eq!(report.functions.len(), 2);
+        assert!(report.functions.iter().any(|rf| rf.begin_rva == 0x1000));
+        assert!(report.functions.iter().any(|rf| rf.begin_rva == 0x1008));
+
+        let mut prog = crate::pe::load_pe(&bytes, "verified_jump_table_analyzer").expect("load PE");
+        let analysis = crate::analyzers::run_analyzers(&mut prog, &["Function Start Search"])
+            .expect("run function start search");
+        assert!(analysis.results[0]
+            .message
+            .contains("excluded 1 verified CHAININFO jump-table data range(s) at 0x140001040"));
+    }
+
+    #[test]
+    fn chained_record_with_incomplete_index_coverage_is_retained() {
+        let bytes = chained_table_fixture(3);
+        let prog = crate::pe::load_pe(&bytes, "incomplete_jump_table").expect("load PE");
+        let report = parse_runtime_functions_report(&prog);
+
+        assert!(report.rejected_jump_tables.is_empty());
+        assert_eq!(report.functions.len(), 3);
+        assert!(report.functions.iter().any(|rf| rf.begin_rva == 0x1040));
+
+        let mut prog =
+            crate::pe::load_pe(&bytes, "incomplete_jump_table_analyzer").expect("load PE");
+        let analysis = crate::analyzers::run_analyzers(&mut prog, &["Function Start Search"])
+            .expect("run function start search");
+        assert!(!analysis.results[0]
+            .message
+            .contains("excluded 1 verified CHAININFO jump-table"));
     }
 
     #[test]
